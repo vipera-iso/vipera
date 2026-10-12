@@ -1,4 +1,5 @@
 models/
+bench/results/
 *.gguf
 __pycache__/
 .venv/

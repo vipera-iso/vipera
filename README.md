@@ -71,6 +71,29 @@ python3 -m vipera plan models/deepseek-v2-lite-Q4_K_M.gguf \
 python3 -m unittest discover -s tests -t .
 ```
 
+## Benchmark
+
+`llama-bench` reports t/s but not what a weak machine actually pays. `bench/` wraps it and
+records peak RSS, peak VRAM and disk read bytes as well.
+
+```bash
+python3 -m bench.bench \
+    --bin ~/dev/llama.cpp/build/bin/llama-bench \
+    --model models/deepseek-v2-lite-Q4_K_M.gguf \
+    --ngl 0 --threads 4 --json bench/results/baseline.json
+```
+
+Harness validation only — a 260K-parameter toy model, CPU-only, 4 threads:
+
+```
+ok True · exit 0 · peak RSS 1.2 MiB · disk read 0.0 MiB
+  pp128   92234.97 t/s
+  tg64    14775.72 t/s
+```
+
+Those confirm the harness runs; they say nothing about the target MoE, which still needs a
+real model run.
+
 What it computes today:
 
 | Command | Output |
