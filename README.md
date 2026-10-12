@@ -80,6 +80,9 @@ python3 -m vipera trace trace.jsonl --arch arch/glm-5.3-flash.toml \
 python3 -m vipera schedule arch/glm-5.3-flash.toml --target hw/gtx1650.toml \
     --quant q4-experts --trace trace.jsonl --cache-policy hot --eval-tail 0.3
 
+# which experts survive a given sparsity, and how much routing mass that keeps
+python3 -m vipera prune trace.jsonl --arch arch/olmoe-1b-7b.toml --target-mass 0.95
+
 # the LLM-PC-OPT instance: dense Llama-3-70B on 8 GB VRAM / 32 GB RAM / 3 GB/s SSD
 python3 -m vipera schedule arch/llama3-70b.toml --target hw/llama70b-pc.toml --quant q4-experts --context 4096
 
@@ -127,10 +130,12 @@ constrained budget against the size-matched ceiling:
 | 25% | 71.1% | 0.75× | **0.97×** | 0.93× |
 | 50% | 94.1% | 0.99× | 0.99× | 0.98× |
 
-Two corrections this bought: on *stationary* real routing **LFU beats `hot`**
-(aging only pays when the distribution moves), and **per-layer allocation does not
-help** — a global frequency-ordered pool already is the greedy marginal
-allocation. Details in [`docs/ROADMAP.md`](docs/ROADMAP.md) §8.
+Three corrections this bought: on *stationary* real routing **LFU beats `hot`**
+(aging only pays when the distribution moves — confirmed on real topic drift in
+§10), **per-layer allocation does not help** (§8), and expert pruning is **not
+free**: at the 5% sparsity the scheduler assumed, only 21–25% of routing mass
+survives, so ~53–71% of experts must be kept to hold 95% of the mass (§11).
+Details in [`docs/ROADMAP.md`](docs/ROADMAP.md) §8–§11.
 
 Harness validation only — a 260K-parameter toy model, CPU-only, 4 threads:
 
@@ -150,6 +155,7 @@ What it computes today:
 | `analyze` | layers, expert count, and bytes split into resident / router / shared-expert / "other" / routable-expert buckets |
 | `plan` | a `*.vipera.json` residency manifest: how many bytes go to VRAM, RAM, and disk spill, plus warnings |
 | `trace` | a routing trace's skew (entropy) and the **static-cache hit ceiling at the size the schedule will actually use** |
+| `prune` | the per-layer keep-set that retains a target routing mass, next to what uniform pruning would keep |
 | `schedule` | modelled bytes/token and tok/s, plus the cache hit rate **and the ceiling at the same cache size** (`policy / ceiling` ratio) |
 
 The planner is **size-driven** for now: it cannot rank *which* experts are hot until routing traces

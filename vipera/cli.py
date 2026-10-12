@@ -25,6 +25,7 @@ from .schedule import (
     plan_residency,
     simulate,
 )
+from .prune import dumps as prune_dumps, mass_curve, plan_from_trace
 from .scoring import local_llm_16gb_score
 from .trace import (
     TraceError,
@@ -242,6 +243,45 @@ def cmd_trace(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_prune(args: argparse.Namespace) -> int:
+    """How much of the routing mass survives a given expert sparsity?"""
+    arch = Architecture.from_toml(args.arch)
+    routing = load_trace(args.trace)
+    validate_trace(routing, n_layers=arch.n_layers, n_experts=arch.n_experts,
+                   top_k=arch.top_k)
+    plan = plan_from_trace(routing, n_experts=arch.n_experts,
+                           target_mass=args.target_mass)
+    if args.json:
+        out = plan.as_dict()
+        out["mass_curve"] = mass_curve(
+            routing, n_experts=arch.n_experts,
+            fractions=[0.05, 0.10, 0.25, 0.50, 0.75],
+        )
+        json.dump(out, sys.stdout, indent=2)
+        sys.stdout.write("\n")
+        return 0
+
+    print(f"trace         {args.trace}")
+    print(f"architecture  {arch.name}  ({arch.n_experts} experts/layer)")
+    print(f"target mass   {plan.target_mass:.0%}")
+    print()
+    print(f"mass-based keep-set: {plan.total_keep} of {plan.total_experts} experts "
+          f"({plan.keep_fraction * 100:.2f}% of the pool), "
+          f"retaining {plan.mean_kept_mass * 100:.1f}% of routing mass")
+    print()
+    print(f"{'sparsity':>9}{'mass kept':>12}{'if uniform':>12}{'gain':>9}")
+    for row in mass_curve(routing, n_experts=arch.n_experts,
+                          fractions=[0.05, 0.10, 0.25, 0.50, 0.75]):
+        f = row["fraction"]
+        print(f"{f * 100:>8.0f}%{row['kept_mass'] * 100:>11.1f}%"
+              f"{row['uniform_kept_mass'] * 100:>11.1f}%"
+              f"{(row['kept_mass'] - row['uniform_kept_mass']) * 100:>+8.1f}")
+    print()
+    print("retained routing mass is a NECESSARY condition, not a quality result: "
+          "building and running pruned weights is S9+S10")
+    return 0
+
+
 def cmd_sweep(args: argparse.Namespace) -> int:
     """Run a fixed set of layer-level strategies and print them side by side."""
     arch = Architecture.from_toml(args.arch)
@@ -374,6 +414,14 @@ def build_parser() -> argparse.ArgumentParser:
     sc2.add_argument("--quality", type=float, default=99.0, help="quality %% of FP16 (input)")
     sc2.add_argument("--power", type=float, default=65.0, help="average watts (input)")
     sc2.set_defaults(func=cmd_score)
+
+    pr = sub.add_parser("prune", help="choose which experts to keep from a routing trace")
+    pr.add_argument("trace")
+    pr.add_argument("--arch", required=True, help="architecture profile (TOML)")
+    pr.add_argument("--target-mass", type=float, default=0.95,
+                    help="routing mass the keep-set must retain (default 0.95)")
+    pr.add_argument("--json", action="store_true")
+    pr.set_defaults(func=cmd_prune)
 
     sw = sub.add_parser("sweep", help="compare layer-level optimizations on the same model+machine")
     sw.add_argument("arch", help="architecture profile (TOML)")

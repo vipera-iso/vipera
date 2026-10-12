@@ -520,4 +520,75 @@ Ratio to the size-matched static ceiling:
 
 **Next sub-problem:** S10 (quality harness) — the largest measured win for the
 100B target is expert pruning + speculative decoding (×12 over baseline, §9), and
-neither has a measured quality cost yet.
+neither has a measured quality cost yet. *Round 6 attacked the pruning half and
+found the ×12 rests on an assumption real routing refutes — see §11.*
+
+---
+
+## 11. Autonomous loop — round 6 log (what does pruning actually cost?)
+
+§9 offered expert pruning as the lever that takes the 100B target from 1.08 to
+12.87 tok/s. Every one of those rows came from `Optimizations.prune_experts`,
+which shrinks the pool and then lets the routing model run over the *reduced*
+pool — i.e. it assumes the surviving experts carry the same fraction of the
+routing as before, **as if pruning were free**. A captured trace can test that
+directly.
+
+### Method
+`vipera prune <trace> --arch <arch.toml>` ranks each layer's experts by selection
+frequency and reports (a) the smallest keep-set that retains a target mass, and
+(b) the mass retained at a given sparsity, next to what a **uniform** keep-set of
+the same size would retain.
+
+```
+python3 -m vipera prune bench/results/olmoe-1b-7b-511tok.jsonl --arch arch/olmoe-1b-7b.toml
+python3 -m vipera prune bench/results/olmoe-multitopic-545tok.jsonl --arch arch/olmoe-1b-7b.toml
+```
+
+### Result 1 — mass-based selection is worth a great deal
+| sparsity | mass kept, 1 topic | if uniform | mass kept, 5 topics | if uniform |
+|---|---|---|---|---|
+| 5% | 24.7% | 5.0% | 21.3% | 5.0% |
+| 10% | 40.7% | 10.0% | 34.0% | 10.0% |
+| 25% | 70.9% | 25.0% | 60.4% | 25.0% |
+| 50% | 93.5% | 50.0% | 83.9% | 50.0% |
+| 75% | 99.7% | 75.0% | 96.2% | 75.0% |
+
+*Which* experts you keep is worth **+16 to +46 points of retained mass** at the
+same sparsity. "Prune to 5%" is meaningless until the keep-set is specified.
+
+### Result 2 — and pruning to fit the cache is therefore *not* free
+| trace | keep-set for 95% of routing mass |
+|---|---|
+| one topic (511 tok) | **52.8%** of the pool (541 of 1024 experts) |
+| five topics (545 tok) | **71.1%** of the pool (728 of 1024 experts) |
+
+At the 5% sparsity §9 assumed, only **21–25%** of routing mass survives.
+
+**Findings.**
+1. **The §9 ×12 figure is not attainable for free.** Its `prune 5% → 100% cache
+   hit → 1.95 tok/s` row now stands as: 5% of experts, ~75–79% of the router's
+   mass discarded, quality unmeasured. The row should be read as an upper bound
+   on speed *for a given quality budget*, not as an available configuration.
+2. **The speed/quality trade is now quantitative**, which it was not before: for
+   the 100B model, holding 95% of routing mass means keeping ~53–71% of a 47 GiB
+   expert pool = **25–33 GiB** — still 2–3× the 11.4 GiB cache, so *even the
+   quality-preserving prune does not make it fit*. The pool simply does not shrink
+   fast enough per point of mass kept.
+3. **Topic diversity makes pruning harder**: the same 95% mass needs 53% of the
+   pool on one topic but 71% across five. A pruning policy tuned on one workload
+   will over-prune the next.
+4. This is why the lever for the 100B target is **streaming, not pruning**: §9
+   already showed it is I/O-bound at Q4 (1.08 tok/s, 1.63 GB/token), and pruning
+   cannot close the pool/cache gap without spending the quality budget.
+
+### What is still not measured
+The honest limit of this round: **retained routing mass is a necessary condition,
+not a quality result.** It bounds how much of the router's behaviour survives, but
+the real number (perplexity, task accuracy) needs the pruned weights to be built
+as a GGUF and run (S9 + S10). `vipera prune` says what a keep-set preserves; it
+does not say the model still works. Treat 95%-mass as a design constraint, not as
+"95% of quality".
+
+**Next sub-problem:** S9 (GGUF writer/packer) — it is now the blocking dependency
+for S10, and therefore for turning every pruning claim above into a quality number.
