@@ -388,4 +388,71 @@ MoE; derived totals +4.3%, active +6.9% vs published). Modelled against
 **Next sub-problem:** S7's second half (measure real GEMV/bandwidth so the
 compute floor stops being a guess), then S10 (quality harness) — because the
 biggest measured win for the 100B target is pruning + speculation, and neither has
-a measured quality cost yet.
+a measured quality cost yet. *Round 4 did the measurement half — see §9.*
+
+---
+
+## 9. Autonomous loop — round 4 log (measure the machine, not the guess)
+
+Round 3 ended with a caveat: the "100B is compute-bound" verdict rested on
+`cpu_gflops = 50`, an estimate never measured here. This round measures it — and
+the verdict changes.
+
+### Method
+* `bench/hwprobe.c` — a small C probe. `read`/`copy` stream a 256 MiB buffer
+  (≫ 8 MiB L3) so they measure DRAM; `gemv` multiplies a L3-resident 512x1024
+  matrix so it is ALU-bound. Both kernels use 8 independent accumulators +
+  OpenMP: with a single accumulator the loop is *latency*-bound and the first
+  draft of this probe reported **4 GB/s** where the machine does ~44.
+* `bench/bench.py` — the existing harness, wrapping `llama-bench` on a real model.
+
+### Measured (this laptop, 2026-10-12)
+| quantity | measured | was in `hw/gtx1650.toml` |
+|---|---|---|
+| streaming read | **43–46 GB/s** | 40.0 (estimate) |
+| streaming copy (r+w) | 36 GB/s | — |
+| GEMV, 8 threads | **110 GFLOP/s** | — |
+| GEMV, 1 thread | 20.8 GFLOP/s | — |
+| OLMoE-1B-7B Q4_K_M decode | **41.2 tok/s** (pp512 136.5) | — |
+
+`hw/gtx1650.toml` now carries `ram_bw_gbs = 44.0` and `cpu_gflops = 110.0`, each
+annotated with how it was obtained.
+
+### Validation — the model now matches a real run
+OLMoE Q4 needs ~1.18B active parameters; at 41.2 tok/s that is an effective
+`2·1.18e9·41.2 ≈ 97 GFLOP/s`, so the ALU probe overstates the real quantized
+kernel by ~12%. Feeding the measured constant into the scheduler:
+
+| prediction source | modelled | measured | error |
+|---|---|---|---|
+| real 511-token trace, `cpu_gflops=110` | **44.6 tok/s** | 41.2 | **+8.3%** |
+| modelled Zipf, 128 steps | 36.9 tok/s | 41.2 | −10.4% |
+| same runs with the old `cpu_gflops=50` | 21 tok/s | 41.2 | −49% |
+
+Both are inside S8's "within 25%" criterion; the old constant was off by **2×**.
+
+### Correction — the 100B verdict flips
+Re-running `vipera sweep arch/glm-4.5-air.toml` with the measured constant:
+
+| strategy | round 3 (gflops=50) | round 4 (gflops=110) | bound |
+|---|---|---|---|
+| q4 experts | 1.07 | **1.08** | ~~compute~~ → **io** |
+| + prune 25% experts | 1.75 | **2.12** | io |
+| + prune 5% experts | 1.95 | **4.29** | compute |
+| + prune 5% + draft ×3 | 5.85 | **12.87** | compute |
+| + drop 20 layers | 10.76 | **23.67** | compute |
+
+**The round-3 conclusion "the 100B target is compute-bound, so better caching
+would not speed it up" was an artefact of the guess.** At Q4 GLM-4.5-Air is
+**I/O-bound** (1.08 tok/s, 1.63 GB/token off disk) — so streaming and caching work
+*is* on the critical path for the 100B goal. It only becomes compute-bound after
+the expert pool is pruned enough to hit 100% in cache, at which point the levers
+are compression and speculation (×12 vs baseline).
+
+### Still unmeasured
+* `vram_bw_gbs` (192) and `disk_bw_gbs` (2.0) remain datasheet/earlier values;
+  no GPU-bandwidth or `fio`/`iozone` probe has been run on this box.
+* The probe's GEMV is **f32**; real kernels dequantize. The 12% gap above is the
+  only calibration between the two, from one model at one quant.
+* Everything here is CPU-only, single model, and — for GLM-4.5-Air — still
+  **modelled**, since a 100B model cannot run on this laptop to be measured.

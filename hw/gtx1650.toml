@@ -1,5 +1,16 @@
 # Target: the machine measured on 2026-10-12 (see README).
 # Numbers are MiB as reported by the OS, not marketing values.
+#
+# Provenance of the tuning constants (round 3, ROADMAP §9):
+#   ram_bw_gbs   MEASURED by bench/hwprobe.c: 43-46 GB/s streaming read (256 MiB
+#                buffer, 8 threads). Was 40.0, an estimate.
+#   cpu_gflops   MEASURED by bench/hwprobe.c: 110 GFLOP/s ALU-bound GEMV on a
+#                L3-resident 512x1024 matrix, 8 threads (20.8 single-threaded).
+#                Cross-checked against a real model: OLMoE-1B-7B Q4_K_M decodes
+#                at 41.2 tok/s here (llama-bench, ngl=0), i.e. an effective
+#                2*1.18e9*41.2 = ~97 GFLOP/s. Was 50.0, an estimate.
+#   vram_bw_gbs  NOT measured here (no GPU bandwidth probe); datasheet figure.
+#   disk_bw_gbs  NOT measured here (no fio/iozone run yet); datasheet/earlier note.
 name = "gtx1650-laptop"
 vram_mb = 4096          # GTX 1650 Max-Q
 ram_mb = 15360          # 15 GiB, no swap
@@ -11,11 +22,12 @@ vram_headroom_mb = 512
 ram_headroom_mb = 1536
 
 # Memory tiers in GB/s (decimal). These decide how long a byte costs, so they
-# belong to the machine description. VRAM/RAM are the usual ceiling figures for
-# this class of part; disk is the measured DRAM-less SN530 sequential read.
-vram_bw_gbs = 192.0   # GTX 1650 Max-Q, ~192 GB/s
-ram_bw_gbs = 40.0     # DDR4-3200 dual channel, ~40 GB/s practical
-disk_bw_gbs = 2.0     # WD SN530 DRAM-less NVMe, ~2 GB/s
-# Effective CPU throughput for the scheduler's compute floor. i5-11300H with
-# AVX2, usable GEMV throughput after dequant overhead.
-cpu_gflops = 50.0
+# belong to the machine description.
+vram_bw_gbs = 192.0   # GTX 1650 Max-Q, ~192 GB/s (datasheet, not measured here)
+ram_bw_gbs = 44.0     # MEASURED: 43-46 GB/s streaming read (bench/hwprobe.c)
+disk_bw_gbs = 2.0     # WD SN530 DRAM-less NVMe, ~2 GB/s (not re-measured here)
+# Effective CPU throughput for the scheduler's compute floor (GFLOP/s).
+# MEASURED: 110 GFLOP/s ALU-bound GEMV; corroborated by a real 41.2 tok/s OLMoE
+# decode (~97 effective GFLOP/s), so the ALU probe slightly overstates the real
+# quantized kernel. Feeding 110 keeps the modelled and measured rates within ~13%.
+cpu_gflops = 110.0

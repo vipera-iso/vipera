@@ -113,13 +113,18 @@ disk bytes per token for each of the 45 layers).
 
 ## 8. Assumptions to attack (in order of leverage)
 
-1. **`cpu_gflops = 50`** in `hw/gtx1650.toml` — the compute floor is *assumed*,
-   not measured. If it is too low, the compute-bound ceiling is overstated.
+1. **`cpu_gflops`** was assumed to be 50; it is now **measured at 110 GFLOP/s**
+   (ROADMAP §9, `bench/hwprobe.c`), corroborated by a real model running at
+   41.2 tok/s. Every `tok/s` figure below therefore predates the measurement and
+   is roughly **10% pessimistic**; the *verdicts* (I/O-bound, infeasible) do not
+   change, because these models were already I/O-bound.
 2. **Routing skew is modelled** (`Zipf(1.0)`, fixed seed), not a real trace.
    Real MoE routing is often more skewed, which raises the cache hit rate; a
-   real trace would move the hit-rate column.
-3. **Bandwidths** (192 / 40 / 2 GB/s) are class figures, not measured here. The
-   disk number is the one that matters most.
+   real trace would move the hit-rate column. Round 3 captured one real trace
+   (ROADMAP §8) — it made the two policies diverge sharply.
+3. **Bandwidths**: RAM is now **measured at 44 GB/s** (was 40). VRAM (192) and
+   disk (2.0 GB/s) are still class figures, not measured here. The disk number is
+   the one that matters most.
 4. **KV cache** is modelled at 2048 tokens (76 MiB). At the model's 1M-token
    context it grows to ~37 GiB and would not fit at all.
 
