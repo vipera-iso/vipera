@@ -1,7 +1,7 @@
-# DESIGN — edge-llm: chạy LLM/MoE trên thiết bị yếu
+# DESIGN — vipera: lớp tối ưu file model để chạy LLM/MoE trên máy yếu
 
-> Kế hoạch thiết kế hệ thống. Phần thuật toán sâu ở [`ALGORITHMS.md`](ALGORITHMS.md).
-> Trả lời bằng tiếng Việt; số in đậm là đo trên máy hoặc suy ra từ đo.
+> Kế hoạch thiết kế hệ thống. Định vị ở [`OPTIMIZER.md`](OPTIMIZER.md) (lớp tối ưu file model),
+> thuật toán sâu ở [`ALGORITHMS.md`](ALGORITHMS.md). Số in đậm là đo trên máy hoặc suy ra từ đo.
 
 ## Bối cảnh & giả định đã chốt
 
@@ -66,7 +66,7 @@ thiết kế/portability, **không** phải kết quả đo. Nếu giả định
 
 ## 3. So sánh với FreeToken và AirLLM
 
-| Tiêu chí | FreeToken | AirLLM | **edge-llm (đề xuất)** |
+| Tiêu chí | FreeToken | AirLLM | **vipera (đề xuất)** |
 |---|---|---|---|
 | Trọng tâm | MoE serving trên PC consumer | layer-wise streaming | **MoE offload + expert cache trên máy yếu** |
 | Đơn vị offload | expert (fractional) | layer | expert + block |
@@ -75,10 +75,10 @@ thiết kế/portability, **không** phải kết quả đo. Nếu giả định
 | Tăng tốc công bố | CPU–GPU 84–96% (T4), 11–89% (A10) | chạy 671B trên 12 GB | **mục tiêu: ≥ 2× token/s vs llama.cpp CPU-offload mặc định trên máy này** |
 | Phù hợp mobile | một phần | không | một phần (thiết kế tách backend) |
 
-**edge-llm cải tiến gì:** FreeToken tối ưu cho GPU consumer *đủ mạnh*; AirLLM tối ưu *vượt VRAM*.
+**vipera cải tiến gì:** FreeToken tối ưu cho GPU consumer *đủ mạnh*; AirLLM tối ưu *vượt VRAM*.
 Cả hai giả định nhiều RAM. Máy mục tiêu ở đây (**4 GB VRAM + 15 GB RAM, không swap, NVMe DRAM-less**)
 rơi đúng vào vùng mà **cả hai đều dở**: model vừa RAM nhưng quá VRAM, và đĩa chậm. Đóng góp của
-edge-llm là **bộ đệm expert thông minh + dự đoán routing để giảm I/O**, chứ không phải "stream nhanh".
+vipera là **bộ đệm expert thông minh + dự đoán routing để giảm I/O**, chứ không phải "stream nhanh".
 
 ---
 
@@ -89,6 +89,7 @@ edge-llm là **bộ đệm expert thông minh + dự đoán routing để giảm
 | **P0** | Baseline: build llama.cpp, chạy DeepSeek-V2-Lite Q4 (CPU-only & partial GPU), đo tokens/s, RAM/VRAM | bảng baseline trung thực | 1 |
 | **P1** | Quant + KV: so Q4_K_M/Q3_K_M, KV q8; đo chất lượng (perplexity) vs tốc độ | bảng đánh đổi | 1–2 |
 | **P2** | ★ **Expert cache (LRU/LFU) + routing prediction/prefetch** trên MoE | cache hit %, tokens/s vs P0 | 2–3 |
+| **P2b** | ★ **Optimizer tầng file**: reorder expert theo tần suất + residency manifest | bytes đọc/token, thời gian nạp lạnh | 3 |
 | **P3** | CPU + dGPU co-execution (overlap layer N/N+1) | tokens/s vs P2 | 3 |
 | **P4** | KV paged + speculative (Qwen2.5-0.5B draft) | speedup | 4 (nếu kịp) |
 | **P5** | API OpenAI-compatible + CLI + model manager | `curl` chạy được | 4 |
