@@ -456,3 +456,68 @@ are compression and speculation (×12 vs baseline).
   only calibration between the two, from one model at one quant.
 * Everything here is CPU-only, single model, and — for GLM-4.5-Air — still
   **modelled**, since a 100B model cannot run on this laptop to be measured.
+
+---
+
+## 10. Autonomous loop — round 5 log (does ageing help on *real* drift?)
+
+Round 2 claimed the `hot` policy wins when routing moves (0.92× vs LFU's 0.71×),
+but that was measured on a **synthetic** shift — expert ids rotated by half. Round
+3 then found the opposite on a **stationary** real trace. Round 5 tests the claim
+the way it would actually be used: real routing, real topic changes.
+
+### Method
+Five prompts on unrelated topics (Python code, an irrationality proof, a
+Vietnamese prose paragraph, photosynthesis, a SQL query), 109 tokens each,
+captured separately and concatenated into **one 545-token session with four topic
+changes**. Each segment's routing is real; only the junction is artificial.
+
+```
+python3 -m bench.capture_trace --bin ~/dev/llama.cpp/build/bin/llama-cli \
+    --model olmoe-q4km.gguf --tokens 110 --threads 8 --ngl 0 \
+    --prompts-file prompts.txt --out olmoe-multitopic.jsonl
+```
+
+Trace kept at `bench/results/olmoe-multitopic-545tok.jsonl`; the two claims below
+are now regression tests (`TestRealMultiTopicShift`).
+
+### Result — the round-2 claim holds on real routing
+Ratio to the size-matched static ceiling:
+
+| window | 102 slots (10%) | | | 256 slots (25%) | | |
+|---|---|---|---|---|---|---|
+| | ceiling | LFU | `hot` | ceiling | LFU | `hot` |
+| whole session | 35.5% | 0.97× | **1.06×** | 60.8% | 0.98× | **1.01×** |
+| last 30% (post-shift) | 37.1% | 0.93× | **0.96×** | 62.0% | 0.93× | **0.97×** |
+| final segment | 40.8% | 0.91× | **0.92×** | 66.2% | 0.89× | **0.90×** |
+| each topic alone (mean) | 41.3% | 0.91× | 0.91× | 67.6% | 0.93× | 0.91× |
+
+**Findings.**
+1. **Ageing wins under real drift, in every post-shift window and at both
+   budgets.** This is the first confirmation of round 2 that is not an artefact
+   of the synthetic shift generator.
+2. **On a single real topic it wins nothing** (0.91× vs 0.91×), so the effect is
+   genuinely about non-stationarity, not a free gain.
+3. **The whole-session `hot` ratio exceeds 1.0** (1.06×) — an adaptive cache beats
+   a static one under drift. This is the third independent sighting of the same
+   point (§8, §9), and it means "static ceiling" must always be read as
+   *stationary* upper bound.
+4. **Real shifts are far milder than the synthetic one, so round 2 overstated the
+   size of the win.** Synthetic: 0.71× → 0.92× (**+21 points**). Real: 0.93× →
+   0.97× (**+4 points**). The direction survives; the magnitude does not. Any
+   future headline should quote the real number.
+5. Real per-topic ceilings at a 10% budget (36–48%) sit **below** the synthetic
+   Zipf trace's (~61%) for comparable settings: this model's routing is *less*
+   concentrated than `Zipf(skew=1.0)`. The synthetic generator is therefore not
+   reliably conservative in either direction — which is the standing argument for
+   captured traces over modelled ones.
+
+### Still unknown
+* Five prompts is not a workload. Nothing here says how often real traffic shifts,
+  which is what decides whether ageing pays in aggregate.
+* Only OLMoE (16 layers, 64 experts) was captured; the effect on a 100B model is
+  modelled, not measured.
+
+**Next sub-problem:** S10 (quality harness) — the largest measured win for the
+100B target is expert pruning + speculative decoding (×12 over baseline, §9), and
+neither has a measured quality cost yet.

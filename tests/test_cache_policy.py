@@ -1,3 +1,4 @@
+import json
 import os
 import unittest
 
@@ -144,6 +145,51 @@ class TestPerLayerAllocation(unittest.TestCase):
                     for e in range(4):
                         hits += cache.access((layer, e))
             self.assertGreater(hits, 0)
+
+
+REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+MULTI_TOPIC = os.path.join(REPO, "bench", "results", "olmoe-multitopic-545tok.jsonl")
+
+
+def real_session():
+    with open(MULTI_TOPIC) as f:
+        return [json.loads(line)["layers"] for line in f if line.strip()]
+
+
+def window_hit_rate(trace, policy, capacity, *, lo=0):
+    cache = ExpertCache(capacity, policy, n_layers=len(trace[0]))
+    hits = misses = 0
+    for ti, token in enumerate(trace):
+        before_h, before_m = cache.hits, cache.misses
+        for layer, experts in enumerate(token):
+            for e in experts:
+                cache.access((layer, e))
+        if ti >= lo:
+            hits += cache.hits - before_h
+            misses += cache.misses - before_m
+    return hits / (hits + misses)
+
+
+@unittest.skipUnless(os.path.exists(MULTI_TOPIC),
+                     "real captured trace not present")
+class TestRealMultiTopicShift(unittest.TestCase):
+    """Regression tests on a real trace: 5 topics captured from OLMoE."""
+
+    def test_hot_beats_lfu_across_a_real_topic_changing_session(self):
+        # Round 2 claimed ageing wins when the distribution moves. This is the
+        # first check of that claim on real routing rather than a synthetic shift.
+        trace = real_session()
+        lfu = window_hit_rate(trace, "lfu", 102)
+        hot = window_hit_rate(trace, "hot", 102)
+        self.assertGreater(hot, lfu + 0.015)
+
+    def test_policies_are_close_on_one_real_topic(self):
+        # Within a single topic the trace is stationary, so ageing buys nothing;
+        # the two policies should be within noise of each other.
+        segment = real_session()[:109]
+        lfu = window_hit_rate(segment, "lfu", 102)
+        hot = window_hit_rate(segment, "hot", 102)
+        self.assertLess(abs(hot - lfu), 0.02)
 
 
 class TestGlobalCeiling(unittest.TestCase):

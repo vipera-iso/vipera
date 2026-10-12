@@ -77,6 +77,28 @@ def summarise(path: str) -> dict:
     }
 
 
+def concat_traces(paths: list[str], out: str) -> int:
+    """Concatenate traces into one session, renumbering `t` from 0.
+
+    Each segment's routing is real; the *jump* between segments is what a change
+    of topic looks like to the router, which is the input a non-stationary cache
+    policy has to survive.
+    """
+    n = 0
+    with open(out, "w") as w:
+        for p in paths:
+            with open(p) as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    rec = json.loads(line)
+                    rec["t"] = n
+                    w.write(json.dumps(rec) + "\n")
+                    n += 1
+    return n
+
+
 def capture(binary: str, model: str, *, prompt: str = DEFAULT_PROMPT, tokens: int = 256,
             threads: int | None = None, ngl: int | None = None, seed: int = 0,
             extra: list[str] | None = None, timeout: float | None = None,
@@ -146,10 +168,40 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--timeout", type=float, default=None)
     p.add_argument("--out", help="write the trace here")
+    p.add_argument("--prompts-file",
+                   help="capture one trace per line and concatenate them into a "
+                        "single multi-topic session (a real distribution shift)")
     p.add_argument("extra", nargs="*", help="extra flags passed through to llama-cli")
     args = p.parse_args(argv)
 
     binary = shutil.which(args.bin) or args.bin
+
+    if args.prompts_file:
+        if not args.out:
+            print("error: --prompts-file needs --out")
+            return 2
+        with open(args.prompts_file) as f:
+            prompts = [ln.strip() for ln in f if ln.strip()]
+        if not prompts:
+            print(f"error: {args.prompts_file} has no prompts")
+            return 2
+        with tempfile.TemporaryDirectory() as tmp:
+            segs = []
+            for i, prompt in enumerate(prompts):
+                seg = os.path.join(tmp, f"seg{i}.jsonl")
+                info = capture(binary, args.model, prompt=prompt, tokens=args.tokens,
+                               threads=args.threads, ngl=args.ngl, seed=args.seed + i,
+                               extra=args.extra, timeout=args.timeout, out=seg)
+                if not info.get("ok"):
+                    print(f"segment {i} failed:")
+                    print(format_table(info))
+                    return 1
+                segs.append(seg)
+                print(f"segment {i}: {info['tokens']} tokens  ({prompt[:48]}...)")
+            total = concat_traces(segs, args.out)
+        print(f"\nconcatenated {len(segs)} segments -> {args.out} ({total} tokens)")
+        return 0
+
     info = capture(binary, args.model, prompt=args.prompt, tokens=args.tokens,
                    threads=args.threads, ngl=args.ngl, seed=args.seed,
                    extra=args.extra, timeout=args.timeout, out=args.out)
