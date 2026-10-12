@@ -18,9 +18,22 @@ from .analyze import analyze, to_dict
 from .arch import Architecture
 from .gguf import GGUFError, read_gguf
 from .manifest import Target, dumps, plan
-from .schedule import Optimizations, Quant, dumps as schedule_dumps, simulate
+from .schedule import (
+    Optimizations,
+    Quant,
+    dumps as schedule_dumps,
+    plan_residency,
+    simulate,
+)
 from .scoring import local_llm_16gb_score
-from .trace import TraceError, dumps as trace_dumps, load_trace, stats as trace_stats, validate as validate_trace
+from .trace import (
+    TraceError,
+    dumps as trace_dumps,
+    global_cache_ceiling,
+    load_trace,
+    stats as trace_stats,
+    validate as validate_trace,
+)
 
 MIB = 1024 * 1024
 
@@ -116,8 +129,13 @@ def cmd_schedule(args: argparse.Namespace) -> int:
         draft_tokens=args.draft_tokens,
     )
     routing = None
+    # With a trace, use all of it unless the caller asked for a shorter run —
+    # silently capping a 100k-token trace at the modelled default of 8 steps is
+    # what made round 1's hit-rate numbers a 10-token sample.
+    tokens = args.tokens
     if args.trace:
-        routing = load_trace(args.trace, limit=args.tokens + 2)
+        limit = None if tokens is None else tokens + 2
+        routing = load_trace(args.trace, limit=limit)
         validate_trace(routing, n_layers=arch.n_layers, n_experts=arch.n_experts,
                        top_k=arch.top_k)
     result = simulate(
@@ -125,10 +143,11 @@ def cmd_schedule(args: argparse.Namespace) -> int:
         quant=_QUANTS[args.quant](),
         optimizations=opt,
         context=args.context,
-        tokens=args.tokens,
+        tokens=tokens if tokens is not None else 8,
         prefetch=not args.no_prefetch,
         cache_policy=args.cache_policy,
         routing=routing,
+        eval_tail=args.eval_tail,
     )
     r = result.manifest["residency"]
     p = result.manifest["performance"]
@@ -152,7 +171,14 @@ def cmd_schedule(args: argparse.Namespace) -> int:
     print(f"  KV @ {kv['tokens']} ctx       {_fmt(kv['kv_bytes'])}")
     print()
     print("performance (modelled)")
-    print(f"  cache hit rate       {result.hit_rate * 100:.1f}%  ({result.manifest['expert_cache']['routing_source']})")
+    ec = result.manifest["expert_cache"]
+    print(f"  cache hit rate       {result.hit_rate * 100:.1f}%  ({ec['routing_source']})")
+    # The static ceiling is computed on this very routing at this very cache
+    # size, so the ratio can never be a mismatched-baseline artefact again.
+    print(f"  static ceiling       {ec['static_cache_ceiling'] * 100:.1f}%  "
+          f"({ec['slots']} slots = {ec['per_layer_fraction'] * 100:.2f}% of experts/layer)")
+    if ec["ceiling_ratio"] is not None:
+        print(f"  policy / ceiling     {ec['ceiling_ratio']:.2f}x")
     print(f"  bytes/token          {_fmt(result.bytes_per_token)}")
     print(f"  disk bytes/token     {_fmt(result.disk_bytes_per_token)}")
     print(f"  ms/token             {result.ms_per_token:.1f}")
@@ -173,16 +199,43 @@ def cmd_trace(args: argparse.Namespace) -> int:
     arch = Architecture.from_toml(args.arch)
     routing = load_trace(args.trace)
     validate_trace(routing, n_layers=arch.n_layers, n_experts=arch.n_experts, top_k=arch.top_k)
-    s = trace_stats(routing, n_experts=arch.n_experts, cache_fraction=args.cache_fraction)
+
+    # Cache size: derived from the *same* arithmetic `schedule` uses when a
+    # target is given, so the ceiling here is at the size the simulation will
+    # actually have. Without it we fall back to a manual fraction.
+    slots: int | None = None
+    if args.target:
+        target = Target.from_toml(args.target)
+        plan = plan_residency(arch, target, quant=_QUANTS[args.quant]())
+        fraction = plan.per_layer_fraction
+        slots = plan.slots
+        size_source = f"matched to {target.name} / {args.quant} ({slots} slots)"
+    else:
+        fraction = args.cache_fraction if args.cache_fraction is not None else 0.03
+        size_source = f"manual fraction {fraction}"
+
+    s = trace_stats(routing, n_experts=arch.n_experts, cache_fraction=fraction)
     if args.json:
-        sys.stdout.write(trace_dumps(s))
+        out = s.as_dict()
+        out["cache_size_source"] = size_source
+        if slots is not None:
+            out["slots"] = slots
+            out["global_static_cache_hit_ceiling"] = round(
+                global_cache_ceiling(routing, slots), 4)
+        json.dump(out, sys.stdout, indent=2)
+        sys.stdout.write("\n")
         return 0
     print(f"trace         {args.trace}")
     print(f"architecture  {arch.name}")
     print(f"tokens        {s.tokens}   layers {s.layers}   top_k {s.top_k}")
     print(f"mean entropy  {s.mean_entropy:.3f}  (1.0 = uniform, no cache can help)")
-    print(f"static cache  {s.static_cache_fraction * 100:.1f}% of experts -> "
-          f"hit ceiling {s.static_cache_hit_ceiling * 100:.1f}%")
+    print(f"cache size    {size_source}")
+    print(f"  per-layer ceiling  {s.static_cache_fraction * 100:.2f}% of experts/layer "
+          f"-> {s.static_cache_hit_ceiling * 100:.1f}%")
+    if slots is not None:
+        g = global_cache_ceiling(routing, slots)
+        print(f"  global ceiling     {slots} pooled slots -> {g * 100:.1f}%  "
+              "(the size-matched bound a streamed cache compares against)")
     return 0
 
 
@@ -277,7 +330,8 @@ def build_parser() -> argparse.ArgumentParser:
     sc.add_argument("--target", required=True, help="hardware profile (TOML)")
     sc.add_argument("--quant", choices=sorted(_QUANTS), default="fp8")
     sc.add_argument("--context", type=int, default=2048)
-    sc.add_argument("--tokens", type=int, default=8, help="decode steps to simulate")
+    sc.add_argument("--tokens", type=int, default=None,
+                    help="decode steps to simulate; with --trace, defaults to the whole trace")
     sc.add_argument("--no-prefetch", action="store_true", help="serialise I/O and compute")
     sc.add_argument("--prune-experts", type=float, default=1.0,
                     help="fraction of experts kept per layer (1.0 = none pruned)")
@@ -285,15 +339,22 @@ def build_parser() -> argparse.ArgumentParser:
     sc.add_argument("--kv-bits", type=int, default=16, help="KV cache precision (16/8/4)")
     sc.add_argument("--draft-tokens", type=float, default=1.0,
                     help="accepted tokens per target forward pass (MTP/speculative)")
-    sc.add_argument("--cache-policy", choices=["lru", "lfu"], default="lru",
-                    help="expert cache eviction policy")
+    sc.add_argument("--cache-policy", choices=["lru", "lfu", "hot"], default="lru",
+                    help="expert cache eviction policy (hot = admission + pinned hot set)")
     sc.add_argument("--trace", help="routing trace (JSONL) to drive the simulation")
+    sc.add_argument("--eval-tail", type=float, default=0.0,
+                    help="measure only the last fraction of the trace (post-shift window)")
 
     tr = sub.add_parser("trace", help="inspect a routing trace against an architecture")
     tr.add_argument("trace")
     tr.add_argument("--arch", required=True, help="architecture profile (TOML)")
-    tr.add_argument("--cache-fraction", type=float, default=0.03,
-                    help="static cache size as a fraction of experts per layer")
+    tr.add_argument("--target", help="hardware profile; derive the cache size from it "
+                                      "(matched to `schedule`) instead of --cache-fraction")
+    tr.add_argument("--quant", choices=sorted(_QUANTS), default="q4-experts",
+                    help="quantization used when deriving the cache size from --target")
+    tr.add_argument("--cache-fraction", type=float, default=None,
+                    help="static cache size as a fraction of experts per layer "
+                         "(default 0.03 when no --target is given)")
     tr.add_argument("--json", action="store_true")
     tr.set_defaults(func=cmd_trace)
     sc.add_argument("--out", help="directory to write <arch>.vipera.json into")

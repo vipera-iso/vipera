@@ -13,7 +13,7 @@
 | # | Sub-problem | Research question | Input → Output | Depends on | Difficulty | Priority | Success criterion |
 |---|---|---|---|---|---|---|---|
 | **S1** | **Routing trace capture & loader** | Is expert routing skewed and locally consistent enough for a cache to help? | JSONL trace → `routing` structure + skew/entropy/ceiling stats | — | 2 | **5** | **done** — loader+stats+validator, 95 tests, CLI `vipera trace` |
-| **S2** | **Cache policy: pinned hot-set + admission control** | Can a policy reach the static-cache ceiling? | trace + cache size → hit rate | S1 | 3 | 5 | hit rate ≥ 0.9× the static ceiling at the *matched* cache size on a held-out trace (baseline from S1: LFU = 0.70×) |
+| **S2** | **Cache policy: pinned hot-set + admission control** | Can a policy reach the static-cache ceiling? | trace + cache size → hit rate | S1 | 3 | 5 | **done** — `hot` reaches 0.92× on a post-shift trace (LFU 0.71×) and 0.94× stationary; every `schedule` run now prints the ceiling at the *matched* size |
 | **S3** | **Per-layer cache allocation** | How many slots should each layer get? | per-layer frequency → slot budget | S1 | 4 | 4 | ≥ +5 points hit over uniform allocation |
 | **S4** | **Tier-aware bit allocation (TAW)** | Which component should absorb the next lower bit? | sensitivity + tier cost → per-component bits | S10 | 5 | 4 | +10% tok/s at equal perplexity |
 | **S5** | **Energy model + energy-aware tiering (EAT)** | When does SSD offload violate a watt cap? | tier table → J/token | S7 | 3 | 4 | modelled J/token within 20% of wattmeter |
@@ -50,8 +50,9 @@ Topological, weighted by (priority − risk-of-waiting):
    without them; every claim in `PROPOSALS.md`/`RESEARCH.md` currently rests on
    published numbers.
 2. **S1 trace loader** — **done**.
-3. **S2 cache policy**, then **S3 per-layer allocation** — S1 unblocks them and
-   they need no hardware.
+3. **S2 cache policy** — **done**. Next: **S3 per-layer allocation** — the round-2
+   sweep shows the remaining gap to the ceiling is *allocation across layers*, not
+   the eviction rule.
 4. **S6 gated pruning** — needs S1 + S10.
 5. **S5 energy model**, then **S4 tier-aware bits** — need S7/S10 inputs.
 6. **S8**, **S9** — valuable but not on the critical path to a verified result.
@@ -133,7 +134,8 @@ Trace: `synth_trace(64 tokens, 45 layers, 288 experts, top_k=8, skew=1.2)`.
    ~43% the next lever is S10/S4 (bits) or speculative decoding, not more cache.
 
 **Next sub-problem:** S2 (reach the ceiling with pinned hot-set + admission
-control), then S7/S10 to replace modelled inputs with measured ones.
+control), then S7/S10 to replace modelled inputs with measured ones. *Round 2
+did S2 — see §7.*
 
 ---
 
@@ -163,3 +165,113 @@ both are the difference between "cache helps" and "cache is at its ceiling".
 10. **Honest evaluation protocol** — reusable, noise-controlled local-inference benchmark (the missing S7+S10).
 
 Each is impact **4–5** if solved; #1/#2 are the cheapest to attack from here.
+
+---
+
+## 7. Autonomous loop — round 2 log (S2)
+
+**Picked sub-problem: S2** (policy), and while in there, the two measurement
+defects that make any S2 number untrustworthy.
+
+### The two defects fixed first (both from round 1)
+1. **Mismatched ceiling.** `schedule` reported an achieved hit rate at the cache
+   size it derived (789 slots = **6.09%**/layer) next to a ceiling computed at
+   **3%** (48.1%). Fixed by computing the ceiling *inside* `simulate`, on the same
+   routing and at the same slot count — `schedule` now prints
+   `static ceiling … policy / ceiling …x` every run. There is no longer a way to
+   compare the two at different sizes.
+2. **Silent trace truncation.** `schedule --trace` loaded only `--tokens + 2`
+   tokens (default **10**). Round 1's headline numbers were a 10-token sample and
+   did not say so. With a trace it now consumes the **whole** trace unless
+   `--tokens` is set explicitly.
+
+### BƯỚC 3 — Spec
+* **Goal:** a policy that reaches ≥0.9× the *matched* static ceiling — including
+  after the routing distribution moves, where plain LFU cannot recover.
+* **Algorithm (`hot`):** LFU keyed on `(layer, expert)` —
+  * **admission filter:** on a full-cache miss, admit the key only if it has been
+    seen more often than the key it would evict; otherwise it *bypasses* the cache
+    (one-off experts cannot flush the hot set);
+  * **pinned hot set:** the most-frequent keys are pinned against eviction;
+  * **aging:** counters halve every `aging_interval` accesses so the hot set can
+    follow a drifting router.
+* **Refactors so the numbers cannot drift again:** `plan_residency()` is now the
+  single source of the residency/cache arithmetic, shared by `simulate` and by
+  `vipera trace --target`; `global_cache_ceiling()` gives the size-matched bound.
+
+### BƯỚC 4–5 — Code + test
+* `vipera/schedule.py` — `ExpertCache` (`lru`/`lfu`/`hot`), `Plan`,
+  `plan_residency`, `eval_tail` window, manifest `expert_cache.{slots,
+  per_layer_fraction,static_cache_ceiling,ceiling_ratio,eval_window}`.
+* `vipera/trace.py` — `global_cache_ceiling()`, `synth_shift_trace()`.
+* CLI — `--cache-policy hot`, `--eval-tail`, `trace --target/--quant` (derives the
+  matched cache size from the same plan the schedule uses).
+* `tests/test_cache_policy.py` (17 new) + 2 CLI tests → **114 tests, OK**.
+
+### BƯỚC 8 — Reflect (measured, reproducible)
+Generate the traces:
+```
+python3 -c "from vipera.trace import synth_trace, synth_shift_trace, save_trace; \
+  save_trace('/tmp/st.jsonl', synth_trace(200, n_layers=45, n_experts=288, top_k=8, skew=1.2, seed=0)); \
+  save_trace('/tmp/sh.jsonl', synth_shift_trace(200, n_layers=45, n_experts=288, top_k=8, skew=1.2, seed=0))"
+python3 -m vipera schedule arch/glm-5.3-flash.toml --target hw/gtx1650.toml \
+    --quant q4-experts --trace /tmp/sh.jsonl --cache-policy hot --eval-tail 0.3
+```
+`--quant q4-experts` (789 slots) throughout; `--eval-tail 0.3` = last 30% of the
+shift trace, ceiling measured on that same window.
+
+| trace / window | LRU | LFU | **hot** |
+|---|---|---|---|
+| stationary, whole | 0.66× | 0.96× | **0.94×** |
+| shifted, whole | 0.82× | 0.95× | **1.10×** |
+| shifted, post-shift tail | 0.65× | 0.71× | **0.92×** |
+
+**Findings.**
+1. **A static ceiling is not a universal upper bound.** On the shifted trace the
+   `hot` ratio is **1.10×** — an adaptive cache beats a static one under drift.
+   The `< 1` bound only holds while the distribution is stationary, which is worth
+   stating wherever the word "ceiling" appears.
+2. **The S2 criterion is met where it matters.** On the post-shift window `hot`
+   reaches **0.92×** while plain LFU stalls at **0.71×** — the round-1 conclusion
+   ("LFU ≈ ceiling, policy is not the bottleneck") was an artefact of the 10-token
+   sample. Policy *is* a lever once the routing moves.
+3. **Aging is the decisive lever, not admission or pinning.** Ablation at the
+   chosen aging interval (160-token traces, 2 seeds, ratio stationary/shift):
+
+   | variant | stationary | shifted |
+   |---|---|---|
+   | `hot` (admission + pin + aging) | 0.932 | 0.901 |
+   | no admission filter | 0.916 | 0.888 |
+   | no pinning | 0.932 | 0.902 |
+   | no aging | **0.960** | **0.695** |
+
+   Admission buys ~1.5 points; pinning is **neutral** on these traces (it is kept
+   for the stated design and pinned behaviour is unit-tested, but the synthetic
+   sweep does not justify it on its own); aging is what trades stationary
+   accuracy for shift recovery.
+4. **8× capacity is the aging sweet spot** (aging interval sweep, tail ratio
+   stationary / shift-50% / shift-25%):
+
+   | interval | stationary | shift 50% | shift 25% |
+   |---|---|---|---|
+   | none | 0.960 | 0.695 | 0.702 |
+   | 2× | 0.800 | 0.798 | 0.798 |
+   | 4× | 0.888 | 0.884 | 0.885 |
+   | **8×** | **0.932** | **0.901** | **0.902** |
+   | 16× | 0.952 | 0.844 | 0.845 |
+
+   No setting wins both; 8× is the only one that clears 0.9× on all three.
+
+### Known limitations
+* `ExpertCache._victim()` is **O(capacity)** per miss (linear scan for the min
+  frequency). Fine for planning-sized traces; a long captured trace would want a
+  lazy heap. Measured wall-clock on a 200-token trace is seconds, not minutes.
+* Pinning is retained and pinned behaviour is tested, but the sweep above shows it
+  is neutral on synthetic traces; real traces may differ.
+* All numbers remain **synthetic** — `synth_trace`/`synth_shift_trace` are Zipf by
+  construction, so they test the *code and the policy*, not the world. A real
+  captured trace is still S7.
+
+**Next sub-problem:** S3 (per-layer allocation) — the ~0.07–0.08 gap that remains
+on stationary traces is the global pool splitting unevenly across layers, which is
+allocation, not eviction. Then S7/S10 for measured inputs.

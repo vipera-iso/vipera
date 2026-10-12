@@ -168,6 +168,31 @@ def stats(routing: list[list[list[int]]], *, n_experts: int,
     )
 
 
+def global_cache_ceiling(
+    routing: list[list[list[int]]], slots: int, *, warmup: int = 0
+) -> float:
+    """Best hit rate a *static* cache of `slots` keys could achieve.
+
+    Counts ``(layer, expert)`` frequency over ``routing[warmup:]`` and returns the
+    mass fraction of the `slots` most frequent pairs. Unlike `stats()`'s ceiling
+    (which forces an equal, per-layer share), this pools all layers into one
+    global cache — the tightest upper bound for a policy whose slots can hold any
+    layer's expert, and therefore the honest S2 baseline.
+    """
+    counts: dict[tuple[int, int], int] = {}
+    total = 0
+    for token in routing[warmup:]:
+        for layer, experts in enumerate(token):
+            for e in experts:
+                key = (layer, e)
+                counts[key] = counts.get(key, 0) + 1
+                total += 1
+    if total == 0 or slots <= 0:
+        return 0.0
+    top = sorted(counts.values(), reverse=True)[:slots]
+    return sum(top) / total
+
+
 def synth_trace(tokens: int, *, n_layers: int, n_experts: int, top_k: int,
                 skew: float = 1.0, seed: int = 0) -> list[list[list[int]]]:
     """Generate a Zipf-skewed trace, for tests and for `--trace` smoke runs."""
@@ -194,6 +219,29 @@ def synth_trace(tokens: int, *, n_layers: int, n_experts: int, top_k: int,
             token.append(chosen)
         out.append(token)
     return out
+
+
+def synth_shift_trace(tokens: int, *, n_layers: int, n_experts: int, top_k: int,
+                      skew: float = 1.0, seed: int = 0, split: float = 0.5,
+                      shift: int | None = None) -> list[list[list[int]]]:
+    """A non-stationary trace: the hot set moves partway through.
+
+    The first ``split`` fraction is a Zipf trace; the rest is another Zipf trace
+    with expert ids rotated by ``shift`` (default: half the experts), so the
+    experts that were hot early are cold later. This is the input that separates
+    an aging cache (which can follow the shift) from a plain LFU (which cannot).
+    """
+    if shift is None:
+        shift = n_experts // 2
+    first = synth_trace(int(tokens * split), n_layers=n_layers, n_experts=n_experts,
+                        top_k=top_k, skew=skew, seed=seed)
+    second = synth_trace(tokens - int(tokens * split), n_layers=n_layers,
+                         n_experts=n_experts, top_k=top_k, skew=skew, seed=seed + 1)
+    moved = [
+        [[(e + shift) % n_experts for e in layer] for layer in token]
+        for token in second
+    ]
+    return first + moved
 
 
 def save_trace(path: str, routing: list[list[list[int]]]) -> None:

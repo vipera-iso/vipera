@@ -28,6 +28,7 @@ from dataclasses import dataclass, field
 
 from .arch import Architecture
 from .manifest import Target
+from .trace import global_cache_ceiling
 
 GIB = 1024 ** 3
 MB = 1024 * 1024
@@ -161,6 +162,227 @@ def model_bytes(
 
 
 @dataclass
+class Plan:
+    """Residency arithmetic shared by `simulate` and the CLI.
+
+    It lives in one function so the cache size a simulation uses can never drift
+    from the size the `trace` command assumes when it computes the static
+    ceiling. That drift is exactly what produced the wrong hit-rate comparison
+    in round 1 (achieved hit rate at a 6.09% cache vs a ceiling computed at 3%).
+    """
+
+    n_layers: int
+    n_experts: int
+    kinds: list[str]
+    mb: ModelBytes
+    resident_total: int
+    resident_vram: int
+    resident_ram: int
+    resident_spill: int
+    cache_vram: int
+    cache_ram: int
+    cache_bytes: int
+    slots: int
+    f_vram: float
+    f_ram: float
+    f_disk: float
+    expert_pool: int
+    expert_spill: int
+    total_experts: int
+    warnings: list[str] = field(default_factory=list)
+
+    @property
+    def expert_each(self) -> int:
+        return self.mb.expert_each
+
+    @property
+    def per_layer_fraction(self) -> float:
+        """Cache size as a fraction of *one layer's* experts.
+
+        The pool is global (a slot can hold any layer's expert), so the average
+        split across layers is ``slots / (n_layers * n_experts)``. This is the
+        number the trace's per-layer static ceiling must use to be comparable.
+        """
+        return self.slots / self.total_experts if self.total_experts else 0.0
+
+
+def plan_residency(
+    arch: Architecture,
+    target: Target,
+    *,
+    quant: "Quant | None" = None,
+    optimizations: "Optimizations | None" = None,
+) -> Plan:
+    """Decide what is always resident, what becomes expert cache, what spills."""
+    quant = quant or Quant.fp8()
+    opt = optimizations or Optimizations()
+    n_layers = opt.keep_layers or arch.n_layers
+    n_experts = max(arch.top_k, int(round(arch.n_experts * opt.prune_experts)))
+    mb = model_bytes(arch, quant, n_layers=n_layers, n_experts=n_experts)
+    kinds = arch.layer_kinds()[:n_layers]
+
+    # always-needed weights first; whatever is left over becomes the expert cache
+    resident_total = mb.resident_total
+    resident_vram = min(resident_total, target.usable_vram)
+    resident_ram = min(resident_total - resident_vram, target.usable_ram)
+    resident_spill = resident_total - resident_vram - resident_ram
+
+    cache_vram = max(0, target.usable_vram - resident_vram)
+    cache_ram = max(0, target.usable_ram - resident_ram)
+    cache_bytes = cache_vram + cache_ram
+    slots = cache_bytes // mb.expert_each if mb.expert_each else 0
+
+    f_vram = resident_vram / resident_total if resident_total else 0.0
+    f_ram = resident_ram / resident_total if resident_total else 0.0
+    f_disk = resident_spill / resident_total if resident_total else 0.0
+
+    total_experts = n_layers * n_experts
+    expert_pool = mb.expert_each * total_experts
+    expert_spill = max(0, expert_pool - cache_bytes)
+
+    warnings: list[str] = []
+    if resident_spill > 0:
+        warnings.append(
+            f"always-resident weights ({resident_total / GIB:.1f} GiB) exceed VRAM+RAM "
+            f"({(target.usable_vram + target.usable_ram) / GIB:.1f} GiB); "
+            f"{resident_spill / GIB:.1f} GiB of attention/shared weights would stream "
+            "from disk every token"
+        )
+    if resident_spill == 0 and cache_bytes < expert_pool:
+        warnings.append(
+            f"{expert_spill / GIB:.1f} GiB of experts stay on disk; only "
+            f"{slots} of {total_experts} experts fit the cache"
+        )
+
+    return Plan(
+        n_layers=n_layers,
+        n_experts=n_experts,
+        kinds=kinds,
+        mb=mb,
+        resident_total=resident_total,
+        resident_vram=resident_vram,
+        resident_ram=resident_ram,
+        resident_spill=resident_spill,
+        cache_vram=cache_vram,
+        cache_ram=cache_ram,
+        cache_bytes=cache_bytes,
+        slots=slots,
+        f_vram=f_vram,
+        f_ram=f_ram,
+        f_disk=f_disk,
+        expert_pool=expert_pool,
+        expert_spill=expert_spill,
+        total_experts=total_experts,
+        warnings=warnings,
+    )
+
+
+class ExpertCache:
+    """Online expert cache over ``(layer, expert)`` keys.
+
+    * ``lru``  evict the least-recently used key (a baseline).
+    * ``lfu``  evict the least-frequently used key. Every miss is admitted, so a
+      burst of one-off experts can flush the hot set — the round-1 policy.
+    * ``hot``  LFU with an **admission filter** and a **pinned hot set** (S2).
+      A new key is admitted only if it has been seen more often than the key it
+      would evict, so one-off experts bypass the cache instead of polluting it.
+      The most-frequent keys are pinned against eviction, and counters are aged
+      (halved) periodically so the hot set can follow a drifting router.
+    """
+
+    def __init__(
+        self,
+        capacity: int,
+        policy: str = "lru",
+        *,
+        pin_fraction: float = 0.5,
+        aging_interval: int | None = None,
+    ) -> None:
+        if policy not in ("lru", "lfu", "hot"):
+            raise ValueError(f"unknown cache_policy {policy!r}")
+        self.capacity = max(0, capacity)
+        self.policy = policy
+        self.pin_fraction = pin_fraction
+        # Age after ~8 turns of the cache. Measured (round 2, ROADMAP §7): 2x is
+        # too aggressive (stationary ratio 0.80) and no aging at all cannot follow
+        # a routing shift (shift ratio 0.70). 8x is the balance that clears 0.9x on
+        # both a stationary and a shifted trace; see the sweep in the ROADMAP.
+        self.aging_interval = aging_interval or max(1, 8 * self.capacity)
+        self._keys: dict[tuple[int, int], None] = {}
+        self._order: list[tuple[int, int]] = []
+        self._freq: dict[tuple[int, int], int] = {}
+        self._pins: set[tuple[int, int]] = set()
+        self._accesses = 0
+        self.hits = 0
+        self.misses = 0
+        self.bypasses = 0
+
+    def __contains__(self, key: tuple[int, int]) -> bool:
+        return key in self._keys
+
+    def __len__(self) -> int:
+        return len(self._keys)
+
+    def _touch(self, key: tuple[int, int]) -> None:
+        if key in self._order:
+            self._order.remove(key)
+        self._order.append(key)
+
+    def _victim(self) -> tuple[int, int]:
+        candidates = [k for k in self._keys if k not in self._pins] or list(self._keys)
+        if self.policy == "lru":
+            for k in self._order:
+                if k in candidates:
+                    return k
+            return candidates[0]
+        return min(candidates, key=lambda k: self._freq.get(k, 0))
+
+    def _age(self) -> None:
+        for k in list(self._freq):
+            self._freq[k] //= 2
+        keep = max(1, int(self.capacity * self.pin_fraction))
+        hot = sorted(self._keys, key=lambda k: self._freq.get(k, 0), reverse=True)[:keep]
+        self._pins = set(hot)
+
+    def access(self, key: tuple[int, int]) -> bool:
+        """Record one reference; return True on a cache hit."""
+        self._accesses += 1
+        self._freq[key] = self._freq.get(key, 0) + 1
+        if key in self._keys:
+            self.hits += 1
+            self._touch(key)
+            self._maybe_age()
+            return True
+        self.misses += 1
+        if self.capacity == 0:
+            return False
+        if len(self._keys) < self.capacity:
+            self._keys[key] = None
+            self._order.append(key)
+            self._maybe_age()
+            return False
+        victim = self._victim()
+        if self.policy == "hot" and self._freq[key] <= self._freq.get(victim, 0):
+            # Admission filter: a key no more popular than its would-be victim
+            # is not worth a slot. It bypasses the cache and must be re-read.
+            self.bypasses += 1
+            self._maybe_age()
+            return False
+        del self._keys[victim]
+        if victim in self._order:
+            self._order.remove(victim)
+        self._pins.discard(victim)
+        self._keys[key] = None
+        self._order.append(key)
+        self._maybe_age()
+        return False
+
+    def _maybe_age(self) -> None:
+        if self.policy == "hot" and self._accesses % self.aging_interval == 0:
+            self._age()
+
+
+@dataclass
 class LayerStep:
     index: int
     kind: str
@@ -243,54 +465,39 @@ def simulate(
     skew: float = 1.0,
     cache_policy: str = "lru",
     routing: list[list[list[int]]] | None = None,
+    eval_tail: float = 0.0,
 ) -> SimResult:
     """Plan residency and simulate `tokens` decode steps.
 
     `routing`, when supplied, is ``routing[token][layer][slot] = expert_id`` and
     replaces the modelled Zipf routing with a real trace.
+
+    `eval_tail` > 0 restricts the reported hit rate (and its ceiling) to the last
+    fraction of the trace — the window that isolates how fast a policy adapts to
+    a routing shift, rather than averaging the pre-shift period in.
     """
     quant = quant or Quant.fp8()
     opt = optimizations or Optimizations()
-    warnings: list[str] = []
-    n_layers = opt.keep_layers or arch.n_layers
-    n_experts = max(arch.top_k, int(round(arch.n_experts * opt.prune_experts)))
-    mb = model_bytes(arch, quant, n_layers=n_layers, n_experts=n_experts)
-    kinds = arch.layer_kinds()[:n_layers]
-
-    # --- residency: always-needed weights first, leftover becomes expert cache
-    resident_total = mb.resident_total
-    resident_vram = min(resident_total, target.usable_vram)
-    resident_ram = min(resident_total - resident_vram, target.usable_ram)
-    resident_spill = resident_total - resident_vram - resident_ram
-
-    cache_vram = max(0, target.usable_vram - resident_vram)
-    cache_ram = max(0, target.usable_ram - resident_ram)
-    cache_bytes = cache_vram + cache_ram
-    slots = cache_bytes // mb.expert_each if mb.expert_each else 0
-
-    # Fractions of the resident set that land in each tier. Resident bytes are
-    # charged at their real tier's bandwidth, so a dense model that spills to
-    # disk is priced at disk speed, not RAM speed.
-    f_vram = resident_vram / resident_total if resident_total else 0.0
-    f_ram = resident_ram / resident_total if resident_total else 0.0
-    f_disk = resident_spill / resident_total if resident_total else 0.0
-
-    total_experts = n_layers * n_experts
-    expert_pool = mb.expert_each * total_experts
-    expert_spill = max(0, expert_pool - cache_bytes)
-
-    if resident_spill > 0:
-        warnings.append(
-            f"always-resident weights ({resident_total / GIB:.1f} GiB) exceed VRAM+RAM "
-            f"({(target.usable_vram + target.usable_ram) / GIB:.1f} GiB); "
-            f"{resident_spill / GIB:.1f} GiB of attention/shared weights would stream "
-            "from disk every token"
-        )
-    if resident_spill == 0 and cache_bytes < expert_pool:
-        warnings.append(
-            f"{expert_spill / GIB:.1f} GiB of experts stay on disk; only "
-            f"{slots} of {total_experts} experts fit the cache"
-        )
+    plan = plan_residency(arch, target, quant=quant, optimizations=opt)
+    warnings: list[str] = list(plan.warnings)
+    n_layers = plan.n_layers
+    n_experts = plan.n_experts
+    kinds = plan.kinds
+    mb = plan.mb
+    resident_total = plan.resident_total
+    resident_vram = plan.resident_vram
+    resident_ram = plan.resident_ram
+    resident_spill = plan.resident_spill
+    cache_vram = plan.cache_vram
+    cache_ram = plan.cache_ram
+    cache_bytes = plan.cache_bytes
+    slots = plan.slots
+    f_vram = plan.f_vram
+    f_ram = plan.f_ram
+    f_disk = plan.f_disk
+    total_experts = plan.total_experts
+    expert_pool = plan.expert_pool
+    expert_spill = plan.expert_spill
 
     kv_bytes = arch.kv_bytes(context, bytes_per_param=opt.kv_bits / 8)
 
@@ -311,26 +518,9 @@ def simulate(
     else:
         routing_source = "trace"
 
-    # Expert cache over (layer, expert). Misses are read from disk and admitted.
-    # `lru` evicts the least recently used; `lfu` evicts the least frequently used,
-    # which retains the hot set that a skewed router keeps re-selecting.
-    if cache_policy not in ("lru", "lfu"):
-        raise ValueError(f"unknown cache_policy {cache_policy!r}")
-    cache: dict[tuple[int, int], str] = {}
-    order: list[tuple[int, int]] = []
-    freq: dict[tuple[int, int], int] = {}
-
-    def evict_one() -> None:
-        if not cache:
-            return
-        if cache_policy == "lfu":
-            # Least frequently used; ties fall back to insertion order.
-            victim = min(cache, key=lambda k: freq.get(k, 0))
-        else:
-            victim = order[0]
-        cache.pop(victim, None)
-        if victim in order:
-            order.remove(victim)
+    # Expert cache over (layer, expert). `hot` adds an admission filter and a
+    # pinned hot set on top of LFU (see ExpertCache).
+    cache = ExpertCache(slots, cache_policy)
 
     # Per-layer accumulators, averaged over the measured (post-warmup) tokens.
     acc = [
@@ -340,14 +530,19 @@ def simulate(
     # Active parameters scale with the layers kept; expert pruning does not change
     # how many are active per token, only how much of the pool stays on disk.
     active_eff = arch.active_params() * n_layers / arch.n_layers
-    n = max(1, len(routing) - warmup)
+    # First token of the measured window. `eval_tail` trims the front so a policy
+    # that only adapts slowly is not rescued by the tokens before the shift.
+    eval_start = warmup
+    if eval_tail > 0:
+        eval_start = max(warmup, int(len(routing) * (1 - eval_tail)))
+    n = max(1, len(routing) - eval_start)
     token_times: list[float] = []
     compute_times: list[float] = []
     raw_hits = 0
     raw_misses = 0
 
     for ti, tok in enumerate(routing):
-        measured_this = ti >= warmup
+        measured_this = ti >= eval_start
         compute_s = 2.0 * active_eff / (target.cpu_gflops * 1e9)
         io_s = 0.0
         for i, kind in enumerate(kinds):
@@ -357,19 +552,12 @@ def simulate(
             hits = 0
             misses = 0
             for e in tok[i]:
-                key = (i, e)
-                freq[key] = freq.get(key, 0) + 1
-                if key in cache:
+                if cache.access((i, e)):
                     hits += 1
                     expert_cached += mb.expert_each
                 else:
                     misses += 1
                     expert_disk += mb.expert_each
-                    if slots > 0:
-                        if len(cache) >= slots:
-                            evict_one()
-                        cache[key] = "vram" if cache_vram >= cache_ram else "ram"
-                        order.append(key)
             read = lb.resident + expert_cached + expert_disk
             disk_read = int(lb.resident * f_disk) + expert_disk
             secs = (
@@ -416,6 +604,10 @@ def simulate(
     total_read = sum(s.read_bytes for s in steps)
     total_disk = sum(s.disk_bytes for s in steps)
     hit_rate = raw_hits / (raw_hits + raw_misses) if (raw_hits + raw_misses) else 0.0
+    # The oracle a *static* cache of the same size would reach on this very
+    # routing, so `schedule` can never again compare a hit rate to a ceiling at a
+    # different cache size. Computed over the measured (post-warmup) tokens only.
+    static_ceiling = global_cache_ceiling(routing, slots, warmup=eval_start)
 
     manifest = {
         "vipera_version": 1,
@@ -457,6 +649,11 @@ def simulate(
             "policy": cache_policy,
             "routing_source": routing_source,
             "hit_rate": round(hit_rate, 4),
+            "slots": slots,
+            "per_layer_fraction": round(plan.per_layer_fraction, 4),
+            "static_cache_ceiling": round(static_ceiling, 4),
+            "ceiling_ratio": round(hit_rate / static_ceiling, 4) if static_ceiling else None,
+            "eval_window": {"start": eval_start, "end": len(routing), "tail": eval_tail},
         },
         "performance": {
             "prefetch": prefetch,

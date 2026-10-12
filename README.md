@@ -74,6 +74,12 @@ python3 -m vipera arch     arch/glm-5.3-flash.toml
 python3 -m vipera schedule arch/glm-5.3-flash.toml --target hw/gtx1650.toml --quant q4-experts --out out/
 python3 -m vipera sweep    arch/glm-5.3-flash.toml --target hw/gtx1650.toml
 
+# routing traces: inspect a trace, then simulate decode driven by it
+python3 -m vipera trace trace.jsonl --arch arch/glm-5.3-flash.toml \
+    --target hw/gtx1650.toml --quant q4-experts     # cache size matched to the schedule
+python3 -m vipera schedule arch/glm-5.3-flash.toml --target hw/gtx1650.toml \
+    --quant q4-experts --trace trace.jsonl --cache-policy hot --eval-tail 0.3
+
 # the LLM-PC-OPT instance: dense Llama-3-70B on 8 GB VRAM / 32 GB RAM / 3 GB/s SSD
 python3 -m vipera schedule arch/llama3-70b.toml --target hw/llama70b-pc.toml --quant q4-experts --context 4096
 
@@ -113,6 +119,8 @@ What it computes today:
 |---|---|
 | `analyze` | layers, expert count, and bytes split into resident / router / shared-expert / "other" / routable-expert buckets |
 | `plan` | a `*.vipera.json` residency manifest: how many bytes go to VRAM, RAM, and disk spill, plus warnings |
+| `trace` | a routing trace's skew (entropy) and the **static-cache hit ceiling at the size the schedule will actually use** |
+| `schedule` | modelled bytes/token and tok/s, plus the cache hit rate **and the ceiling at the same cache size** (`policy / ceiling` ratio) |
 
 The planner is **size-driven** for now: it cannot rank *which* experts are hot until routing traces
 from Phase 2 exist, and it says so in `placement.expert_order_pending_trace`.
@@ -158,6 +166,13 @@ The headline exercise is a 321B-A18B model on the target laptop. Modelled result
 expert pruning, layer pruning, KV compression, speculative/MTP) to show which one actually changes
 the verdict — expert pruning, because the expert pool is 30× the cache. See
 [`docs/FEASIBILITY.md`](docs/FEASIBILITY.md).
+
+Expert caching over `(layer, expert)` supports three eviction policies: `lru`, `lfu`, and `hot`
+(admission filter + pinned hot set + aging). Every scheduled run reports the achieved hit rate
+**against the static-cache ceiling at the same slot count**, so a policy can never be flattered by a
+baseline at a different cache size. On a synthetic non-stationary trace, `hot` reaches **0.92×** of
+the matched ceiling over the post-shift window where plain `lfu` stalls at **0.71×**. Numbers,
+ablation and the aging sweep are in [`docs/ROADMAP.md`](docs/ROADMAP.md) §7.
 
 ## Scope (one month, zero budget)
 
