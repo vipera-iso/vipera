@@ -7,6 +7,7 @@ bench/results/*
 !bench/results/hwprobe-run1.json
 !bench/results/hwprobe-run2.json
 !bench/results/olmoe-ppl-baseline.json
+!bench/results/olmoe-1b-7b-prefetch-table.txt
 *.gguf
 __pycache__/
 .venv/
