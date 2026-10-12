@@ -11,8 +11,9 @@ Inspired by [FreeToken](https://github.com/FlashML-org/FreeToken) (MoE serving o
 and [AirLLM](https://github.com/lyogavin/airllm) (layer-wise streaming) — but both assume plenty of
 GPU/RAM. `vipera` targets the hard spot: **the model fits in RAM yet overflows VRAM, on a slow disk**.
 
-> Status: **design phase (Phase 0)**. No runnable code yet. Bold numbers are measured on the target
-> machine; FreeToken/AirLLM figures are **as published by them**, not re-verified here.
+> Status: **stage 1 implemented** — the analyzer and residency planner run and are tested; nothing
+> touches tensor data or executes a model yet. Bold numbers are measured on the target machine;
+> FreeToken/AirLLM figures are **as published by them**, not re-verified here.
 
 ---
 
@@ -51,6 +52,34 @@ further: **rearrange the model file itself** so a weak runtime reads less and re
 **The decisive number:** for DeepSeek-V2-Lite, experts resident in RAM imply a ceiling of
 **~33 tok/s**; but a cache miss reading from the NVMe (DRAM-less, ~2 GB/s) drops it to **~1.7 tok/s**.
 A **~20×** gap ⇒ vipera's primary goal is **fewer disk reads for experts**.
+
+## Quick start
+
+Pure stdlib, Python >= 3.11 (uses `tomllib`). No dependencies to install.
+
+```bash
+# inventory a model without reading its tensor data
+python3 -m vipera analyze models/deepseek-v2-lite-Q4_K_M.gguf
+python3 -m vipera analyze models/deepseek-v2-lite-Q4_K_M.gguf --json
+
+# plan weight placement for the measured target, and write the manifest
+python3 -m vipera plan models/deepseek-v2-lite-Q4_K_M.gguf \
+    --target hw/gtx1650.toml --out out/
+# -> out/deepseek-v2-lite-Q4_K_M.vipera.json
+
+# tests
+python3 -m unittest discover -s tests -t .
+```
+
+What it computes today:
+
+| Command | Output |
+|---|---|
+| `analyze` | layers, expert count, and bytes split into resident / router / shared-expert / "other" / routable-expert buckets |
+| `plan` | a `*.vipera.json` residency manifest: how many bytes go to VRAM, RAM, and disk spill, plus warnings |
+
+The planner is **size-driven** for now: it cannot rank *which* experts are hot until routing traces
+from Phase 2 exist, and it says so in `placement.expert_order_pending_trace`.
 
 ## Documents
 

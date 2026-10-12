@@ -1,0 +1,11 @@
+# Target: the machine measured on 2026-10-12 (see README).
+# Numbers are MiB as reported by the OS, not marketing values.
+name = "gtx1650-laptop"
+vram_mb = 4096          # GTX 1650 Max-Q
+ram_mb = 15360          # 15 GiB, no swap
+disk = "nvme-dramless"
+
+# Headroom held back from the totals above so the runtime can still allocate
+# KV cache and activations. Tuned by measurement later; conservative for now.
+vram_headroom_mb = 512
+ram_headroom_mb = 1536
