@@ -119,6 +119,9 @@ from Phase 2 exist, and it says so in `placement.expert_order_pending_trace`.
 
 ## Documents
 
+- [`docs/PROPOSALS.md`](docs/PROPOSALS.md) — **research proposals**: four new/improved
+  algorithms (skew-adaptive cache, tier-aware bit allocation, energy-aware tiering, gated pruning)
+  with pseudocode, complexity, experiment design and a hostile self-review. P1 is implemented.
 - [`docs/RESEARCH.md`](docs/RESEARCH.md) — **survey + evaluation of local-LLM optimization
   algorithms** (quantization, pruning, offloading, KV, speculative), scored on bytes/token and
   tied to reproduciable vipera numbers.

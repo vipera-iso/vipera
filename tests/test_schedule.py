@@ -86,6 +86,20 @@ class TestCacheBehaviour(unittest.TestCase):
         self.assertAlmostEqual(result.hit_rate, 1.0, places=6)
         self.assertEqual(result.manifest["expert_cache"]["routing_source"], "trace")
 
+    def test_lfu_beats_lru_on_skewed_routing(self):
+        # A Zipf-skewed router keeps re-selecting a hot set; frequency-based
+        # eviction should retain it better than pure recency.
+        a = glm()
+        lru = simulate(a, gtx1650(), quant=Quant.q4_experts(), tokens=6, warmup=1, cache_policy="lru")
+        lfu = simulate(a, gtx1650(), quant=Quant.q4_experts(), tokens=6, warmup=1, cache_policy="lfu")
+        self.assertGreater(lfu.hit_rate, lru.hit_rate)
+        self.assertGreaterEqual(lfu.tok_s, lru.tok_s)
+        self.assertEqual(lfu.manifest["expert_cache"]["policy"], "lfu")
+
+    def test_unknown_cache_policy_rejected(self):
+        with self.assertRaises(ValueError):
+            simulate(glm(), gtx1650(), quant=Quant.fp8(), tokens=2, warmup=1, cache_policy="nope")
+
 
 class TestOptimizations(unittest.TestCase):
     def test_expert_pruning_shrinks_the_pool(self):

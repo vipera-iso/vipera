@@ -121,6 +121,7 @@ def cmd_schedule(args: argparse.Namespace) -> int:
         context=args.context,
         tokens=args.tokens,
         prefetch=not args.no_prefetch,
+        cache_policy=args.cache_policy,
     )
     r = result.manifest["residency"]
     p = result.manifest["performance"]
@@ -260,6 +261,8 @@ def build_parser() -> argparse.ArgumentParser:
     sc.add_argument("--kv-bits", type=int, default=16, help="KV cache precision (16/8/4)")
     sc.add_argument("--draft-tokens", type=float, default=1.0,
                     help="accepted tokens per target forward pass (MTP/speculative)")
+    sc.add_argument("--cache-policy", choices=["lru", "lfu"], default="lru",
+                    help="expert cache eviction policy")
     sc.add_argument("--out", help="directory to write <arch>.vipera.json into")
     sc.set_defaults(func=cmd_schedule)
 

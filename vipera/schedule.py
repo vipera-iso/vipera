@@ -241,6 +241,7 @@ def simulate(
     prefetch: bool = True,
     seed: int = 0,
     skew: float = 1.0,
+    cache_policy: str = "lru",
     routing: list[list[list[int]]] | None = None,
 ) -> SimResult:
     """Plan residency and simulate `tokens` decode steps.
@@ -310,10 +311,26 @@ def simulate(
     else:
         routing_source = "trace"
 
-    # LRU expert cache over (layer, expert). Misses are read from disk and then
-    # admitted if a slot is free.
+    # Expert cache over (layer, expert). Misses are read from disk and admitted.
+    # `lru` evicts the least recently used; `lfu` evicts the least frequently used,
+    # which retains the hot set that a skewed router keeps re-selecting.
+    if cache_policy not in ("lru", "lfu"):
+        raise ValueError(f"unknown cache_policy {cache_policy!r}")
     cache: dict[tuple[int, int], str] = {}
     order: list[tuple[int, int]] = []
+    freq: dict[tuple[int, int], int] = {}
+
+    def evict_one() -> None:
+        if not cache:
+            return
+        if cache_policy == "lfu":
+            # Least frequently used; ties fall back to insertion order.
+            victim = min(cache, key=lambda k: freq.get(k, 0))
+        else:
+            victim = order[0]
+        cache.pop(victim, None)
+        if victim in order:
+            order.remove(victim)
 
     # Per-layer accumulators, averaged over the measured (post-warmup) tokens.
     acc = [
@@ -341,6 +358,7 @@ def simulate(
             misses = 0
             for e in tok[i]:
                 key = (i, e)
+                freq[key] = freq.get(key, 0) + 1
                 if key in cache:
                     hits += 1
                     expert_cached += mb.expert_each
@@ -348,8 +366,8 @@ def simulate(
                     misses += 1
                     expert_disk += mb.expert_each
                     if slots > 0:
-                        if len(order) >= slots:
-                            cache.pop(order.pop(0), None)
+                        if len(cache) >= slots:
+                            evict_one()
                         cache[key] = "vram" if cache_vram >= cache_ram else "ram"
                         order.append(key)
             read = lb.resident + expert_cached + expert_disk
@@ -436,7 +454,7 @@ def simulate(
         },
         "context": {"tokens": context, "kv_bytes": kv_bytes},
         "expert_cache": {
-            "policy": "lru",
+            "policy": cache_policy,
             "routing_source": routing_source,
             "hit_rate": round(hit_rate, 4),
         },
