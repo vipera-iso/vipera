@@ -1,7 +1,9 @@
 models/
 bench/results/*
-# The captured routing trace is a small, reproducible evidence artifact; keep it.
+# Small, reproducible evidence artifacts; keep these.
 !bench/results/olmoe-1b-7b-511tok.jsonl
+!bench/results/hwprobe-run1.json
+!bench/results/hwprobe-run2.json
 *.gguf
 __pycache__/
 .venv/
