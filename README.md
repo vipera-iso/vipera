@@ -119,6 +119,9 @@ from Phase 2 exist, and it says so in `placement.expert_order_pending_trace`.
 
 ## Documents
 
+- [`docs/RESEARCH.md`](docs/RESEARCH.md) — **survey + evaluation of local-LLM optimization
+  algorithms** (quantization, pruning, offloading, KV, speculative), scored on bytes/token and
+  tied to reproduciable vipera numbers.
 - [`docs/FEASIBILITY.md`](docs/FEASIBILITY.md) — **can GLM-5.3-Flash (321B/18B) run here?** The
   modelled verdict, per-quant, and the ceilings that make it infeasible.
 - [`docs/OPTIMIZER.md`](docs/OPTIMIZER.md) — **the model-file optimization layer** (vipera's core

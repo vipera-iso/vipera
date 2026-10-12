@@ -1,5 +1,10 @@
 # ALGORITHMS — Running LLM/MoE on weak hardware
 
+> **See also [`RESEARCH.md`](RESEARCH.md)** — a 2026 survey and *evaluation* of the current
+> optimization techniques (quantization, pruning, offloading, KV, speculative), scored on bytes
+> per token and cross-referenced to the reproducible vipera model.
+
+
 > This document is **the most important part** of the project (section 1 of the original prompt).
 > Every **bold** number is **measured on the target machine** or **derived from a measurement**;
 > other numbers are explicitly marked as estimates. Results attributed to FreeToken/AirLLM/edge0 are
