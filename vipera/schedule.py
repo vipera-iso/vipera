@@ -280,6 +280,7 @@ def plan_residency(
 class ExpertCache:
     """Online expert cache over ``(layer, expert)`` keys.
 
+    Eviction policy:
     * ``lru``  evict the least-recently used key (a baseline).
     * ``lfu``  evict the least-frequently used key. Every miss is admitted, so a
       burst of one-off experts can flush the hot set — the round-1 policy.
@@ -288,6 +289,15 @@ class ExpertCache:
       would evict, so one-off experts bypass the cache instead of polluting it.
       The most-frequent keys are pinned against eviction, and counters are aged
       (halved) periodically so the hot set can follow a drifting router.
+
+    Allocation of the slot budget (S3):
+    * ``global``    one pool of `capacity` keys shared by every layer (default).
+    * ``per-layer`` each layer gets its own quota, re-solved periodically by
+      **marginal water-filling** over the observed per-layer frequencies: the
+      next slot always goes to the layer whose next-most-popular expert carries
+      the most probability mass. When layers differ in how concentrated their
+      routing is, this beats splitting the budget evenly; when they are
+      identical it converges to the even split and costs nothing.
     """
 
     def __init__(
@@ -297,9 +307,16 @@ class ExpertCache:
         *,
         pin_fraction: float = 0.5,
         aging_interval: int | None = None,
+        n_layers: int | None = None,
+        alloc: str = "global",
+        alloc_interval: int | None = None,
     ) -> None:
         if policy not in ("lru", "lfu", "hot"):
             raise ValueError(f"unknown cache_policy {policy!r}")
+        if alloc not in ("global", "per-layer"):
+            raise ValueError(f"unknown cache_alloc {alloc!r}")
+        if alloc == "per-layer" and not n_layers:
+            raise ValueError("per-layer allocation needs n_layers")
         self.capacity = max(0, capacity)
         self.policy = policy
         self.pin_fraction = pin_fraction
@@ -308,14 +325,21 @@ class ExpertCache:
         # a routing shift (shift ratio 0.70). 8x is the balance that clears 0.9x on
         # both a stationary and a shifted trace; see the sweep in the ROADMAP.
         self.aging_interval = aging_interval or max(1, 8 * self.capacity)
+        self.n_layers = n_layers
+        self.alloc = alloc
+        self.alloc_interval = alloc_interval or max(1, 4 * self.capacity)
         self._keys: dict[tuple[int, int], None] = {}
         self._order: list[tuple[int, int]] = []
         self._freq: dict[tuple[int, int], int] = {}
+        self._layer_freq: dict[int, dict[int, int]] = {}
+        self._count: dict[int, int] = {}
+        self._cap: dict[int, int] = {}
         self._pins: set[tuple[int, int]] = set()
         self._accesses = 0
         self.hits = 0
         self.misses = 0
         self.bypasses = 0
+        self.reallocations = 0
 
     def __contains__(self, key: tuple[int, int]) -> bool:
         return key in self._keys
@@ -323,13 +347,36 @@ class ExpertCache:
     def __len__(self) -> int:
         return len(self._keys)
 
+    # -- internals ---------------------------------------------------------
+
     def _touch(self, key: tuple[int, int]) -> None:
         if key in self._order:
             self._order.remove(key)
         self._order.append(key)
 
-    def _victim(self) -> tuple[int, int]:
-        candidates = [k for k in self._keys if k not in self._pins] or list(self._keys)
+    def _insert(self, key: tuple[int, int]) -> None:
+        self._keys[key] = None
+        self._order.append(key)
+        self._count[key[0]] = self._count.get(key[0], 0) + 1
+
+    def _remove(self, key: tuple[int, int]) -> None:
+        self._keys.pop(key, None)
+        if key in self._order:
+            self._order.remove(key)
+        self._pins.discard(key)
+        self._count[key[0]] = self._count.get(key[0], 0) - 1
+
+    def _default_cap(self) -> int:
+        return max(1, self.capacity // max(1, self.n_layers or 1))
+
+    def _victim(self, layer: int | None = None) -> tuple[int, int] | None:
+        if self.alloc == "per-layer" and layer is not None:
+            pool = [k for k in self._keys if k[0] == layer]
+            candidates = [k for k in pool if k not in self._pins] or pool
+        else:
+            candidates = [k for k in self._keys if k not in self._pins] or list(self._keys)
+        if not candidates:
+            return None
         if self.policy == "lru":
             for k in self._order:
                 if k in candidates:
@@ -340,46 +387,91 @@ class ExpertCache:
     def _age(self) -> None:
         for k in list(self._freq):
             self._freq[k] //= 2
+        for layer in self._layer_freq:
+            for e in list(self._layer_freq[layer]):
+                self._layer_freq[layer][e] //= 2
         keep = max(1, int(self.capacity * self.pin_fraction))
         hot = sorted(self._keys, key=lambda k: self._freq.get(k, 0), reverse=True)[:keep]
         self._pins = set(hot)
+
+    def _reallocate(self) -> None:
+        """Greedy marginal water-filling of `capacity` slots across layers.
+
+        The marginal value of one more slot in layer l is the probability mass of
+        layer l's next-most-popular expert; giving each slot to the current argmax
+        solves the separable allocation exactly (all marginals are non-increasing).
+        """
+        ranked = {l: sorted(f.values(), reverse=True) for l, f in self._layer_freq.items() if f}
+        total = sum(sum(r) for r in ranked.values())
+        if not ranked or total <= 0 or self.capacity <= 0:
+            return
+        assigned = dict.fromkeys(ranked, 0)
+        layers = list(ranked)
+        for _ in range(self.capacity):
+            best, best_mass = None, -1.0
+            for l in layers:
+                k = assigned[l]
+                r = ranked[l]
+                mass = (r[k] / total) if k < len(r) else 0.0
+                if mass > best_mass:
+                    best_mass, best = mass, l
+            assigned[best] += 1
+        self._cap = assigned
+        self.reallocations += 1
+        # Trim any layer now over its new quota.
+        for l in layers:
+            while self._count.get(l, 0) > assigned[l]:
+                victim = self._victim(l)
+                if victim is None:
+                    break
+                self._remove(victim)
+
+    def _admit(self, key: tuple[int, int]) -> None:
+        if self.alloc == "per-layer":
+            layer = key[0]
+            self._cap.setdefault(layer, self._default_cap())
+            if self._count.get(layer, 0) < self._cap[layer]:
+                self._insert(key)
+                return
+            victim = self._victim(layer)
+        else:
+            if len(self._keys) < self.capacity:
+                self._insert(key)
+                return
+            victim = self._victim()
+        if victim is None:
+            self._insert(key)
+            return
+        if self.policy == "hot" and self._freq[key] <= self._freq.get(victim, 0):
+            # Admission filter: a key no more popular than its would-be victim
+            # is not worth a slot. It bypasses the cache and must be re-read.
+            self.bypasses += 1
+            return
+        self._remove(victim)
+        self._insert(key)
 
     def access(self, key: tuple[int, int]) -> bool:
         """Record one reference; return True on a cache hit."""
         self._accesses += 1
         self._freq[key] = self._freq.get(key, 0) + 1
+        lf = self._layer_freq.setdefault(key[0], {})
+        lf[key[1]] = lf.get(key[1], 0) + 1
         if key in self._keys:
             self.hits += 1
             self._touch(key)
-            self._maybe_age()
+            self._maybe()
             return True
         self.misses += 1
-        if self.capacity == 0:
-            return False
-        if len(self._keys) < self.capacity:
-            self._keys[key] = None
-            self._order.append(key)
-            self._maybe_age()
-            return False
-        victim = self._victim()
-        if self.policy == "hot" and self._freq[key] <= self._freq.get(victim, 0):
-            # Admission filter: a key no more popular than its would-be victim
-            # is not worth a slot. It bypasses the cache and must be re-read.
-            self.bypasses += 1
-            self._maybe_age()
-            return False
-        del self._keys[victim]
-        if victim in self._order:
-            self._order.remove(victim)
-        self._pins.discard(victim)
-        self._keys[key] = None
-        self._order.append(key)
-        self._maybe_age()
+        if self.capacity > 0:
+            self._admit(key)
+        self._maybe()
         return False
 
-    def _maybe_age(self) -> None:
+    def _maybe(self) -> None:
         if self.policy == "hot" and self._accesses % self.aging_interval == 0:
             self._age()
+        if self.alloc == "per-layer" and self._accesses % self.alloc_interval == 0:
+            self._reallocate()
 
 
 @dataclass
@@ -464,6 +556,7 @@ def simulate(
     seed: int = 0,
     skew: float = 1.0,
     cache_policy: str = "lru",
+    cache_alloc: str = "global",
     routing: list[list[list[int]]] | None = None,
     eval_tail: float = 0.0,
 ) -> SimResult:
@@ -520,7 +613,7 @@ def simulate(
 
     # Expert cache over (layer, expert). `hot` adds an admission filter and a
     # pinned hot set on top of LFU (see ExpertCache).
-    cache = ExpertCache(slots, cache_policy)
+    cache = ExpertCache(slots, cache_policy, n_layers=n_layers, alloc=cache_alloc)
 
     # Per-layer accumulators, averaged over the measured (post-warmup) tokens.
     acc = [
@@ -647,6 +740,8 @@ def simulate(
         "context": {"tokens": context, "kv_bytes": kv_bytes},
         "expert_cache": {
             "policy": cache_policy,
+            "alloc": cache_alloc,
+            "reallocations": cache.reallocations,
             "routing_source": routing_source,
             "hit_rate": round(hit_rate, 4),
             "slots": slots,

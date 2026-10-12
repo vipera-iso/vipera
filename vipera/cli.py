@@ -146,6 +146,7 @@ def cmd_schedule(args: argparse.Namespace) -> int:
         tokens=tokens if tokens is not None else 8,
         prefetch=not args.no_prefetch,
         cache_policy=args.cache_policy,
+        cache_alloc=args.cache_alloc,
         routing=routing,
         eval_tail=args.eval_tail,
     )
@@ -173,6 +174,8 @@ def cmd_schedule(args: argparse.Namespace) -> int:
     print("performance (modelled)")
     ec = result.manifest["expert_cache"]
     print(f"  cache hit rate       {result.hit_rate * 100:.1f}%  ({ec['routing_source']})")
+    if ec.get("alloc") == "per-layer":
+        print(f"  allocation           per-layer water-filling ({ec['reallocations']} reallocations)")
     # The static ceiling is computed on this very routing at this very cache
     # size, so the ratio can never be a mismatched-baseline artefact again.
     print(f"  static ceiling       {ec['static_cache_ceiling'] * 100:.1f}%  "
@@ -341,6 +344,8 @@ def build_parser() -> argparse.ArgumentParser:
                     help="accepted tokens per target forward pass (MTP/speculative)")
     sc.add_argument("--cache-policy", choices=["lru", "lfu", "hot"], default="lru",
                     help="expert cache eviction policy (hot = admission + pinned hot set)")
+    sc.add_argument("--cache-alloc", choices=["global", "per-layer"], default="global",
+                    help="slot-budget allocation: one global pool, or per-layer water-filling")
     sc.add_argument("--trace", help="routing trace (JSONL) to drive the simulation")
     sc.add_argument("--eval-tail", type=float, default=0.0,
                     help="measure only the last fraction of the trace (post-shift window)")

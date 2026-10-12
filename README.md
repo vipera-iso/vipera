@@ -102,6 +102,36 @@ python3 -m bench.bench \
     --ngl 0 --threads 4 --json bench/results/baseline.json
 ```
 
+## Real routing traces (S7)
+
+llama.cpp does not export the router's choices, so a local ~50-line patch to
+`src/llama-context.cpp` (`LLAMA_MOE_TRACE=<path>`) marks the already-named
+`ffn_moe_topk` tensor as a graph output and reads it back after each decode step.
+It changes no computation. `bench/` drives it and writes the JSONL the scheduler
+reads:
+
+```bash
+python3 -m bench.capture_trace \
+    --bin ~/dev/llama.cpp/build/bin/llama-cli \
+    --model /path/to/olmoe-q4km.gguf --tokens 512 --threads 8 --ngl 0 \
+    --out bench/results/olmoe.jsonl
+python3 -m vipera trace bench/results/olmoe.jsonl --arch arch/olmoe-1b-7b.toml --target hw/gtx1650.toml
+```
+
+On a real OLMoE-1B-7B trace (511 tokens, 64 experts, top-8), evaluated at a
+constrained budget against the size-matched ceiling:
+
+| cache | ceiling | LRU | LFU | `hot` |
+|---|---|---|---|---|
+| 10% | 42.7% | 0.0% | **0.97×** | 0.93× |
+| 25% | 71.1% | 0.75× | **0.97×** | 0.93× |
+| 50% | 94.1% | 0.99× | 0.99× | 0.98× |
+
+Two corrections this bought: on *stationary* real routing **LFU beats `hot`**
+(aging only pays when the distribution moves), and **per-layer allocation does not
+help** — a global frequency-ordered pool already is the greedy marginal
+allocation. Details in [`docs/ROADMAP.md`](docs/ROADMAP.md) §8.
+
 Harness validation only — a 260K-parameter toy model, CPU-only, 4 threads:
 
 ```
@@ -136,8 +166,8 @@ in its §Sources; unpublished numbers are marked "no data".
 ## Documents
 
 - [`docs/ROADMAP.md`](docs/ROADMAP.md) — the project decomposed into sub-problems with a
-  dependency graph, priorities, success criteria, open problems, and the log of the first
-  autonomous solving round.
+  dependency graph, priorities, success criteria, open problems, and the logs of three
+  autonomous solving rounds (S1 trace loader, S2 cache policy, S7 real trace + the 100B question).
 
 - [`docs/PROPOSALS.md`](docs/PROPOSALS.md) — **research proposals**: four new/improved
   algorithms (skew-adaptive cache, tier-aware bit allocation, energy-aware tiering, gated pruning)

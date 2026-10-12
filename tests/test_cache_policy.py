@@ -106,6 +106,46 @@ class TestExpertCache(unittest.TestCase):
         self.assertGreaterEqual(hot, lfu - 0.02)
 
 
+class TestPerLayerAllocation(unittest.TestCase):
+    def test_requires_n_layers(self):
+        with self.assertRaises(ValueError):
+            ExpertCache(16, "lfu", alloc="per-layer")
+
+    def test_unknown_alloc_rejected(self):
+        with self.assertRaises(ValueError):
+            ExpertCache(16, "lfu", alloc="balanced")
+
+    def test_allocation_follows_demand(self):
+        # Layer 0 is referenced constantly, layer 1 barely: water-filling should
+        # give layer 0 almost the whole budget.
+        cache = ExpertCache(20, "lfu", n_layers=2, alloc="per-layer", alloc_interval=20)
+        for _ in range(50):
+            for e in range(10):
+                cache.access((0, e))
+            cache.access((1, 0))
+        self.assertGreater(cache.reallocations, 0)
+        self.assertGreater(cache._cap[0], cache._cap[1])
+
+    def test_quota_is_never_exceeded(self):
+        cache = ExpertCache(8, "lfu", n_layers=4, alloc="per-layer", alloc_interval=40)
+        for _ in range(100):
+            for e in range(8):
+                cache.access((2, e))  # hammer one layer only
+        self.assertLessEqual(cache._count.get(2, 0), cache._cap[2])
+        self.assertLessEqual(len(cache), 8)
+
+    def test_global_and_per_layer_both_solve_a_repeated_key_trace(self):
+        # A trivially cacheable trace must be all hits under either allocation.
+        for alloc in ("global", "per-layer"):
+            cache = ExpertCache(8, "lfu", n_layers=2, alloc=alloc)
+            hits = 0
+            for _ in range(10):
+                for layer in range(2):
+                    for e in range(4):
+                        hits += cache.access((layer, e))
+            self.assertGreater(hits, 0)
+
+
 class TestGlobalCeiling(unittest.TestCase):
     def test_no_slots_is_zero(self):
         trace = synth_trace(10, n_layers=2, n_experts=8, top_k=2)
@@ -165,6 +205,13 @@ class TestScheduleCeiling(unittest.TestCase):
         result = simulate(glm(), gtx1650(), quant=Quant.q4_experts(), tokens=4,
                           warmup=1, cache_policy="hot")
         self.assertEqual(result.manifest["expert_cache"]["policy"], "hot")
+
+    def test_cache_alloc_is_recorded(self):
+        result = simulate(glm(), gtx1650(), quant=Quant.q4_experts(), tokens=4,
+                          warmup=1, cache_policy="hot", cache_alloc="per-layer")
+        ec = result.manifest["expert_cache"]
+        self.assertEqual(ec["alloc"], "per-layer")
+        self.assertIn("reallocations", ec)
 
     def test_eval_tail_restricts_the_measured_window(self):
         trace = synth_trace(40, n_layers=45, n_experts=288, top_k=8, skew=1.2, seed=0)

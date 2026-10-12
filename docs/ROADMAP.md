@@ -14,7 +14,7 @@
 |---|---|---|---|---|---|---|---|
 | **S1** | **Routing trace capture & loader** | Is expert routing skewed and locally consistent enough for a cache to help? | JSONL trace → `routing` structure + skew/entropy/ceiling stats | — | 2 | **5** | **done** — loader+stats+validator, 95 tests, CLI `vipera trace` |
 | **S2** | **Cache policy: pinned hot-set + admission control** | Can a policy reach the static-cache ceiling? | trace + cache size → hit rate | S1 | 3 | 5 | **done** — `hot` reaches 0.92× on a post-shift trace (LFU 0.71×) and 0.94× stationary; every `schedule` run now prints the ceiling at the *matched* size |
-| **S3** | **Per-layer cache allocation** | How many slots should each layer get? | per-layer frequency → slot budget | S1 | 4 | 4 | ≥ +5 points hit over uniform allocation |
+| **S3** | **Per-layer cache allocation** | How many slots should each layer get? | per-layer frequency → slot budget | S1 | 4 | 4 | **done (negative)** — water-filling by per-layer marginal mass does **not** beat the global pool (±1 pt on real and synthetic traces); a global LFU already realises the same greedy marginal allocation implicitly |
 | **S4** | **Tier-aware bit allocation (TAW)** | Which component should absorb the next lower bit? | sensitivity + tier cost → per-component bits | S10 | 5 | 4 | +10% tok/s at equal perplexity |
 | **S5** | **Energy model + energy-aware tiering (EAT)** | When does SSD offload violate a watt cap? | tier table → J/token | S7 | 3 | 4 | modelled J/token within 20% of wattmeter |
 | **S6** | **Gated expert pruning with rollback (GEP)** | Which experts are safe to delete? | routing mass + drift proxy → keep-set | S1, S10 | 4 | 4 | quality-loss variance halved at equal sparsity |
@@ -272,6 +272,120 @@ shift trace, ceiling measured on that same window.
   construction, so they test the *code and the policy*, not the world. A real
   captured trace is still S7.
 
-**Next sub-problem:** S3 (per-layer allocation) — the ~0.07–0.08 gap that remains
-on stationary traces is the global pool splitting unevenly across layers, which is
-allocation, not eviction. Then S7/S10 for measured inputs.
+**Next sub-problem:** S3 (per-layer allocation) — *this prediction was tested in
+round 3 and did **not** hold; see §8. No headline claim in this document should
+be read as "allocation is the remaining lever".*
+
+---
+
+## 8. Autonomous loop — round 3 log (S7 real trace + S3, and the 100B question)
+
+Round 3 replaces the modelled routing with a **real captured trace**, tests the
+round-2 prediction about allocation, and answers the "can ~100B run on this
+laptop?" question with the same machinery.
+
+### S7 — capture a real routing trace
+llama.cpp has no routing-export hook, but it already **names** the router's
+selection tensor per layer (`cb(selected_experts, "ffn_moe_topk", il)` in
+`src/llama-graph.cpp`). A ~50-line local patch to `src/llama-context.cpp`
+(`LLAMA_MOE_TRACE=<path>`) marks those tensors as graph outputs and reads them
+back after each `n_tokens == 1` decode step. It changes **no computation**. The
+capture is driven by `bench/capture_trace.py` (tested without a model).
+
+Model: **OLMoE-1B-7B-0924** Q4_K_M (a real small MoE: 16 layers, 64 experts,
+top-8) on 8 CPU threads. New profile `arch/olmoe-1b-7b.toml` reproduces the
+published totals to −1.2% (6.8B vs 7B).
+
+```
+python3 -m bench.capture_trace --bin ~/dev/llama.cpp/build/bin/llama-cli \
+    --model olmoe-q4km.gguf --tokens 512 --threads 8 --ngl 0 --out olmoe.jsonl
+```
+
+Captured: **511 decode tokens, 16 layers, top-8, 44–58 distinct experts/layer.**
+
+### Result 1 — the real trace is *stationary*, and that flips the policy choice
+OLMoE's expert pool (1024 experts ≈ 4 GiB) **fits this laptop's cache entirely**,
+so the machine never stresses it. To compare policies on real routing the budget
+is constrained directly; the ceiling is recomputed on the same real trace at each
+size.
+
+| cache budget | ceiling | LRU | LFU | `hot` |
+|---|---|---|---|---|
+| 10% (102 slots) | 42.7% | **0.0%** | **41.5% (0.97×)** | 39.7% (0.93×) |
+| 25% (256 slots) | 71.1% | 53.6% (0.75×) | 68.6% (0.97×) | 66.5% (0.93×) |
+| 50% (512 slots) | 94.1% | 93.1% (0.99×) | 92.6% (0.99×) | 92.5% (0.98×) |
+
+**Findings.**
+1. **LRU collapses under a tight budget on real routing** (0.0% at 10%) — one
+   pass of 8-of-64 experts evicts everything before reuse. Frequency-based
+   policies get **0.97×** there. Against LRU that is not an improvement of a few
+   points but a different order of magnitude.
+2. **`hot` does *not* win on this trace — LFU does.** The captured trace is a
+   single prompt, i.e. *stationary*, and round 3 measured that aging trades
+   stationary accuracy for shift recovery. The round-2 `hot` win (0.92× vs 0.71×)
+   is real but **regime-specific**: it needs the distribution to move. Policy
+   choice is therefore regime-dependent, not a fixed ranking.
+3. The real per-layer concentration varies (top-8 mass **0.41–0.61** across
+   layers) while the synthetic Zipf trace is uniform (≈0.53) — so the real trace
+   *does* have the layer heterogeneity S3 was meant to exploit.
+
+### Result 2 — S3 (per-layer allocation) is a measured negative
+The round-2 log predicted the remaining gap was *allocation*. It is not.
+Marginal water-filling across layers scored **equal-or-worse** than the single
+global pool at every budget (real trace: 0.90× vs 0.93× at 10%, 0.95× vs 0.93% at
+25%, 0.98× vs 0.98× at 50%). The reason is not a bug: **a global LFU cache
+ordered by frequency already implements exactly the greedy marginal allocation**
+(keep the highest-probability keys, wherever they live). Encoding per-layer
+quotas re-derives that optimum approximately and pays for it in churn.
+
+The code ships (`ExpertCache(alloc="per-layer")`, `--cache-alloc per-layer`,
+unit-tested) so the claim is reproducible, but it is **off by default** and
+documented as not-helping.
+
+### Result 3 — can ~100B run on this laptop? Yes, slowly, and cache is not its lever
+New profile `arch/glm-4.5-air.toml` (**GLM-4.5-Air**, a real 106B-total / 12B-active
+MoE; derived totals +4.3%, active +6.9% vs published). Modelled against
+`hw/gtx1650.toml`, `vipera sweep`:
+
+| strategy | hit | disk GB/tok | tok/s | bound |
+|---|---|---|---|---|
+| baseline fp8 | 34.0% | 4.20 | 0.45 | io |
+| q4 experts | 48.6% | 1.63 | **1.07** | compute |
+| + prune to 25% experts | 78.5% | 0.68 | 1.75 | compute |
+| + prune to 5% experts | 100% | 0.00 | 1.95 | compute |
+| + prune 5% + draft ×3 | 100% | 0.00 | **5.85** | compute |
+| + drop 20 layers too | 100% | 0.00 | **10.76** | compute |
+
+**Findings.**
+1. A 100B MoE **does** fit the thesis: ~**1.07 tok/s** at Q4 from disk, and the
+   compression/speculation stack takes it to **5.85 tok/s** (×5.5) at 100% cache
+   hit — an improvement *far beyond* 100%, and the place where a large win
+   actually exists for this target.
+2. At Q4 the model is **compute-bound, not I/O-bound**, so at that point *better
+   caching would not speed it up at all*. Cache work stops paying once the disk
+   bytes/token fall below the compute floor.
+3. **Caveat that matters:** the compute floor is derived from `cpu_gflops = 50`, an
+   *estimated* constant in `hw/gtx1650.toml`, never measured here. The
+   "compute-bound" verdict is therefore the least trustworthy number in this
+   table until S7's bench harness measures real GEMV throughput.
+4. The policy/ceiling ratio for this model is **0.55×** on the modelled Zipf — far
+   below the 0.94× seen on trace-driven runs. That gap is the *model*, not the
+   policy: real routing is more concentrated than `Zipf(skew=1.0)`. It is a
+   concrete reason to prefer measured traces over the default skew.
+
+### What is now known vs still unknown
+* **Known (measured):** real routing capture works end-to-end; on real stationary
+  routing LFU reaches 0.97× of the size-matched ceiling and LRU collapses; ageing
+  (`hot`) helps only under drift; per-layer allocation does not help.
+* **Unknown:** everything above uses one model, one prompt and CPU-only. A
+  100B-class real trace was **not** captured (the model cannot run here), so the
+  0.55× and compute-bound numbers for GLM-4.5-Air remain **modelled**.
+* **The 100% ceiling:** on a *hit-rate-ratio* metric the improvement is bounded by
+  1.0×, so from 0.97× the maximum possible gain is **+3%**. A "100% better"
+  target cannot be met on that metric by any cache algorithm — it is achievable
+  on bytes/token or tok/s, which is where the sweep above shows ×5.5.
+
+**Next sub-problem:** S7's second half (measure real GEMV/bandwidth so the
+compute floor stops being a guess), then S10 (quality harness) — because the
+biggest measured win for the 100B target is pruning + speculation, and neither has
+a measured quality cost yet.
