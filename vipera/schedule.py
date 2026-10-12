@@ -216,7 +216,10 @@ def plan_residency(
     """Decide what is always resident, what becomes expert cache, what spills."""
     quant = quant or Quant.fp8()
     opt = optimizations or Optimizations()
-    n_layers = opt.keep_layers or arch.n_layers
+    # `keep_layers` may exceed the model (e.g. `sweep` asks for 25 on a 16-layer
+    # model). Clamp to the real layer count, or `kinds` ends up shorter than
+    # `n_layers` and `simulate` indexes past its end.
+    n_layers = min(opt.keep_layers, arch.n_layers) if opt.keep_layers else arch.n_layers
     n_experts = max(arch.top_k, int(round(arch.n_experts * opt.prune_experts)))
     mb = model_bytes(arch, quant, n_layers=n_layers, n_experts=n_experts)
     kinds = arch.layer_kinds()[:n_layers]
@@ -319,6 +322,11 @@ class ExpertCache:
             raise ValueError("per-layer allocation needs n_layers")
         self.capacity = max(0, capacity)
         self.policy = policy
+        # Only LRU reads `_order`. Keeping the recency list is O(n) per access
+        # (`list.remove`), so lfu/hot — which pick their victim by frequency —
+        # must not pay for it. This becomes the whole cost of a long trace when
+        # it is left on.
+        self._track_order = policy == "lru"
         self.pin_fraction = pin_fraction
         # Age after ~8 turns of the cache. Measured (round 2, ROADMAP §7): 2x is
         # too aggressive (stationary ratio 0.80) and no aging at all cannot follow
@@ -356,12 +364,13 @@ class ExpertCache:
 
     def _insert(self, key: tuple[int, int]) -> None:
         self._keys[key] = None
-        self._order.append(key)
+        if self._track_order:
+            self._order.append(key)
         self._count[key[0]] = self._count.get(key[0], 0) + 1
 
     def _remove(self, key: tuple[int, int]) -> None:
         self._keys.pop(key, None)
-        if key in self._order:
+        if self._track_order and key in self._order:
             self._order.remove(key)
         self._pins.discard(key)
         self._count[key[0]] = self._count.get(key[0], 0) - 1
@@ -370,18 +379,28 @@ class ExpertCache:
         return max(1, self.capacity // max(1, self.n_layers or 1))
 
     def _victim(self, layer: int | None = None) -> tuple[int, int] | None:
-        if self.alloc == "per-layer" and layer is not None:
-            pool = [k for k in self._keys if k[0] == layer]
-            candidates = [k for k in pool if k not in self._pins] or pool
-        else:
-            candidates = [k for k in self._keys if k not in self._pins] or list(self._keys)
-        if not candidates:
-            return None
+        """Pick a key to evict, or None when there is nothing to evict.
+
+        `_order` is MRU-appended, so under LRU the victim is simply the first
+        non-pinned key in it — no candidate list is needed. The old version built
+        that list and then searched it with `k in candidates`, an O(n^2) scan that
+        dominated every simulation once the cache filled.
+        """
+        per_layer = self.alloc == "per-layer" and layer is not None
+
         if self.policy == "lru":
+            # Only `hot` ever fills `_pins`, so under LRU the victim is just the
+            # least-recent pool key: `_order` is MRU-appended, so scan it from the
+            # front. (test_cache_policy pins this invariant.)
             for k in self._order:
-                if k in candidates:
+                if not per_layer or k[0] == layer:
                     return k
-            return candidates[0]
+            return None
+
+        pool = [k for k in self._keys if k[0] == layer] if per_layer else list(self._keys)
+        if not pool:
+            return None
+        candidates = [k for k in pool if k not in self._pins] or pool
         return min(candidates, key=lambda k: self._freq.get(k, 0))
 
     def _age(self) -> None:
@@ -458,7 +477,8 @@ class ExpertCache:
         lf[key[1]] = lf.get(key[1], 0) + 1
         if key in self._keys:
             self.hits += 1
-            self._touch(key)
+            if self._track_order:
+                self._touch(key)
             self._maybe()
             return True
         self.misses += 1
@@ -510,15 +530,30 @@ class SimResult:
         return self.manifest["residency"]["resident_spill_disk_bytes"] == 0
 
 
-def _zipf_sample(rng: random.Random, n: int, k: int, skew: float) -> list[int]:
-    """Pick k distinct ids in [0, n) with a Zipf(skew) popularity skew."""
+def _zipf_sample(
+    rng: random.Random,
+    n: int,
+    k: int,
+    skew: float,
+    weights: list[float] | None = None,
+) -> list[int]:
+    """Pick k distinct ids in [0, n) with a Zipf(skew) popularity skew.
+
+    `weights` lets the caller build the n-element table once instead of per
+    (token, layer) sample — `_routing` makes n_layers of these per token, so the
+    table used to be rebuilt millions of times for one simulation. The sum is
+    taken with `map`, which is numerically identical to the old generator sum
+    (same order of addition) but does the iteration in C.
+    """
     if skew <= 0:
         return rng.sample(range(n), k)
-    weights = [1.0 / ((i + 1) ** skew) for i in range(n)]
+    if weights is None:
+        weights = [1.0 / ((i + 1) ** skew) for i in range(n)]
+    get = weights.__getitem__
     chosen: list[int] = []
     idx = list(range(n))
     for _ in range(k):
-        total = sum(weights[i] for i in idx)
+        total = sum(map(get, idx))
         roll = rng.random() * total
         acc = 0.0
         picked = idx[-1]
@@ -537,8 +572,10 @@ def _routing(
 ) -> list[list[list[int]]]:
     """routing[token][layer] = list of selected expert ids."""
     rng = random.Random(seed)
+    # Build the skew table once per simulation; every (token, layer) sample reuses it.
+    weights = None if skew <= 0 else [1.0 / ((i + 1) ** skew) for i in range(n_experts)]
     return [
-        [_zipf_sample(rng, n_experts, top_k, skew) for _ in range(n_layers)]
+        [_zipf_sample(rng, n_experts, top_k, skew, weights) for _ in range(n_layers)]
         for _ in range(tokens)
     ]
 

@@ -63,6 +63,28 @@ class TestExpertCache(unittest.TestCase):
         self.assertIn((0, 2), cache)
         self.assertNotIn((0, 1), cache)
 
+    def test_recency_list_is_only_maintained_for_lru(self):
+        # lfu/hot pick their victim by frequency and never read `_order`, so
+        # maintaining the O(n) recency list for them was pure cost. If `_order`
+        # fills up again, every access under those policies pays `list.remove`.
+        for policy in ("lfu", "hot"):
+            cache = ExpertCache(4, policy)
+            for e in range(8):
+                cache.access((0, e))
+            self.assertEqual(cache._order, [])
+        lru = ExpertCache(4, "lru")
+        for e in range(8):
+            lru.access((0, e))
+        self.assertEqual(len(lru._order), 4)
+
+    def test_only_the_hot_policy_ever_pins(self):
+        # `_victim` relies on this invariant: under LRU the victim is simply the
+        # least-recent key, with no pinned-key special case to fall back on.
+        lru = ExpertCache(2, "lru")
+        for e in range(6):
+            lru.access((0, e))
+        self.assertEqual(lru._pins, set())
+
     def test_hot_admission_bypasses_a_key_no_hotter_than_its_victim(self):
         cache = ExpertCache(2, "hot")
         for _ in range(2):
