@@ -8,6 +8,8 @@ from vipera.schedule import Optimizations, Quant, model_bytes, simulate
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 GLM = os.path.join(REPO_ROOT, "arch", "glm-5.3-flash.toml")
 HW = os.path.join(REPO_ROOT, "hw", "gtx1650.toml")
+LLAMA = os.path.join(REPO_ROOT, "arch", "llama3-70b.toml")
+LLAMA_HW = os.path.join(REPO_ROOT, "hw", "llama70b-pc.toml")
 
 
 def glm() -> Architecture:
@@ -138,6 +140,41 @@ class TestOptimizations(unittest.TestCase):
         m = simulate(glm(), gtx1650(), quant=Quant.q4_experts(), tokens=2, warmup=1,
                      optimizations=opt).manifest
         self.assertEqual(m["optimizations"], opt.as_dict())
+
+
+class TestDenseInstance(unittest.TestCase):
+    """Llama-3-70B on the LLM-PC-OPT box (8 GB VRAM, 32 GB RAM, 3 GB/s SSD)."""
+
+    def _run(self, **kw):
+        return simulate(
+            Architecture.from_toml(LLAMA), Target.from_toml(LLAMA_HW),
+            quant=Quant.q4_experts(), context=4096, **kw,
+        )
+
+    def test_no_expert_pool_for_a_dense_model(self):
+        r = self._run(tokens=2, warmup=1)
+        self.assertEqual(r.manifest["residency"]["expert_pool_bytes"], 0)
+
+    def test_ffn_counts_as_resident(self):
+        r = self._run(tokens=2, warmup=1)
+        # ~41 GB (decimal) of Q4 weights, all of them touched every token.
+        self.assertGreater(r.manifest["residency"]["resident_bytes"], 40 * 10 ** 9)
+
+    def test_baseline_is_far_below_the_five_tok_s_target(self):
+        r = self._run(tokens=4, warmup=1)
+        self.assertLess(r.tok_s, 2.0)
+        self.assertGreater(r.tok_s, 0.0)
+
+    def test_layer_pruning_is_the_only_dense_speedup(self):
+        base = self._run(tokens=4, warmup=1)
+        cut = self._run(tokens=4, warmup=1, optimizations=Optimizations(keep_layers=40))
+        self.assertGreater(cut.tok_s, base.tok_s)
+        self.assertLess(cut.bytes_per_token, base.bytes_per_token)
+
+    def test_expert_pruning_is_a_no_op_for_dense(self):
+        base = self._run(tokens=4, warmup=1)
+        pruned = self._run(tokens=4, warmup=1, optimizations=Optimizations(prune_experts=0.05))
+        self.assertEqual(pruned.tok_s, base.tok_s)
 
 
 class TestAssumptions(unittest.TestCase):

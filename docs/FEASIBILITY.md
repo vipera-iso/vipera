@@ -70,15 +70,15 @@ expert that is not cached must be read from it.
 
 | Quant | Cache hit | Bytes/token | Disk bytes/token | ms/token | **tok/s** |
 |---|---|---|---|---|---|
-| FP8 (1 B/param) | 13.2% | 16.0 GiB | 6.87 GiB | 4136 | **0.24** |
-| Q4 experts, FP8 rest | 21.5% | 11.6 GiB | 3.11 GiB | 1997 | **0.50** |
-| Q4 everything | 31.3% | 8.0 GiB | 2.72 GiB | 1683 | **0.59** |
+| FP8 (1 B/param) | 13.2% | 16.0 GiB | 6.87 GiB | 3877 | **0.26** |
+| Q4 experts, FP8 rest | 21.5% | 11.6 GiB | 3.11 GiB | 1839 | **0.54** |
+| Q4 everything | 31.3% | 8.0 GiB | 2.72 GiB | 1536 | **0.65** |
 
 ## 5. The verdict
 
 **GLM-5.3-Flash cannot run usefully on this machine.** The best modelled figure
-is **~0.6 tokens/s** (roughly one word every two seconds), and it is I/O-bound:
-77% of the per-token time is spent waiting on the DRAM-less disk.
+is **~0.65 tokens/s** (roughly one word every two seconds), and it is I/O-bound:
+~90% of the per-token time is spent waiting on the DRAM-less disk.
 
 Two independent ceilings cap it, and neither is a software problem:
 
@@ -144,10 +144,10 @@ and one machine instead of argued in the abstract:
 
 ```
 strategy                  hit  disk GB/tok  bytes GB/tok     tok/s  bound
-baseline fp8            13.2%         7.37         17.19      0.24  io
-q4 experts              21.5%         3.33         12.41      0.50  io
-q4 experts + KV 8-bit   21.5%         3.33         12.41      0.50  io
-+ prune 25% experts     38.5%         2.61         12.41      0.61  io
+baseline fp8            13.2%         7.37         17.19      0.26  io
+q4 experts              21.5%         3.33         12.41      0.54  io
+q4 experts + KV 8-bit   21.5%         3.33         12.41      0.54  io
++ prune 25% experts     38.5%         2.61         12.41      0.67  io
 + prune 5% experts      95.0%         0.21         12.41      1.39  compute
 + prune 5% + draft x3   95.0%         0.21         12.41      4.18  compute
 + drop 20 layers too    95.4%         0.11          6.91      7.52  compute
@@ -165,3 +165,77 @@ not the bound.
 pruned model still works. That has to be measured with perplexity / a task set
 before any of these rows can be trusted — see §6 of `OPTIMIZER.md`. A row that
 looks fast and a model that got dumber is a failure, not a win.
+
+---
+
+## 10. Instance solved: LLM-PC-OPT on a dense model
+
+The competition instance is **Llama-3-70B, 80 layers, 32k context** on **8 GB VRAM,
+32 GB RAM, 3 GB/s NVMe, PCIe 4.0 x16, 8 cores**, targeting **≥ 5 tok/s**, **< 2%
+MMLU loss**, **< 250 W**.
+
+vipera can now solve it: a dense model is modelled as *one expert per layer with
+top_k = 1*, so the FFN joins the always-resident set and whatever exceeds
+VRAM+RAM streams from disk every token — i.e. dense layer-wise streaming.
+
+```bash
+python3 -m vipera arch     arch/llama3-70b.toml
+python3 -m vipera schedule arch/llama3-70b.toml --target hw/llama70b-pc.toml --quant q4-experts --context 4096
+python3 -m vipera sweep    arch/llama3-70b.toml --target hw/llama70b-pc.toml --context 4096
+```
+
+The model reproduces the real config: **69.5B params (−0.7%)**, ratio active/total = 1.00
+(dense), Q4_K_M-like weights ≈ **41.3 GB**.
+
+| strategy | tok/s | bound |
+|---|---|---|
+| baseline fp8 | 0.10 | io |
+| **Q4_K_M-like (`q4-experts`)** | **0.72** | compute |
+| Q4 + KV 8-bit | 0.72 | compute |
+| Q4 + expert pruning | 0.72 (no-op: dense) | compute |
+| Q4 + speculative ×3 | 2.16 | compute |
+| Q4 + drop 20 layers | 0.96 | compute |
+| Q4 + keep **25 of 80** layers | 6.91 | compute |
+
+### The answer, and the lower bound
+
+**The instance is infeasible as stated.** The best *quality-preserving* config is
+**~0.72 tok/s**; speculative decoding (×3) reaches 2.16 tok/s, still < 5.
+
+Reaching 5 tok/s requires **≤ 0.2 s per token**. A dense 70B must read **~40 GB of
+weights per token** (no sparsity to exploit), so 5 tok/s demands
+
+```
+40 GB / 0.2 s  ≥  200 GB/s  sustained weight bandwidth.
+```
+
+The only tier on this box anywhere near that is VRAM (8 GB at ~200 GB/s). Even in
+the impossible best case — every weight resident, split 8 GB VRAM + 32 GB RAM:
+
+```
+time/token  ≥  8/200 + 32/50  =  0.68 s   ⇒  ≤ 1.47 tok/s   (assumed tier BW)
+```
+
+and using only the constants the problem itself gives (PCIe 4.0 x16 ≈ 32 GB/s):
+
+```
+time/token  ≥  40/32 = 1.25 s              ⇒  ≤ 0.8 tok/s
+```
+
+Either way the 5 tok/s target is **unreachable by ~4–7×**, with no software
+freedom left — it is memory bandwidth, not the algorithm. The only row that clears
+5 tok/s keeps **25 of 80 layers**, i.e. discards 69% of the depth; that is a
+different, much dumber model and violates the < 2% quality budget.
+
+### Limits of this answer
+
+* **Compute is modelled with one CPU figure** (`cpu_gflops`). On this box a GPU
+  does the matmuls, which vipera's flat compute floor understates; the verdict
+  does not depend on it (the I/O rows already fail), but a GPU-aware compute term
+  is the next modelling gap.
+* **Power/thermal (< 250 W) is not modelled at all** — a genuinely missing
+  constraint from the problem.
+* **Quality is not modelled**; the < 2% MMLU check is an assumption standing in
+  for a perplexity/task evaluation.
+* RAM/VRAM bandwidths are class assumptions (the instance does not state them);
+  the disk and PCIe numbers are the problem's.

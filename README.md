@@ -74,6 +74,9 @@ python3 -m vipera arch     arch/glm-5.3-flash.toml
 python3 -m vipera schedule arch/glm-5.3-flash.toml --target hw/gtx1650.toml --quant q4-experts --out out/
 python3 -m vipera sweep    arch/glm-5.3-flash.toml --target hw/gtx1650.toml
 
+# the LLM-PC-OPT instance: dense Llama-3-70B on 8 GB VRAM / 32 GB RAM / 3 GB/s SSD
+python3 -m vipera schedule arch/llama3-70b.toml --target hw/llama70b-pc.toml --quant q4-experts --context 4096
+
 # tests
 python3 -m unittest discover -s tests -t .
 ```
@@ -124,11 +127,12 @@ from Phase 2 exist, and it says so in `placement.expert_order_pending_trace`.
 
 ## Stage 2 — the layer scheduler
 
-`vipera/arch.py` models a hybrid MoE per layer (KDA + MLA attention, sparse experts, mHC residual,
-MTP and vision), and `vipera/schedule.py` places every layer's weights across VRAM/RAM/disk and
-simulates decode to answer one question: **how many bytes per token, from which tier, and how fast?**
+`vipera/arch.py` models a hybrid MoE or a dense model per layer (KDA/MLA/full-GQA attention, sparse
+experts or a dense FFN, mHC residual, MTP and vision), and `vipera/schedule.py` places every layer's
+weights across VRAM/RAM/disk and simulates decode to answer one question: **how many bytes per
+token, from which tier, and how fast?**
 
-The headline exercise is a 321B-A18B model on the target laptop. Modelled result: **~0.6 tokens/s**
+The headline exercise is a 321B-A18B model on the target laptop. Modelled result: **~0.65 tokens/s**
 (Q4), I/O-bound. `vipera sweep` then models the layer-level optimization families (quantization,
 expert pruning, layer pruning, KV compression, speculative/MTP) to show which one actually changes
 the verdict — expert pruning, because the expert pool is 30× the cache. See

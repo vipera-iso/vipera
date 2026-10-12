@@ -1,0 +1,16 @@
+# Hardware of the LLM-PC-OPT instance:
+#   GPU 8 GB VRAM, RAM 32 GB, SSD NVMe 3 GB/s, PCIe 4.0 x16, CPU 8 cores.
+#
+# The instance does not state RAM or VRAM bandwidth, so those two are class
+# figures for this machine profile and are flagged as assumptions. The disk
+# number (3 GB/s) is given by the problem and is the one that binds here.
+name = "llama70b-pc"
+vram_mb = 8192
+ram_mb = 32768
+disk = "nvme-3000mbs"
+vram_headroom_mb = 512     # reserved for KV + activations + runtime
+ram_headroom_mb = 1536
+vram_bw_gbs = 200.0        # 8 GB-class GPU, ~200 GB/s
+ram_bw_gbs = 50.0          # dual-channel DDR4/DDR5, ~50 GB/s
+disk_bw_gbs = 3.0          # given by the problem
+cpu_gflops = 100.0         # 8 cores with AVX2, GEMV after dequant

@@ -5,6 +5,7 @@ from vipera.arch import Architecture
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 GLM = os.path.join(REPO_ROOT, "arch", "glm-5.3-flash.toml")
+LLAMA = os.path.join(REPO_ROOT, "arch", "llama3-70b.toml")
 
 
 def toy() -> Architecture:
@@ -81,6 +82,33 @@ class TestShippedProfile(unittest.TestCase):
         kinds = Architecture.from_toml(GLM).layer_kinds()
         self.assertEqual(kinds.count("kda"), 34)
         self.assertEqual(kinds.count("mla"), 11)
+
+
+class TestDenseProfile(unittest.TestCase):
+    def test_llama_profile_is_dense(self):
+        a = Architecture.from_toml(LLAMA)
+        self.assertTrue(a.dense)
+        self.assertEqual(a.n_experts, 1)
+
+    def test_every_layer_is_full_attention(self):
+        a = Architecture.from_toml(LLAMA)
+        self.assertEqual(a.layer_kinds(), ["full"] * a.n_layers)
+
+    def test_total_is_about_70b(self):
+        a = Architecture.from_toml(LLAMA)
+        total = a.total_params(include_vision=False)
+        self.assertLess(abs(total - a.stated_total) / a.stated_total, 0.02)
+
+    def test_dense_reads_all_parameters_every_token(self):
+        # No sparsity: active == total for a dense model.
+        a = Architecture.from_toml(LLAMA)
+        self.assertEqual(a.active_params(), a.total_params(include_vision=False))
+
+    def test_gqa_kv_shrinks_with_kv_heads(self):
+        a = Architecture.from_toml(LLAMA)
+        # 8 KV heads of 128 dims -> 2*8*128 = 2048 bytes/token/layer at fp16
+        self.assertEqual(a.full.kv_bytes_per_token(2.0), 2 * 8 * 128 * 2)
+        self.assertGreater(a.kv_bytes(4096), a.kv_bytes(1024))
 
 
 if __name__ == "__main__":

@@ -1,0 +1,30 @@
+# Llama-3-70B — a DENSE model (the LLM-PC-OPT instance).
+#
+# Dense means no routed experts: every FFN is read on every token. vipera models
+# that as "one expert per layer with top_k=1", so the FFN becomes part of the
+# always-resident set and anything that does not fit VRAM+RAM streams from disk
+# on every token. That is exactly layer-wise/dense streaming.
+#
+# Shapes are the published Llama-3-70B config (they reproduce ~69.5B params).
+name = "llama-3-70b"
+n_layers = 80
+hidden = 8192
+vocab = 128256
+n_experts = 1              # dense
+top_k = 1
+moe_inter = 28672          # SwiGLU intermediate (gate, up, down)
+n_shared_experts = 0
+shared_inter = 0
+full_layers = 80           # GQA attention on every layer
+kda_layers = 0
+mla_layers = 0
+mhc_streams = 0
+mtp_layers = 0
+vision_params = 0
+stated_total = 70000000000
+stated_active = 70000000000
+
+[full]
+n_heads = 64
+n_kv_heads = 8
+head_dim = 128

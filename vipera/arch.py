@@ -72,6 +72,25 @@ class KDA:
 
 
 @dataclass(frozen=True)
+class Full:
+    """Standard multi-head attention with grouped KV (GQA), as in Llama."""
+
+    n_heads: int = 64
+    n_kv_heads: int = 8
+    head_dim: int = 128
+
+    def params_per_layer(self, hidden: int) -> int:
+        q = hidden * self.n_heads * self.head_dim
+        k = hidden * self.n_kv_heads * self.head_dim
+        v = hidden * self.n_kv_heads * self.head_dim
+        o = self.n_heads * self.head_dim * hidden
+        return q + k + v + o
+
+    def kv_bytes_per_token(self, bytes_per_param: float = 2.0) -> int:
+        return 2 * self.n_kv_heads * self.head_dim * int(bytes_per_param)
+
+
+@dataclass(frozen=True)
 class Architecture:
     name: str
     n_layers: int
@@ -84,6 +103,7 @@ class Architecture:
     shared_inter: int = 1568
     kda_layers: int = 34
     mla_layers: int = 11
+    full_layers: int = 0
     mhc_streams: int = 4
     mtp_layers: int = 1
     vision_params: int = 1_000_000_000
@@ -92,6 +112,12 @@ class Architecture:
     stated_active: int = 0
     mla: MLA = field(default_factory=MLA)
     kda: KDA = field(default_factory=KDA)
+    full: Full = field(default_factory=Full)
+
+    @property
+    def dense(self) -> bool:
+        """A dense model has no routed experts: one FFN per layer, always read."""
+        return self.n_experts <= 1
 
     # -- layer structure ---------------------------------------------------
 
@@ -102,6 +128,12 @@ class Architecture:
         KDA. Any leftover MLA layers are appended at the end so the counts are
         always honoured exactly.
         """
+        if self.full_layers and not (self.kda_layers or self.mla_layers):
+            if self.full_layers != self.n_layers:
+                raise ValueError(
+                    f"full_layers({self.full_layers}) != n_layers({self.n_layers})"
+                )
+            return ["full"] * self.n_layers
         if self.kda_layers + self.mla_layers != self.n_layers:
             raise ValueError(
                 f"kda_layers({self.kda_layers}) + mla_layers({self.mla_layers}) "
@@ -147,6 +179,8 @@ class Architecture:
     def attn_params(self, kind: str) -> int:
         if kind == "mla":
             return self.mla.params_per_layer(self.hidden)
+        if kind == "full":
+            return self.full.params_per_layer(self.hidden)
         return self.kda.params_per_layer(self.hidden)
 
     # -- totals ------------------------------------------------------------
@@ -155,12 +189,14 @@ class Architecture:
         kinds = self.layer_kinds()
         n_mla = kinds.count("mla")
         n_kda = kinds.count("kda")
+        n_full = kinds.count("full")
         routed = self.n_layers * self.routed_expert_params()
         return {
             "routed_experts": routed,
             "shared_experts": self.n_layers * self.shared_expert_params(),
             "attention_kda": n_kda * self.kda.params_per_layer(self.hidden),
             "attention_mla": n_mla * self.mla.params_per_layer(self.hidden),
+            "attention_full": n_full * self.full.params_per_layer(self.hidden),
             "router": self.n_layers * self.router_params(),
             "residual_mhc": self.n_layers * self.mhc_params(),
             "embeddings": self.vocab * self.hidden,
@@ -191,6 +227,7 @@ class Architecture:
             + s["shared_experts"]
             + s["attention_kda"]
             + s["attention_mla"]
+            + s["attention_full"]
             + s["router"]
             + s["residual_mhc"]
             + s["embeddings"]
@@ -201,7 +238,8 @@ class Architecture:
         """KV cache for a given context: constant KDA state + linear MLA KV."""
         state = self.kda_layers * self.kda.state_bytes(self.mla.n_heads, bytes_per_param)
         mla_kv = self.mla_layers * self.mla.kv_bytes_per_token(bytes_per_param) * context_tokens
-        return state + mla_kv
+        full_kv = self.full_layers * self.full.kv_bytes_per_token(bytes_per_param) * context_tokens
+        return state + mla_kv + full_kv
 
     def calibrate(self, stated_total: int, stated_active: int) -> dict:
         """Compare the derived model against the published headline numbers."""
@@ -226,6 +264,7 @@ class Architecture:
             d = tomllib.load(f)
         mla_d = d.get("mla", {})
         kda_d = d.get("kda", {})
+        full_d = d.get("full", {})
         return cls(
             name=d.get("name", "unnamed"),
             n_layers=int(d["n_layers"]),
@@ -238,6 +277,7 @@ class Architecture:
             shared_inter=int(d.get("shared_inter", d["moe_inter"])),
             kda_layers=int(d.get("kda_layers", 0)),
             mla_layers=int(d.get("mla_layers", 0)),
+            full_layers=int(d.get("full_layers", 0)),
             mhc_streams=int(d.get("mhc_streams", 4)),
             mtp_layers=int(d.get("mtp_layers", 1)),
             vision_params=int(d.get("vision_params", 0)),
@@ -254,5 +294,10 @@ class Architecture:
                 hidden_multiple=float(kda_d.get("hidden_multiple", 7.0)),
                 state_width=int(kda_d.get("state_width", 128)),
                 d_conv=int(kda_d.get("d_conv", 4)),
+            ),
+            full=Full(
+                n_heads=int(full_d.get("n_heads", 64)),
+                n_kv_heads=int(full_d.get("n_kv_heads", 8)),
+                head_dim=int(full_d.get("head_dim", 128)),
             ),
         )

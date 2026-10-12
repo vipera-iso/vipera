@@ -101,10 +101,12 @@ class LayerBytes:
     router: int
     shared: int
     mhc: int
+    # Dense FFN weights: always needed, so they belong to the resident set.
+    ffn: int = 0
 
     @property
     def resident(self) -> int:
-        return self.attention + self.router + self.shared + self.mhc
+        return self.attention + self.router + self.shared + self.mhc + self.ffn
 
 
 @dataclass
@@ -133,6 +135,7 @@ def model_bytes(
     kinds = arch.layer_kinds()
     if n_layers is not None:
         kinds = kinds[:n_layers]
+    dense = arch.dense
     layers: list[LayerBytes] = []
     for i, kind in enumerate(kinds):
         layers.append(
@@ -143,12 +146,14 @@ def model_bytes(
                 router=int(arch.router_params() * quant.other_bytes),
                 shared=int(arch.shared_expert_params() * quant.expert_bytes),
                 mhc=int(arch.mhc_params() * quant.other_bytes),
+                # Dense: the FFN is one always-needed block, not a routable pool.
+                ffn=int(arch.expert_params_each * quant.expert_bytes) if dense else 0,
             )
         )
     return ModelBytes(
         layers=layers,
-        expert_each=int(arch.expert_params_each * quant.expert_bytes),
-        n_experts=n_experts if n_experts is not None else arch.n_experts,
+        expert_each=0 if dense else int(arch.expert_params_each * quant.expert_bytes),
+        n_experts=1 if dense else (n_experts if n_experts is not None else arch.n_experts),
         embeddings=int(arch.vocab * arch.hidden * quant.other_bytes),
         mtp=int(arch.mtp_params() * quant.expert_bytes),
         vision=int(arch.vision_params * quant.other_bytes),
@@ -262,6 +267,13 @@ def simulate(
     cache_bytes = cache_vram + cache_ram
     slots = cache_bytes // mb.expert_each if mb.expert_each else 0
 
+    # Fractions of the resident set that land in each tier. Resident bytes are
+    # charged at their real tier's bandwidth, so a dense model that spills to
+    # disk is priced at disk speed, not RAM speed.
+    f_vram = resident_vram / resident_total if resident_total else 0.0
+    f_ram = resident_ram / resident_total if resident_total else 0.0
+    f_disk = resident_spill / resident_total if resident_total else 0.0
+
     total_experts = n_layers * n_experts
     expert_pool = mb.expert_each * total_experts
     expert_spill = max(0, expert_pool - cache_bytes)
@@ -287,6 +299,10 @@ def simulate(
             "ram": target.ram_bw_gbs,
             "disk": target.disk_bw_gbs,
         }[tier]
+
+    def tier_seconds(nbytes: int) -> float:
+        """Seconds to read `nbytes` when they are spread across the tiers."""
+        return nbytes * (f_vram / bw("vram") + f_ram / bw("ram") + f_disk / bw("disk")) / 1e9
 
     if routing is None:
         routing = _routing(n_layers, n_experts, arch.top_k, tokens + warmup, skew, seed)
@@ -319,25 +335,30 @@ def simulate(
         io_s = 0.0
         for i, kind in enumerate(kinds):
             lb = mb.layers[i]
-            read = lb.resident
-            disk_read = 0
+            expert_cached = 0
+            expert_disk = 0
             hits = 0
             misses = 0
             for e in tok[i]:
                 key = (i, e)
                 if key in cache:
                     hits += 1
-                    read += mb.expert_each
+                    expert_cached += mb.expert_each
                 else:
                     misses += 1
-                    disk_read += mb.expert_each
-                    read += mb.expert_each
+                    expert_disk += mb.expert_each
                     if slots > 0:
                         if len(order) >= slots:
                             cache.pop(order.pop(0), None)
                         cache[key] = "vram" if cache_vram >= cache_ram else "ram"
                         order.append(key)
-            secs = read / (bw("ram") * 1e9) + disk_read / (bw("disk") * 1e9)
+            read = lb.resident + expert_cached + expert_disk
+            disk_read = int(lb.resident * f_disk) + expert_disk
+            secs = (
+                tier_seconds(lb.resident)
+                + expert_cached / (bw("ram") * 1e9)
+                + expert_disk / (bw("disk") * 1e9)
+            )
             io_s += secs
             if measured_this:
                 acc[i]["read"] += read
@@ -349,7 +370,7 @@ def simulate(
                 raw_misses += misses
 
         # output projection streams the embedding matrix once per token
-        io_s += mb.embeddings / (bw("ram") * 1e9)
+        io_s += tier_seconds(mb.embeddings)
 
         if measured_this:
             token_times.append(max(io_s, compute_s) if prefetch else io_s + compute_s)
