@@ -169,6 +169,13 @@ playbooks, comparison tables, pitfalls and a runnable hardware probe
 ([`scripts/probe.py`](skills/local-llm-optimization/scripts/probe.py)). Claim-to-source anchors are
 in its §Sources; unpublished numbers are marked "no data".
 
+[`skills/expert-io-loop/SKILL.md`](skills/expert-io-loop/SKILL.md) — the **measurement protocol**:
+baseline → localize → hypothesis → one change → re-measure → verdict. Ships two stdlib scripts,
+[`aggregate.py`](skills/expert-io-loop/scripts/aggregate.py) (median of ≥3 runs + spread, refuses
+incomparable inputs) and [`compare.py`](skills/expert-io-loop/scripts/compare.py) (verdict against a
+7% noise band and the ≤0.3 perplexity gate; the exit code *is* the verdict). The 7% band is measured
+in this repo, from `bench/results/hwprobe-run{1,2}.json`.
+
 ## Documents
 
 - [`docs/ROADMAP.md`](docs/ROADMAP.md) — the project decomposed into sub-problems with a
