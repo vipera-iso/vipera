@@ -25,7 +25,13 @@ from .schedule import (
     plan_residency,
     simulate,
 )
-from .prune import dumps as prune_dumps, mass_curve, plan_from_trace
+from .prune import (
+    dumps as prune_dumps,
+    gated_dumps,
+    gated_prune,
+    mass_curve,
+    plan_from_trace,
+)
 from .scoring import local_llm_16gb_score
 from .trace import (
     TraceError,
@@ -282,6 +288,42 @@ def cmd_prune(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_prune_gated(args: argparse.Namespace) -> int:
+    """P4: prune experts only where the gate passes, roll back the layers that don't."""
+    arch = Architecture.from_toml(args.arch)
+    routing = load_trace(args.trace)
+    validate_trace(routing, n_layers=arch.n_layers, n_experts=arch.n_experts,
+                   top_k=arch.top_k)
+
+    drift = None
+    if args.drift:
+        with open(args.drift) as f:
+            drift = {int(k): float(v) for k, v in json.load(f).items()}
+
+    plan = gated_prune(routing, n_experts=arch.n_experts, target_mass=args.target_mass,
+                       max_keep_fraction=args.max_keep_fraction,
+                       delta=args.delta, drift=drift)
+    if args.json:
+        json.dump(plan.as_dict(), sys.stdout, indent=2)
+        sys.stdout.write("\n")
+        return 0
+
+    print(f"trace         {args.trace}")
+    print(f"architecture  {arch.name}  ({arch.n_experts} experts/layer)")
+    print(f"target mass   {plan.target_mass:.0%}")
+    print(f"max keep      {plan.max_keep_fraction:.0%} of experts/layer")
+    if plan.delta is not None:
+        print(f"drift budget  {plan.delta}")
+    print()
+    print(f"pruned {plan.pruned_layers} of {len(plan.layers)} layers "
+          f"({plan.keep_fraction * 100:.2f}% of the pool kept), "
+          f"retaining {plan.mean_kept_mass * 100:.1f}% of routing mass")
+    print(f"rolled back {plan.rolled_back_layers} layers")
+    reasons = plan.as_dict()["reasons"]
+    print(f"reasons: {', '.join(f'{k}={v}' for k, v in sorted(reasons.items()))}")
+    return 0
+
+
 def cmd_sweep(args: argparse.Namespace) -> int:
     """Run a fixed set of layer-level strategies and print them side by side."""
     arch = Architecture.from_toml(args.arch)
@@ -422,6 +464,20 @@ def build_parser() -> argparse.ArgumentParser:
                     help="routing mass the keep-set must retain (default 0.95)")
     pr.add_argument("--json", action="store_true")
     pr.set_defaults(func=cmd_prune)
+
+    pg = sub.add_parser("prune-gated",
+                        help="prune only where a gate passes, else roll back the layer (P4)")
+    pg.add_argument("trace")
+    pg.add_argument("--arch", required=True, help="architecture profile (TOML)")
+    pg.add_argument("--target-mass", type=float, default=0.95,
+                    help="routing mass the keep-set must retain (default 0.95)")
+    pg.add_argument("--max-keep-fraction", type=float, default=1.0,
+                    help="reject a layer whose keep-set exceeds this fraction (default 1.0)")
+    pg.add_argument("--delta", type=float, default=None,
+                    help="max drift proxy a layer may exceed before rollback")
+    pg.add_argument("--drift", help="JSON file mapping layer index -> measured drift proxy")
+    pg.add_argument("--json", action="store_true")
+    pg.set_defaults(func=cmd_prune_gated)
 
     sw = sub.add_parser("sweep", help="compare layer-level optimizations on the same model+machine")
     sw.add_argument("arch", help="architecture profile (TOML)")

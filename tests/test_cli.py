@@ -85,6 +85,18 @@ class TestCLI(unittest.TestCase):
         self.assertEqual(manifest["expert_cache"]["policy"], "hot")
         self.assertIn("ceiling_ratio", manifest["expert_cache"])
 
+    def test_prune_gated_json(self):
+        path = os.path.join(self.tmp.name, "trace.jsonl")
+        save_trace(path, synth_trace(20, n_layers=45, n_experts=288, top_k=8, seed=0))
+        out = io.StringIO()
+        with redirect_stdout(out):
+            code = main(["prune-gated", path, "--arch", GLM,
+                         "--max-keep-fraction", "0.5", "--json"])
+        self.assertEqual(code, 0)
+        data = json.loads(out.getvalue())
+        self.assertEqual(data["algorithm"], "gated-expert-pruning")
+        self.assertEqual(data["rolled_back_layers"] + data["pruned_layers"], 45)
+
     def test_score_fails_the_local_llm_16gb_instance(self):
         out = io.StringIO()
         with redirect_stdout(out):
