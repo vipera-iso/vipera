@@ -122,3 +122,46 @@ disk bytes per token for each of the 45 layers).
    disk number is the one that matters most.
 4. **KV cache** is modelled at 2048 tokens (76 MiB). At the model's 1M-token
    context it grows to ~37 GiB and would not fit at all.
+
+---
+
+## 9. Layer-level transforms: what actually moves the needle
+
+The scheduler can model the standard layer-level optimization families
+(`vipera/schedule.py`, `Optimizations`) so their effect is compared on one model
+and one machine instead of argued in the abstract:
+
+| Technique | Modelled as | Effect on the numbers |
+|---|---|---|
+| Partial offload / residency | always-resident placement + expert cache | (already in the baseline) |
+| Quantization | `--quant fp8\|q4-experts\|q4` | 0.24 → 0.50 tok/s |
+| KV compression | `--kv-bits 8` | shrinks KV, so more expert cache |
+| **Expert pruning** | `--prune-experts F` | the big one: shrinks the pool so it fits cache |
+| Layer pruning | `--keep-layers N` | fewer layers ⇒ fewer reads per token |
+| Speculative / MTP | `--draft-tokens N` | multiplies accepted tokens per pass |
+
+`python3 -m vipera sweep arch/glm-5.3-flash.toml --target hw/gtx1650.toml`:
+
+```
+strategy                  hit  disk GB/tok  bytes GB/tok     tok/s  bound
+baseline fp8            13.2%         7.37         17.19      0.24  io
+q4 experts              21.5%         3.33         12.41      0.50  io
+q4 experts + KV 8-bit   21.5%         3.33         12.41      0.50  io
++ prune 25% experts     38.5%         2.61         12.41      0.61  io
++ prune 5% experts      95.0%         0.21         12.41      1.39  compute
++ prune 5% + draft x3   95.0%         0.21         12.41      4.18  compute
++ drop 20 layers too    95.4%         0.11          6.91      7.52  compute
+```
+
+**The only lever that changes the verdict is expert pruning**, because it is the
+only one that fixes the *cause* (a pool 30× the cache). At 5% of experts, 95% of
+routes hit the cache, the workload stops being disk-bound, and the ceiling moves
+to CPU compute — where **speculative/MTP decoding** and **layer pruning** then
+compound. The other families (partial offload, plain KV compression) move bytes,
+not the bound.
+
+**But none of this is free or proven here.** Quality is *not* modelled: pruning
+5% of experts (or 20 layers) will cost accuracy, and the numbers above assume the
+pruned model still works. That has to be measured with perplexity / a task set
+before any of these rows can be trusted — see §6 of `OPTIMIZER.md`. A row that
+looks fast and a model that got dumber is a failure, not a win.

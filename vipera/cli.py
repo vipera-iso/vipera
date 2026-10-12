@@ -18,7 +18,7 @@ from .analyze import analyze, to_dict
 from .arch import Architecture
 from .gguf import GGUFError, read_gguf
 from .manifest import Target, dumps, plan
-from .schedule import Quant, dumps as schedule_dumps, simulate
+from .schedule import Optimizations, Quant, dumps as schedule_dumps, simulate
 
 MIB = 1024 * 1024
 
@@ -107,9 +107,16 @@ _QUANTS = {"fp8": Quant.fp8, "q4-experts": Quant.q4_experts, "q4": Quant.q4_all}
 def cmd_schedule(args: argparse.Namespace) -> int:
     arch = Architecture.from_toml(args.arch)
     target = Target.from_toml(args.target)
+    opt = Optimizations(
+        prune_experts=args.prune_experts,
+        keep_layers=args.keep_layers,
+        kv_bits=args.kv_bits,
+        draft_tokens=args.draft_tokens,
+    )
     result = simulate(
         arch, target,
         quant=_QUANTS[args.quant](),
+        optimizations=opt,
         context=args.context,
         tokens=args.tokens,
         prefetch=not args.no_prefetch,
@@ -117,9 +124,13 @@ def cmd_schedule(args: argparse.Namespace) -> int:
     r = result.manifest["residency"]
     p = result.manifest["performance"]
     kv = result.manifest["context"]
-    print(f"architecture  {arch.name}  ({arch.n_layers} layers, {arch.n_experts} experts top-{arch.top_k})")
+    n_layers = result.manifest["architecture"]["n_layers"]
+    n_experts = result.manifest["architecture"]["n_experts"]
+    print(f"architecture  {arch.name}  ({n_layers} layers, {n_experts} experts top-{arch.top_k})")
     print(f"target        {target.name}")
     print(f"quant         {args.quant}")
+    print(f"transforms    prune_experts={opt.prune_experts} keep_layers={opt.keep_layers} "
+          f"kv_bits={opt.kv_bits} draft_tokens={opt.draft_tokens}")
     print()
     print("residency")
     print(f"  always resident      {_fmt(r['resident_bytes'])}")
@@ -146,6 +157,38 @@ def cmd_schedule(args: argparse.Namespace) -> int:
         print(f"\nmanifest written to {path}")
     for w in result.warnings:
         print(f"warning: {w}", file=sys.stderr)
+    return 0
+
+
+def cmd_sweep(args: argparse.Namespace) -> int:
+    """Run a fixed set of layer-level strategies and print them side by side."""
+    arch = Architecture.from_toml(args.arch)
+    target = Target.from_toml(args.target)
+
+    strategies = [
+        ("baseline fp8", Quant.fp8(), Optimizations()),
+        ("q4 experts", Quant.q4_experts(), Optimizations()),
+        ("q4 experts + KV 8-bit", Quant.q4_experts(), Optimizations(kv_bits=8)),
+        ("+ prune 25% experts", Quant.q4_experts(), Optimizations(prune_experts=0.25, kv_bits=8)),
+        ("+ prune 5% experts", Quant.q4_experts(), Optimizations(prune_experts=0.05, kv_bits=8)),
+        ("+ prune 5% + draft x3", Quant.q4_experts(),
+         Optimizations(prune_experts=0.05, kv_bits=8, draft_tokens=3.0)),
+        ("+ drop 20 layers too", Quant.q4_experts(),
+         Optimizations(prune_experts=0.05, kv_bits=8, draft_tokens=3.0, keep_layers=25)),
+    ]
+
+    header = (f"{'strategy':<22}{'hit':>7}{'disk GB/tok':>13}{'bytes GB/tok':>14}"
+              f"{'tok/s':>10}  bound")
+    print(f"architecture  {arch.name}   target  {target.name}   ctx {args.context}")
+    print(header)
+    print("-" * len(header))
+    for name, quant, opt in strategies:
+        r = simulate(arch, target, quant=quant, optimizations=opt, context=args.context)
+        p = r.manifest["performance"]
+        print(f"{name:<22}{r.hit_rate * 100:>6.1f}%{r.disk_bytes_per_token / 1e9:>13.2f}"
+              f"{r.bytes_per_token / 1e9:>14.2f}{r.tok_s:>10.2f}  {p['bound']}")
+    print()
+    print("all values MODELLED on the target machine's bandwidths; not a real run")
     return 0
 
 
@@ -176,8 +219,20 @@ def build_parser() -> argparse.ArgumentParser:
     sc.add_argument("--context", type=int, default=2048)
     sc.add_argument("--tokens", type=int, default=8, help="decode steps to simulate")
     sc.add_argument("--no-prefetch", action="store_true", help="serialise I/O and compute")
+    sc.add_argument("--prune-experts", type=float, default=1.0,
+                    help="fraction of experts kept per layer (1.0 = none pruned)")
+    sc.add_argument("--keep-layers", type=int, default=0, help="drop layers from the end (0 = all)")
+    sc.add_argument("--kv-bits", type=int, default=16, help="KV cache precision (16/8/4)")
+    sc.add_argument("--draft-tokens", type=float, default=1.0,
+                    help="accepted tokens per target forward pass (MTP/speculative)")
     sc.add_argument("--out", help="directory to write <arch>.vipera.json into")
     sc.set_defaults(func=cmd_schedule)
+
+    sw = sub.add_parser("sweep", help="compare layer-level optimizations on the same model+machine")
+    sw.add_argument("arch", help="architecture profile (TOML)")
+    sw.add_argument("--target", required=True, help="hardware profile (TOML)")
+    sw.add_argument("--context", type=int, default=2048)
+    sw.set_defaults(func=cmd_sweep)
     return p
 
 

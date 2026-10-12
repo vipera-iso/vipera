@@ -3,7 +3,7 @@ import unittest
 
 from vipera.arch import Architecture
 from vipera.manifest import MIB, Target
-from vipera.schedule import Quant, model_bytes, simulate
+from vipera.schedule import Optimizations, Quant, model_bytes, simulate
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 GLM = os.path.join(REPO_ROOT, "arch", "glm-5.3-flash.toml")
@@ -83,6 +83,61 @@ class TestCacheBehaviour(unittest.TestCase):
         self.assertEqual(result.disk_bytes_per_token, 0)
         self.assertAlmostEqual(result.hit_rate, 1.0, places=6)
         self.assertEqual(result.manifest["expert_cache"]["routing_source"], "trace")
+
+
+class TestOptimizations(unittest.TestCase):
+    def test_expert_pruning_shrinks_the_pool(self):
+        a = glm()
+        full = simulate(a, gtx1650(), quant=Quant.q4_experts(), tokens=4, warmup=1)
+        pruned = simulate(a, gtx1650(), quant=Quant.q4_experts(), tokens=4, warmup=1,
+                          optimizations=Optimizations(prune_experts=0.05))
+        self.assertLess(pruned.manifest["residency"]["expert_pool_bytes"],
+                        full.manifest["residency"]["expert_pool_bytes"])
+
+    def test_expert_pruning_raises_hit_rate(self):
+        a = glm()
+        full = simulate(a, gtx1650(), quant=Quant.q4_experts(), tokens=4, warmup=1, seed=3)
+        pruned = simulate(a, gtx1650(), quant=Quant.q4_experts(), tokens=4, warmup=1, seed=3,
+                          optimizations=Optimizations(prune_experts=0.05))
+        self.assertGreater(pruned.hit_rate, full.hit_rate)
+        self.assertLess(pruned.disk_bytes_per_token, full.disk_bytes_per_token)
+
+    def test_experts_never_pruned_below_top_k(self):
+        # Asking to keep 0% must still leave top_k experts to route to.
+        r = simulate(glm(), gtx1650(), quant=Quant.fp8(), tokens=2, warmup=1,
+                     optimizations=Optimizations(prune_experts=0.0))
+        self.assertGreaterEqual(r.manifest["architecture"]["n_experts"], glm().top_k)
+
+    def test_draft_tokens_multiplies_throughput(self):
+        a = glm()
+        base = simulate(a, gtx1650(), quant=Quant.q4_experts(), tokens=4, warmup=1)
+        spec = simulate(a, gtx1650(), quant=Quant.q4_experts(), tokens=4, warmup=1,
+                        optimizations=Optimizations(draft_tokens=3.0))
+        self.assertAlmostEqual(spec.tok_s, base.tok_s * 3.0, places=6)
+
+    def test_layer_pruning_cuts_layers_and_bytes(self):
+        a = glm()
+        full = simulate(a, gtx1650(), quant=Quant.q4_experts(), tokens=4, warmup=1)
+        cut = simulate(a, gtx1650(), quant=Quant.q4_experts(), tokens=4, warmup=1,
+                       optimizations=Optimizations(keep_layers=25))
+        self.assertEqual(cut.manifest["architecture"]["n_layers"], 25)
+        self.assertEqual(len(cut.manifest["layers"]), 25)
+        self.assertLess(cut.bytes_per_token, full.bytes_per_token)
+
+    def test_kv_bits_shrink_the_kv_cache(self):
+        a = glm()
+        big = simulate(a, gtx1650(), quant=Quant.fp8(), tokens=2, warmup=1,
+                       optimizations=Optimizations(kv_bits=16))
+        small = simulate(a, gtx1650(), quant=Quant.fp8(), tokens=2, warmup=1,
+                         optimizations=Optimizations(kv_bits=8))
+        self.assertEqual(small.manifest["context"]["kv_bytes"] * 2,
+                         big.manifest["context"]["kv_bytes"])
+
+    def test_optimizations_are_recorded_in_the_manifest(self):
+        opt = Optimizations(prune_experts=0.1, keep_layers=30, kv_bits=8, draft_tokens=2.0)
+        m = simulate(glm(), gtx1650(), quant=Quant.q4_experts(), tokens=2, warmup=1,
+                     optimizations=opt).manifest
+        self.assertEqual(m["optimizations"], opt.as_dict())
 
 
 class TestAssumptions(unittest.TestCase):

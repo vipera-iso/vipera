@@ -62,6 +62,37 @@ class Quant:
         }
 
 
+@dataclass(frozen=True)
+class Optimizations:
+    """Layer-level transforms applied before scheduling (docs/OPTIMIZER.md).
+
+    Every field is a *lever the planner models*, not something vipera performs on
+    tensors yet. They exist so the effect of each technique can be compared on
+    one model and one machine, instead of argued in the abstract.
+
+    * `prune_experts`  keep only this fraction of experts per layer, by routing
+      frequency. Shrinks the pooled size so more of it fits the cache (expert
+      pruning has a quality cost and needs healing; assume it is measured).
+    * `keep_layers`    drop layers from the end (0 = keep all). Layer pruning.
+    * `kv_bits`        KV cache precision (16, 8, 4). KV compression.
+    * `draft_tokens`   accepted tokens per target forward pass (MTP/speculative
+      decoding). 1.0 = off; 3.0 means one pass yields three tokens.
+    """
+
+    prune_experts: float = 1.0
+    keep_layers: int = 0
+    kv_bits: int = 16
+    draft_tokens: float = 1.0
+
+    def as_dict(self) -> dict:
+        return {
+            "prune_experts": self.prune_experts,
+            "keep_layers": self.keep_layers,
+            "kv_bits": self.kv_bits,
+            "draft_tokens": self.draft_tokens,
+        }
+
+
 @dataclass
 class LayerBytes:
     index: int
@@ -95,9 +126,13 @@ class ModelBytes:
         return self.expert_each * len(self.layers) * self.n_experts
 
 
-def model_bytes(arch: Architecture, quant: Quant) -> ModelBytes:
+def model_bytes(
+    arch: Architecture, quant: Quant, *, n_layers: int | None = None, n_experts: int | None = None
+) -> ModelBytes:
     """Turn parameter counts into byte sizes for one copy of the model."""
     kinds = arch.layer_kinds()
+    if n_layers is not None:
+        kinds = kinds[:n_layers]
     layers: list[LayerBytes] = []
     for i, kind in enumerate(kinds):
         layers.append(
@@ -113,7 +148,7 @@ def model_bytes(arch: Architecture, quant: Quant) -> ModelBytes:
     return ModelBytes(
         layers=layers,
         expert_each=int(arch.expert_params_each * quant.expert_bytes),
-        n_experts=arch.n_experts,
+        n_experts=n_experts if n_experts is not None else arch.n_experts,
         embeddings=int(arch.vocab * arch.hidden * quant.other_bytes),
         mtp=int(arch.mtp_params() * quant.expert_bytes),
         vision=int(arch.vision_params * quant.other_bytes),
@@ -179,12 +214,12 @@ def _zipf_sample(rng: random.Random, n: int, k: int, skew: float) -> list[int]:
 
 
 def _routing(
-    arch: Architecture, tokens: int, skew: float, seed: int
+    n_layers: int, n_experts: int, top_k: int, tokens: int, skew: float, seed: int
 ) -> list[list[list[int]]]:
     """routing[token][layer] = list of selected expert ids."""
     rng = random.Random(seed)
     return [
-        [_zipf_sample(rng, arch.n_experts, arch.top_k, skew) for _ in range(arch.n_layers)]
+        [_zipf_sample(rng, n_experts, top_k, skew) for _ in range(n_layers)]
         for _ in range(tokens)
     ]
 
@@ -194,6 +229,7 @@ def simulate(
     target: Target,
     *,
     quant: Quant | None = None,
+    optimizations: Optimizations | None = None,
     context: int = 2048,
     tokens: int = 8,
     warmup: int = 2,
@@ -208,9 +244,12 @@ def simulate(
     replaces the modelled Zipf routing with a real trace.
     """
     quant = quant or Quant.fp8()
+    opt = optimizations or Optimizations()
     warnings: list[str] = []
-    mb = model_bytes(arch, quant)
-    kinds = arch.layer_kinds()
+    n_layers = opt.keep_layers or arch.n_layers
+    n_experts = max(arch.top_k, int(round(arch.n_experts * opt.prune_experts)))
+    mb = model_bytes(arch, quant, n_layers=n_layers, n_experts=n_experts)
+    kinds = arch.layer_kinds()[:n_layers]
 
     # --- residency: always-needed weights first, leftover becomes expert cache
     resident_total = mb.resident_total
@@ -223,7 +262,7 @@ def simulate(
     cache_bytes = cache_vram + cache_ram
     slots = cache_bytes // mb.expert_each if mb.expert_each else 0
 
-    total_experts = arch.n_layers * arch.n_experts
+    total_experts = n_layers * n_experts
     expert_pool = mb.expert_each * total_experts
     expert_spill = max(0, expert_pool - cache_bytes)
 
@@ -240,7 +279,7 @@ def simulate(
             f"{slots} of {total_experts} experts fit the cache"
         )
 
-    kv_bytes = arch.kv_bytes(context, bytes_per_param=quant.attention_bytes * 2)
+    kv_bytes = arch.kv_bytes(context, bytes_per_param=opt.kv_bits / 8)
 
     def bw(tier: str) -> float:
         return {
@@ -250,7 +289,7 @@ def simulate(
         }[tier]
 
     if routing is None:
-        routing = _routing(arch, tokens + warmup, skew, seed)
+        routing = _routing(n_layers, n_experts, arch.top_k, tokens + warmup, skew, seed)
         routing_source = f"modelled_zipf(skew={skew},seed={seed})"
     else:
         routing_source = "trace"
@@ -263,8 +302,11 @@ def simulate(
     # Per-layer accumulators, averaged over the measured (post-warmup) tokens.
     acc = [
         {"read": 0, "disk": 0, "hits": 0, "misses": 0, "time_s": 0.0}
-        for _ in range(arch.n_layers)
+        for _ in range(n_layers)
     ]
+    # Active parameters scale with the layers kept; expert pruning does not change
+    # how many are active per token, only how much of the pool stays on disk.
+    active_eff = arch.active_params() * n_layers / arch.n_layers
     n = max(1, len(routing) - warmup)
     token_times: list[float] = []
     compute_times: list[float] = []
@@ -273,7 +315,7 @@ def simulate(
 
     for ti, tok in enumerate(routing):
         measured_this = ti >= warmup
-        compute_s = 2.0 * arch.active_params() / (target.cpu_gflops * 1e9)
+        compute_s = 2.0 * active_eff / (target.cpu_gflops * 1e9)
         io_s = 0.0
         for i, kind in enumerate(kinds):
             lb = mb.layers[i]
@@ -315,7 +357,9 @@ def simulate(
 
     per_token_s = sum(token_times) / max(1, len(token_times))
     compute_ms = (sum(compute_times) / max(1, len(compute_times))) * 1000.0
-    ms_per_token = per_token_s * 1000.0
+    forward_ms = per_token_s * 1000.0
+    # One forward pass yields `draft_tokens` accepted tokens with speculative/MTP.
+    ms_per_token = forward_ms / opt.draft_tokens if opt.draft_tokens else forward_ms
     tok_s = 1000.0 / ms_per_token if ms_per_token else 0.0
 
     steps = [
@@ -328,7 +372,7 @@ def simulate(
             misses=acc[i]["misses"] // n,
             time_ms=(acc[i]["time_s"] / n) * 1000.0,
         )
-        for i in range(arch.n_layers)
+        for i in range(n_layers)
     ]
     total_read = sum(s.read_bytes for s in steps)
     total_disk = sum(s.disk_bytes for s in steps)
@@ -339,14 +383,15 @@ def simulate(
         "kind": "schedule",
         "architecture": {
             "name": arch.name,
-            "n_layers": arch.n_layers,
-            "n_experts": arch.n_experts,
+            "n_layers": n_layers,
+            "n_experts": n_experts,
             "top_k": arch.top_k,
             "kda_layers": kinds.count("kda"),
             "mla_layers": kinds.count("mla"),
             "total_params": arch.total_params(include_vision=False),
-            "active_params": arch.active_params(),
+            "active_params": int(active_eff),
         },
+        "optimizations": opt.as_dict(),
         "target": {
             "name": target.name,
             "vram_mb": target.vram_bytes // MB,
@@ -376,12 +421,13 @@ def simulate(
         },
         "performance": {
             "prefetch": prefetch,
+            "forward_ms": round(forward_ms, 3),
             "ms_per_token": round(ms_per_token, 3),
             "tokens_per_second": round(tok_s, 4),
             "bytes_per_token": total_read,
             "disk_bytes_per_token": total_disk,
             "compute_ms_per_token": round(compute_ms, 3),
-            "bound": "io" if ms_per_token - compute_ms > compute_ms else "compute",
+            "bound": "io" if forward_ms - compute_ms > compute_ms else "compute",
         },
         "layers": [
             {

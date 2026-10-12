@@ -72,6 +72,7 @@ python3 -m vipera plan models/deepseek-v2-lite-Q4_K_M.gguf \
 # model a huge MoE against this machine and see whether it can run at all
 python3 -m vipera arch     arch/glm-5.3-flash.toml
 python3 -m vipera schedule arch/glm-5.3-flash.toml --target hw/gtx1650.toml --quant q4-experts --out out/
+python3 -m vipera sweep    arch/glm-5.3-flash.toml --target hw/gtx1650.toml
 
 # tests
 python3 -m unittest discover -s tests -t .
@@ -128,7 +129,10 @@ MTP and vision), and `vipera/schedule.py` places every layer's weights across VR
 simulates decode to answer one question: **how many bytes per token, from which tier, and how fast?**
 
 The headline exercise is a 321B-A18B model on the target laptop. Modelled result: **~0.6 tokens/s**
-(Q4), I/O-bound. See [`docs/FEASIBILITY.md`](docs/FEASIBILITY.md).
+(Q4), I/O-bound. `vipera sweep` then models the layer-level optimization families (quantization,
+expert pruning, layer pruning, KV compression, speculative/MTP) to show which one actually changes
+the verdict — expert pruning, because the expert pool is 30× the cache. See
+[`docs/FEASIBILITY.md`](docs/FEASIBILITY.md).
 
 ## Scope (one month, zero budget)
 
