@@ -11,9 +11,11 @@ Inspired by [FreeToken](https://github.com/FlashML-org/FreeToken) (MoE serving o
 and [AirLLM](https://github.com/lyogavin/airllm) (layer-wise streaming) — but both assume plenty of
 GPU/RAM. `vipera` targets the hard spot: **the model fits in RAM yet overflows VRAM, on a slow disk**.
 
-> Status: **stage 1 implemented** — the analyzer and residency planner run and are tested; nothing
-> touches tensor data or executes a model yet. Bold numbers are measured on the target machine;
-> FreeToken/AirLLM figures are **as published by them**, not re-verified here.
+> Status: **stage 2 implemented** — stage 1 (analyzer + residency planner) plus a per-layer
+> architecture model and a bandwidth/cache-aware streaming scheduler that models decode speed and
+> spits out a residency manifest. Nothing touches tensor data or executes a model yet. Bold numbers
+> are measured on the target machine; FreeToken/AirLLM figures are **as published by them**;
+> scheduler outputs are **modelled**, and say so.
 
 ---
 
@@ -67,6 +69,10 @@ python3 -m vipera plan models/deepseek-v2-lite-Q4_K_M.gguf \
     --target hw/gtx1650.toml --out out/
 # -> out/deepseek-v2-lite-Q4_K_M.vipera.json
 
+# model a huge MoE against this machine and see whether it can run at all
+python3 -m vipera arch     arch/glm-5.3-flash.toml
+python3 -m vipera schedule arch/glm-5.3-flash.toml --target hw/gtx1650.toml --quant q4-experts --out out/
+
 # tests
 python3 -m unittest discover -s tests -t .
 ```
@@ -106,12 +112,23 @@ from Phase 2 exist, and it says so in `placement.expert_order_pending_trace`.
 
 ## Documents
 
+- [`docs/FEASIBILITY.md`](docs/FEASIBILITY.md) — **can GLM-5.3-Flash (321B/18B) run here?** The
+  modelled verdict, per-quant, and the ceilings that make it infeasible.
 - [`docs/OPTIMIZER.md`](docs/OPTIMIZER.md) — **the model-file optimization layer** (vipera's core
   positioning).
 - [`docs/ALGORITHMS.md`](docs/ALGORITHMS.md) — algorithm analysis (streaming, MoE offloading,
   co-execution, quantization, KV cache, speculative decoding, model compression).
 - [`docs/DESIGN.md`](docs/DESIGN.md) — architecture, FreeToken/AirLLM comparison, 1-month roadmap,
   tech stack, KPIs, risks, **7-day plan**.
+
+## Stage 2 — the layer scheduler
+
+`vipera/arch.py` models a hybrid MoE per layer (KDA + MLA attention, sparse experts, mHC residual,
+MTP and vision), and `vipera/schedule.py` places every layer's weights across VRAM/RAM/disk and
+simulates decode to answer one question: **how many bytes per token, from which tier, and how fast?**
+
+The headline exercise is a 321B-A18B model on the target laptop. Modelled result: **~0.6 tokens/s**
+(Q4), I/O-bound. See [`docs/FEASIBILITY.md`](docs/FEASIBILITY.md).
 
 ## Scope (one month, zero budget)
 

@@ -9,3 +9,13 @@ disk = "nvme-dramless"
 # KV cache and activations. Tuned by measurement later; conservative for now.
 vram_headroom_mb = 512
 ram_headroom_mb = 1536
+
+# Memory tiers in GB/s (decimal). These decide how long a byte costs, so they
+# belong to the machine description. VRAM/RAM are the usual ceiling figures for
+# this class of part; disk is the measured DRAM-less SN530 sequential read.
+vram_bw_gbs = 192.0   # GTX 1650 Max-Q, ~192 GB/s
+ram_bw_gbs = 40.0     # DDR4-3200 dual channel, ~40 GB/s practical
+disk_bw_gbs = 2.0     # WD SN530 DRAM-less NVMe, ~2 GB/s
+# Effective CPU throughput for the scheduler's compute floor. i5-11300H with
+# AVX2, usable GEMV throughput after dequant overhead.
+cpu_gflops = 50.0

@@ -33,6 +33,16 @@ class Target:
     # Leave this much headroom for KV cache, activations and the runtime itself.
     vram_headroom_bytes: int = 512 * MIB
     ram_headroom_bytes: int = 1536 * MIB
+    # Memory tiers in GB/s (decimal). Defaults are the measured/derived ceilings
+    # for the target laptop; they decide how long a byte costs, so they are part
+    # of the machine description, not of the model.
+    vram_bw_gbs: float = 192.0
+    ram_bw_gbs: float = 40.0
+    disk_bw_gbs: float = 2.0
+    # Effective CPU throughput used by the scheduler's compute term (GFLOP/s).
+    # Bandwidth-bound on this machine, but the compute floor still matters when
+    # 18B parameters are active per token.
+    cpu_gflops: float = 50.0
 
     @property
     def usable_vram(self) -> int:
@@ -55,6 +65,10 @@ class Target:
             disk=data.get("disk", "unknown"),
             vram_headroom_bytes=int(data.get("vram_headroom_mb", 512)) * MIB,
             ram_headroom_bytes=int(data.get("ram_headroom_mb", 1536)) * MIB,
+            vram_bw_gbs=float(data.get("vram_bw_gbs", 192.0)),
+            ram_bw_gbs=float(data.get("ram_bw_gbs", 40.0)),
+            disk_bw_gbs=float(data.get("disk_bw_gbs", 2.0)),
+            cpu_gflops=float(data.get("cpu_gflops", 50.0)),
         )
 
 
