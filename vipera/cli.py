@@ -19,6 +19,7 @@ from .arch import Architecture
 from .gguf import GGUFError, read_gguf
 from .manifest import Target, dumps, plan
 from .schedule import Optimizations, Quant, dumps as schedule_dumps, simulate
+from .scoring import local_llm_16gb_score
 
 MIB = 1024 * 1024
 
@@ -192,6 +193,40 @@ def cmd_sweep(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_score(args: argparse.Namespace) -> int:
+    """Score a config with the LOCAL-LLM-16GB formula.
+
+    S = (Q/100) * (T/10) * (16/M) * (65/P) * (32k/C)
+
+    T comes from the simulation; Q (quality %) and P (watts) are inputs because
+    vipera does not model accuracy or power. M is the modelled peak RAM (resident
+    RAM + KV cache); C is the context that actually fit.
+    """
+    arch = Architecture.from_toml(args.arch)
+    target = Target.from_toml(args.target)
+    result = simulate(
+        arch, target, quant=_QUANTS[args.quant](), context=args.context, tokens=args.tokens
+    )
+    r = result.manifest["residency"]
+    ram_gb = (r["resident_ram_bytes"] + result.manifest["context"]["kv_bytes"]) / 1e9
+    c = args.context
+    since = local_llm_16gb_score(
+        quality_pct=args.quality, tok_s=result.tok_s, ram_gb=ram_gb,
+        power_w=args.power, context=c,
+    )
+    print(f"architecture  {arch.name}")
+    print(f"target        {target.name}")
+    print(f"quant         {args.quant}")
+    print()
+    print(f"Q (quality)   {args.quality}%")
+    print(f"T (tokens/s)  {result.tok_s:.3f}")
+    print(f"M (peak RAM)  {ram_gb:.2f} GB")
+    print(f"P (power)     {args.power} W")
+    print(f"C (context)   {c} tokens")
+    print(f"S             {since:.4f}   ({'PASS' if since >= 1.0 else 'FAIL'})")
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="vipera", description=__doc__)
     p.add_argument("--version", action="version", version=f"vipera {__version__}")
@@ -227,6 +262,16 @@ def build_parser() -> argparse.ArgumentParser:
                     help="accepted tokens per target forward pass (MTP/speculative)")
     sc.add_argument("--out", help="directory to write <arch>.vipera.json into")
     sc.set_defaults(func=cmd_schedule)
+
+    sc2 = sub.add_parser("score", help="score a config with the LOCAL-LLM-16GB formula")
+    sc2.add_argument("arch", help="architecture profile (TOML)")
+    sc2.add_argument("--target", required=True, help="hardware profile (TOML)")
+    sc2.add_argument("--quant", choices=sorted(_QUANTS), default="q4-experts")
+    sc2.add_argument("--context", type=int, default=32768)
+    sc2.add_argument("--tokens", type=int, default=8)
+    sc2.add_argument("--quality", type=float, default=99.0, help="quality %% of FP16 (input)")
+    sc2.add_argument("--power", type=float, default=65.0, help="average watts (input)")
+    sc2.set_defaults(func=cmd_score)
 
     sw = sub.add_parser("sweep", help="compare layer-level optimizations on the same model+machine")
     sw.add_argument("arch", help="architecture profile (TOML)")

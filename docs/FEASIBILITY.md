@@ -239,3 +239,64 @@ different, much dumber model and violates the < 2% quality budget.
   for a perplexity/task evaluation.
 * RAM/VRAM bandwidths are class assumptions (the instance does not state them);
   the disk and PCIe numbers are the problem's.
+
+---
+
+## 11. Instance solved: LOCAL-LLM-16GB
+
+The open problem: **Llama-3-70B (dense) on a 16 GB unified-memory laptop, no
+discrete GPU**, with **32k context**, **≥ 10 tok/s**, **≤ 16 GB peak RAM**,
+**≤ 65 W**, and quality within 1% MMLU / 2% GSM8K / 5% perplexity of FP16.
+Score `S = (Q/100)·(T/10)·(16/M)·(65/P)·(32k/C)`; solved only if every hard
+constraint holds and **S ≥ 1**.
+
+```bash
+python3 -m vipera score arch/llama3-70b.toml --target hw/laptop16-igpu.toml \
+    --context 32768 --quality 99 --power 65
+```
+
+Modelled result of the best quality-preserving config (Q4_K_M-like):
+
+```
+Q (quality)   99.0%
+T (tokens/s)  0.112
+M (peak RAM)  25.77 GB     <- already over the 16 GB hard limit
+P (power)     65.0 W
+C (context)   32768 tokens
+S             0.0069   (FAIL)
+```
+
+Residency detail: **38.5 GiB** of Q4 weights, of which only **14 GiB** fit the
+16 GB machine; **24.5 GiB stream from the NVMe every token** → 8.9 s/token.
+The 32k KV cache alone is **10.0 GiB** (10.74 GB fp16, 5.37 GB at 8-bit), so the
+weights and the KV cannot both live in 16 GB regardless of quantization.
+
+### Why it is impossible here
+
+1. **It does not fit.** 41 GB of Q4 weights + 10.7 GB of 32k KV ≫ 16 GB, so at
+   least ~36 GB must be read from the **3 GB/s** SSD *per token* → ≥ 12 s →
+   **≤ 0.083 tok/s**. That is the floor before any compute.
+2. **Even the fit was a fantasy.** If all 41 GB were somehow resident, reading it
+   at the machine's ~100 GB/s unified bandwidth is 0.41 s → **≤ 2.4 tok/s** — and
+   that ignores the KV cache entirely.
+3. **The gate is T ≥ 10.1 tok/s.** With Q=99, M=16, P=65 and C=32k all at target,
+   `S ≥ 1` demands **T ≥ 10.1 tok/s**, i.e. **≤ 0.1 s/token**, i.e. **≥ 410 GB/s**
+   of weight bandwidth. The machine has ~100 GB/s and a 3 GB/s disk.
+4. **The compression needed is extreme.** Fitting weights *and* KV in 16 GB needs
+   ~1.6 bits/parameter — far below Q4 — where the < 1% MMLU budget is already
+   broken. There is no quality-preserving path.
+
+**Verdict: fails by ~90–100× on throughput and violates the 16 GB RAM limit.**
+By the problem's own medal table, even **Bạc** (70B on 32 GB) does not run here;
+**Vàng** (70B on 16 GB) requires hardware this problem does not provide. As with
+§10, the wall is memory bandwidth and capacity, not the scheduling algorithm.
+
+### Limits
+
+* **Power (< 65 W) is an input, not a measurement** — vipera does not model
+  energy, and the problem requires a wattmeter.
+* **Compute is a flat `cpu_gflops` term**; the iGPU is not modelled, and no
+  custom kernel is assumed.
+* **Quality is an input** (`--quality`), not modelled; the 1%/2%/5% budgets are
+  assumed, not verified.
+* Unified-memory bandwidth (~100 GB/s) is a class assumption.

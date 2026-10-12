@@ -77,6 +77,9 @@ python3 -m vipera sweep    arch/glm-5.3-flash.toml --target hw/gtx1650.toml
 # the LLM-PC-OPT instance: dense Llama-3-70B on 8 GB VRAM / 32 GB RAM / 3 GB/s SSD
 python3 -m vipera schedule arch/llama3-70b.toml --target hw/llama70b-pc.toml --quant q4-experts --context 4096
 
+# the LOCAL-LLM-16GB instance: 70B dense on a 16 GB unified-memory laptop
+python3 -m vipera score arch/llama3-70b.toml --target hw/laptop16-igpu.toml --context 32768 --quality 99 --power 65
+
 # tests
 python3 -m unittest discover -s tests -t .
 ```

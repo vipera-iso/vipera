@@ -10,6 +10,8 @@ from vipera.cli import main
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 HW = os.path.join(REPO_ROOT, "hw", "gtx1650.toml")
+LLAMA = os.path.join(REPO_ROOT, "arch", "llama3-70b.toml")
+LLAMA16 = os.path.join(REPO_ROOT, "hw", "laptop16-igpu.toml")
 
 
 class TestCLI(unittest.TestCase):
@@ -46,6 +48,16 @@ class TestCLI(unittest.TestCase):
 
     def test_plan_hardware_profile_is_real(self):
         self.assertTrue(os.path.exists(HW), f"missing hardware profile at {HW}")
+
+    def test_score_fails_the_local_llm_16gb_instance(self):
+        out = io.StringIO()
+        with redirect_stdout(out):
+            code = main(["score", LLAMA, "--target", LLAMA16,
+                         "--quality", "99", "--power", "65"])
+        self.assertEqual(code, 0)
+        text = out.getvalue()
+        self.assertIn("FAIL", text)
+        self.assertIn("tokens/s", text)
 
 
 if __name__ == "__main__":
