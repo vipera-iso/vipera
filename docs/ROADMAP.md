@@ -13,7 +13,7 @@
 | # | Sub-problem | Research question | Input → Output | Depends on | Difficulty | Priority | Success criterion |
 |---|---|---|---|---|---|---|---|
 | **S1** | **Routing trace capture & loader** | Is expert routing skewed and locally consistent enough for a cache to help? | JSONL trace → `routing` structure + skew/entropy/ceiling stats | — | 2 | **5** | **done** — loader+stats+validator, 95 tests, CLI `vipera trace` |
-| **S2** | **Cache policy: pinned hot-set + admission control** | Can a policy reach the static-cache ceiling? | trace + cache size → hit rate | S1 | 3 | 5 | hit rate ≥ 0.9× the static ceiling on a held-out trace |
+| **S2** | **Cache policy: pinned hot-set + admission control** | Can a policy reach the static-cache ceiling? | trace + cache size → hit rate | S1 | 3 | 5 | hit rate ≥ 0.9× the static ceiling at the *matched* cache size on a held-out trace (baseline from S1: LFU = 0.70×) |
 | **S3** | **Per-layer cache allocation** | How many slots should each layer get? | per-layer frequency → slot budget | S1 | 4 | 4 | ≥ +5 points hit over uniform allocation |
 | **S4** | **Tier-aware bit allocation (TAW)** | Which component should absorb the next lower bit? | sensitivity + tier cost → per-component bits | S10 | 5 | 4 | +10% tok/s at equal perplexity |
 | **S5** | **Energy model + energy-aware tiering (EAT)** | When does SSD offload violate a watt cap? | tier table → J/token | S7 | 3 | 4 | modelled J/token within 20% of wattmeter |
@@ -97,22 +97,40 @@ so a mismatched trace fails loudly (exit 2) instead of silently producing nonsen
 
 ### BƯỚC 8 — Reflect (measured, trace-driven)
 
+Reproduce exactly:
+```
+python3 -c "from vipera.trace import synth_trace, save_trace; \
+  save_trace('/tmp/r1.jsonl', synth_trace(64, n_layers=45, n_experts=288, top_k=8, skew=1.2, seed=0))"
+python3 -m vipera schedule arch/glm-5.3-flash.toml --target hw/gtx1650.toml \
+    --quant q4-experts --trace /tmp/r1.jsonl --cache-policy lru   # 33.5%, 0.626 tok/s, bound=io
+python3 -m vipera schedule arch/glm-5.3-flash.toml --target hw/gtx1650.toml \
+    --quant q4-experts --trace /tmp/r1.jsonl --cache-policy lfu   # 43.0%, 0.712 tok/s, bound=compute
+```
+`--quant q4-experts` is **required**: the default (`fp8`) yields only a 372-slot
+cache and 18.0%/33.2%, a different experiment entirely.
+
 Trace: `synth_trace(64 tokens, 45 layers, 288 experts, top_k=8, skew=1.2)`.
 
 | policy | hit rate | tok/s |
 |---|---|---|
 | LRU | 33.5% | 0.626 |
 | LFU | **43.0%** | **0.712** |
-| *static-cache oracle ceiling (3% of experts)* | **48.1%** | — |
+| *static-cache oracle ceiling at 6.09% of experts (789 slots — the size actually available)* | **60.7–61.8%** | — |
 
 **Findings.**
-1. LFU now reaches **~0.9× the static oracle ceiling** — the policy is no longer the
-   bottleneck; the *cache size* is.
-2. The modelled-Zipf numbers (21.5%/32.6%) were **pessimistic** vs this trace
-   (33.5%/43.0%) — the synthetic model understated cache value. A real trace is
-   required before any of it is trusted.
-3. Workload flips to **compute-bound** at 43% hit rate, so the next lever after
-   cache is S10/S4 (bits) or speculative decoding — not more cache.
+1. LFU reaches **0.70× the matched static oracle ceiling** (43.0 / 61.8), not the
+   ~0.9× stated in the first draft of this section. That draft compared the achieved
+   hit rate at a **6.09%** cache against a ceiling computed at **3%** (`48.1%`) — a
+   benchmark at one size against a baseline at another. At the matched size the
+   ceiling is ~61%, so the policy is still **~30% off** and remains a real lever:
+   S2 is needed, and its `≥0.9×` criterion is currently **unmet**.
+2. The modelled-Zipf numbers (21.5%/32.6%, `docs/PROPOSALS.md`) were **pessimistic**
+   vs this trace (33.5%/43.0%). The comparison *is* apples-to-apples: same arch,
+   same target, same quant, same 789-slot cache, only the routing model differs. A
+   real trace is still required before any of it is trusted.
+3. The LFU run at 43.0% reports `bound: compute` while LRU at 33.5% reports
+   `bound: io` — the workload flips to the compute floor between the two, so past
+   ~43% the next lever is S10/S4 (bits) or speculative decoding, not more cache.
 
 **Next sub-problem:** S2 (reach the ceiling with pinned hot-set + admission
 control), then S7/S10 to replace modelled inputs with measured ones.
