@@ -650,3 +650,57 @@ exactly what a value that flipped twice should tell you.
   spending the quality budget, and retained mass is still not a quality result.
 * 8 GB/s is one file on one filesystem; a fragmented model or a busier machine
   would differ. The number is a best case, not a floor.
+
+---
+
+## 13. Round 8 — a quality baseline, and the pruning proxy is still unvalidated
+
+§11 produced a pruning analysis whose headline number — "retained routing mass"
+— was explicitly a **proxy**, not a quality result. This round builds the quality
+harness that would be needed to validate it, and reports honestly that the
+validation is not yet possible.
+
+### What was built
+`bench/perplexity.py` wraps `llama-perplexity` the way `bench/bench.py` wraps
+`llama-bench`: bounded chunks, JSON report, fixed corpus. Built the tool
+(`cmake --build build --target llama-perplexity`) and fetched the canonical
+corpus (`scripts/get-wikitext-2.sh`).
+
+```
+python3 -m bench.perplexity --model olmoe-q4km.gguf \
+    --file wikitext-2-raw/wiki.test.raw --chunks 20 --threads 8 --ngl 0
+```
+
+**Baseline: PPL = 8.6426 ± 0.30373** (OLMoE-1B-7B Q4_K_M, wikitext-2 test,
+20 chunks, ctx 512, CPU). Artifact: `bench/results/olmoe-ppl-baseline.json`.
+
+### What this does and does not validate
+* **Does:** the quality axis now exists and is reproducible. Every future
+  compression or pruning claim has a number to be judged against.
+* **Does not:** it says nothing about vipera's *performance* model. vipera models
+  bytes, bandwidth and FLOPs; it has no quality term at all. A perplexity number
+  cannot confirm or refute the tok/s predictions in §9 — those were checked
+  against a real 41.2 tok/s run, which is the only evidence that applies to them.
+
+### Why the mass→quality proxy is still unvalidated
+§11 says a keep-set retaining 95% of routing mass is a *necessary* condition. To
+turn that into a quality statement, experts must actually be removed and the
+model re-run. Two routes, both blocked:
+
+1. **Patch the router in place.** Routers are `F32` `[2048, 64]` (512 KiB each, 16
+   of them), so they are editable. But the MoE router here has **no bias term**, so
+   there is no constant that forces a pruned expert's logit to −∞: editing `W`
+   scales `W·x`, and `x` can be negative. Not sound — rejected rather than fudged.
+2. **Graph-level expert mask.** Sound, and the llama.cpp hook from §8 is the right
+   place, but it needs a per-layer constant input tensor (a new graph-input class,
+   filled through `set_input`), which is materially more plumbing than the
+   `ffn_moe_topk` capture. Not attempted in this budget.
+3. **Repacked GGUF with experts removed (S9).** The clean route, and still unbuilt.
+
+**So the honest status is: `vipera prune` reports retained mass, and the claim
+that it predicts quality is untested.** Anyone quoting §11 should say "retains
+95% of routing mass", not "retains 95% of quality". The blocker is concrete and
+named above; the 8.64 baseline is what a pruned run would be compared against.
+
+**Next sub-problem:** S9 (GGUF writer) or the graph-level mask — whichever lands
+first converts every pruning number in §11 from a proxy into a measurement.
