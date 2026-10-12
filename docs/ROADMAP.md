@@ -592,3 +592,61 @@ does not say the model still works. Treat 95%-mass as a design constraint, not a
 
 **Next sub-problem:** S9 (GGUF writer/packer) — it is now the blocking dependency
 for S10, and therefore for turning every pruning claim above into a quality number.
+*Round 7 measured the last two guessed constants and flipped the verdict a second
+time — see §12.*
+
+---
+
+## 12. Autonomous loop — round 7 log (the last two constants)
+
+Rounds 4 and 5 replaced the guessed `cpu_gflops` and `ram_bw_gbs`. Two guesses
+remained: `disk_bw_gbs = 2.0` and `vram_bw_gbs = 192`.
+
+### Disk — measured, and the guess was 4× wrong
+`dd ... iflag=direct` and `os.pread` with `O_DIRECT` on the 4.2 GiB model file:
+
+| pattern | measured |
+|---|---|
+| sequential, 1 GiB | 8.7 GB/s |
+| sequential, 3 GiB | 9.1 GB/s |
+| **random 1 MiB blocks** (≈ one Q4 expert) | **8.76 GB/s** |
+| sequential 1 MiB blocks (like-for-like) | 7.75 GB/s |
+| write, 1 GiB direct | 5.8 GB/s |
+
+Random and sequential are indistinguishable at 1 MiB, and `O_DIRECT` showed the
+same rate as buffered — so this is device-level, not page cache. The profile
+claimed a DRAM-less SN530 at **2.0 GB/s**; the box does **8–9**. `disk_bw_gbs` is
+now **8.0**.
+
+### VRAM — cannot be measured here, and it does not matter for any current result
+No CUDA toolkit (`nvcc`), no OpenCL ICD (`/etc/OpenCL/vendors` absent), no Torch,
+and the local llama.cpp build is **CPU-only** (no `libggml-cuda`). The GPU cannot
+be exercised at all, so `vram_bw_gbs` stays a datasheet 192 — now labelled as
+not-measurable rather than merely unmeasured. Every number in this document is
+CPU-only, so no conclusion depends on it.
+
+### The verdict flips a second time
+`vipera sweep arch/glm-4.5-air.toml --target hw/gtx1650.toml`:
+
+| | round 3 (2 guesses) | round 4 (+cpu_gflops) | round 7 (+disk) |
+|---|---|---|---|
+| q4 experts, tok/s | 1.07 | 1.08 | **3.21** |
+| bound | compute | io | **compute** |
+| + prune 5% | 1.95 | 4.29 | **4.29** |
+| + prune 5% + draft ×3 | 5.85 | 12.87 | **12.87** |
+
+**Lesson, and it is the point of these two rounds:** the verdicts were never
+stable because the *constants* were not measured. Three separate "the 100B target
+is compute-bound / I/O-bound" statements appeared across rounds 3, 4 and 7; two of
+them were artefacts. A modelled verdict is only as trustworthy as its inputs.
+
+At the measured constants GLM-4.5-Air Q4 sits at **3.21 tok/s** with the compute
+floor at 233 ms and I/O at 311 ms per token — **close to balanced**, so neither
+"just add cache" nor "just add FLOPs" is right for it; both terms matter, which is
+exactly what a value that flipped twice should tell you.
+
+### Still not measured
+* Nothing here changes §11: pruning still cannot close the pool/cache gap without
+  spending the quality budget, and retained mass is still not a quality result.
+* 8 GB/s is one file on one filesystem; a fragmented model or a busier machine
+  would differ. The number is a best case, not a floor.

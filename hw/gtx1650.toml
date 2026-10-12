@@ -2,15 +2,21 @@
 # Numbers are MiB as reported by the OS, not marketing values.
 #
 # Provenance of the tuning constants (round 3, ROADMAP §9):
-#   ram_bw_gbs   MEASURED by bench/hwprobe.c: 43-46 GB/s streaming read (256 MiB
-#                buffer, 8 threads). Was 40.0, an estimate.
+#   ram_bw_gbs   MEASURED by bench/hwprobe.c: 40-46 GB/s streaming read (256 MiB
+#                buffer, 8 threads; varies run to run). Was 40.0, an estimate.
+#   disk_bw_gbs  MEASURED: 8-9 GB/s sequential AND 1 MiB random O_DIRECT reads
+#                (dd -iflag=direct; os.pread O_DIRECT). Random 8.76, sequential
+#                7.75-9.1 GB/s. Was 2.0 - wrong by ~4x, and that error is why
+#                every disk-bound verdict in the repo was too pessimistic.
 #   cpu_gflops   MEASURED by bench/hwprobe.c: 110 GFLOP/s ALU-bound GEMV on a
 #                L3-resident 512x1024 matrix, 8 threads (20.8 single-threaded).
 #                Cross-checked against a real model: OLMoE-1B-7B Q4_K_M decodes
 #                at 41.2 tok/s here (llama-bench, ngl=0), i.e. an effective
 #                2*1.18e9*41.2 = ~97 GFLOP/s. Was 50.0, an estimate.
-#   vram_bw_gbs  NOT measured here (no GPU bandwidth probe); datasheet figure.
-#   disk_bw_gbs  NOT measured here (no fio/iozone run yet); datasheet/earlier note.
+#   vram_bw_gbs  NOT MEASURABLE on this box: no CUDA toolkit (nvcc), no OpenCL
+#                ICD, and the local llama.cpp build is CPU-only (no libggml-cuda).
+#                The GPU cannot be exercised, so 192 stays a datasheet figure and
+#                no result in this repo currently depends on it.
 name = "gtx1650-laptop"
 vram_mb = 4096          # GTX 1650 Max-Q
 ram_mb = 15360          # 15 GiB, no swap
@@ -23,9 +29,9 @@ ram_headroom_mb = 1536
 
 # Memory tiers in GB/s (decimal). These decide how long a byte costs, so they
 # belong to the machine description.
-vram_bw_gbs = 192.0   # GTX 1650 Max-Q, ~192 GB/s (datasheet, not measured here)
-ram_bw_gbs = 44.0     # MEASURED: 43-46 GB/s streaming read (bench/hwprobe.c)
-disk_bw_gbs = 2.0     # WD SN530 DRAM-less NVMe, ~2 GB/s (not re-measured here)
+vram_bw_gbs = 192.0   # GTX 1650 Max-Q, ~192 GB/s (datasheet; NOT measurable here)
+ram_bw_gbs = 44.0     # MEASURED: 40-46 GB/s streaming read (bench/hwprobe.c)
+disk_bw_gbs = 8.0     # MEASURED: 8-9 GB/s, random 1 MiB ~= sequential (O_DIRECT)
 # Effective CPU throughput for the scheduler's compute floor (GFLOP/s).
 # MEASURED: 110 GFLOP/s ALU-bound GEMV; corroborated by a real 41.2 tok/s OLMoE
 # decode (~97 effective GFLOP/s), so the ALU probe slightly overstates the real

@@ -122,9 +122,11 @@ disk bytes per token for each of the 45 layers).
    Real MoE routing is often more skewed, which raises the cache hit rate; a
    real trace would move the hit-rate column. Round 3 captured one real trace
    (ROADMAP §8) — it made the two policies diverge sharply.
-3. **Bandwidths**: RAM is now **measured at 44 GB/s** (was 40). VRAM (192) and
-   disk (2.0 GB/s) are still class figures, not measured here. The disk number is
-   the one that matters most.
+3. **Bandwidths**: RAM is **measured at 44 GB/s** (was 40) and disk at
+   **8–9 GB/s** (was 2.0 — wrong by ~4×, ROADMAP §12). VRAM (192) could not be
+   measured at all on this box (CPU-only build, no CUDA/OpenCL) but no result
+   here depends on it. The disk correction alone made every disk-bound figure in
+   this document roughly 4× faster than the tables below show.
 4. **KV cache** is modelled at 2048 tokens (76 MiB). At the model's 1M-token
    context it grows to ~37 GiB and would not fit at all.
 
