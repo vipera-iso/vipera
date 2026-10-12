@@ -117,6 +117,14 @@ What it computes today:
 The planner is **size-driven** for now: it cannot rank *which* experts are hot until routing traces
 from Phase 2 exist, and it says so in `placement.expert_order_pending_trace`.
 
+## Skill
+
+[`skills/local-llm-optimization/SKILL.md`](skills/local-llm-optimization/SKILL.md) — a packaged,
+sourced skill for running LLMs locally: decision tree, technique catalogue, three hardware
+playbooks, comparison tables, pitfalls and a runnable hardware probe
+([`scripts/probe.py`](skills/local-llm-optimization/scripts/probe.py)). Claim-to-source anchors are
+in its §Sources; unpublished numbers are marked "no data".
+
 ## Documents
 
 - [`docs/PROPOSALS.md`](docs/PROPOSALS.md) — **research proposals**: four new/improved
