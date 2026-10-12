@@ -1,5 +1,9 @@
 # vipera
 
+[![CI](https://github.com/vipera-iso/vipera/actions/workflows/ci.yml/badge.svg)](https://github.com/vipera-iso/vipera/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue.svg)](pyproject.toml)
+
 **An optimization layer for local LLM model files, so they run on weak hardware** — starting with
 **personal computers**, then **phones**.
 
@@ -222,3 +226,8 @@ ablation and the aging sweep are in [`docs/ROADMAP.md`](docs/ROADMAP.md) §7.
 - ✅ PC-first (no Android device available to test ⇒ "phone" stays at the design/portability level).
 - ✅ GGUF + llama.cpp, Python for the optimizer layer.
 - ❌ Not this month: ONNX/ExecuTorch/LiteRT runtimes, gRPC, distillation.
+
+## License
+
+[MIT](LICENSE) © 2026 vipera-iso
+
