@@ -1,41 +1,43 @@
-# DESIGN — vipera: lớp tối ưu file model để chạy LLM/MoE trên máy yếu
+# DESIGN — vipera: a model-file optimization layer for LLM/MoE on weak hardware
 
-> Kế hoạch thiết kế hệ thống. Định vị ở [`OPTIMIZER.md`](OPTIMIZER.md) (lớp tối ưu file model),
-> thuật toán sâu ở [`ALGORITHMS.md`](ALGORITHMS.md). Số in đậm là đo trên máy hoặc suy ra từ đo.
+> System design. Positioning lives in [`OPTIMIZER.md`](OPTIMIZER.md) (the model-file optimization
+> layer); deep algorithms live in [`ALGORITHMS.md`](ALGORITHMS.md). Bold numbers are measured on the
+> machine or derived from a measurement.
 
-## Bối cảnh & giả định đã chốt
+## Context & decided assumptions
 
-| Hạng mục | Quyết định | Nguồn |
+| Item | Decision | Source |
 |---|---|---|
-| Thiết bị mục tiêu | **PC cá nhân** (i5-11300H, 15 GiB RAM, GTX 1650 4 GB, NVMe) | user chọn + đo |
-| Model mục tiêu | **MoE nhỏ**: DeepSeek-V2-Lite (Phase 0/1), Qwen3-30B-A3B (stretch) | user chọn |
-| Ngân sách | **0đ** — chỉ open-source, không thuê cloud | user chọn |
-| Thời gian | **1 tháng** | user chọn |
-| Giấy phép | Open-source, offline-first, cross-platform | prompt gốc |
-| Mobile | **Giai đoạn sau** (không có trong 1 tháng này) | suy ra từ "PC cá nhân" |
+| Target device | **Personal computer** (i5-11300H, 15 GiB RAM, GTX 1650 4 GB, NVMe) | user choice + measurement |
+| Target model | **Small MoE**: DeepSeek-V2-Lite (Phase 0/1), Qwen3-30B-A3B (stretch) | user choice |
+| Budget | **0** — open source only, no cloud rental | user choice |
+| Timeline | **1 month** | user choice |
+| License | Open source, offline-first, cross-platform | original prompt |
+| Mobile | **Later phase** (not in this month) | derived from "personal computer" |
 
-**Giả định ghi rõ:** không có thiết bị Android để test trong tháng này ⇒ mọi "mobile" chỉ ở mức
-thiết kế/portability, **không** phải kết quả đo. Nếu giả định sai, báo để đổi scope.
+**Stated assumption:** no Android device is available to test this month ⇒ anything "mobile" stays at
+the design/portability level and is **not a measured result**. If that assumption is wrong, say so and
+the scope changes.
 
 ---
 
-## 2. Kiến trúc hệ thống
+## 2. System architecture
 
 ```
 ┌──────────────────────────────────────────────────────────────────┐
 │                         API GATE                                  │
-│  OpenAI-compatible /v1/chat/completions   ·   gRPC (sau)          │
+│  OpenAI-compatible /v1/chat/completions   ·   gRPC (later)        │
 └───────────────▲──────────────────────────────────────────────────┘
                 │ request
 ┌───────────────┴──────────────────────────────────────────────────┐
 │                      RUNTIME ROUTER                               │
-│  chọn runtime theo (model, hardware):                             │
+│  pick a runtime by (model, hardware):                             │
 │    dense+GGUF → llama.cpp   ·  mobile → ExecuTorch / LiteRT       │
 │    ONNX → ORT               ·  fallback → Python reference        │
 └───────┬───────────────────────────────┬──────────────────────────┘
         │                               │
 ┌───────▼─────────┐           ┌─────────▼──────────────────────────┐
-│ MODEL MANAGER   │           │      MEMORY MANAGER  ★ lõi ★        │
+│ MODEL MANAGER   │           │      MEMORY MANAGER  ★ core ★       │
 │ download/convert│           │  VRAM budget (4 GB)                 │
 │ cache/quantize  │           │  ├─ attention + shared  (resident)  │
 │ (GGUF, imatrix) │           │  ├─ expert cache (LRU/LFU) ★        │
@@ -47,158 +49,167 @@ thiết kế/portability, **không** phải kết quả đo. Nếu giả định
 │                    EXECUTION ENGINE                               │
 │  Expert scheduler: routing predictor → prefetch → compute         │
 │  CPU + dGPU co-execution (layer-wise overlap)                     │
-│  Backend: llama.cpp (MoE CPU-offload) → custom expert-cache layer │
+│  Feeds: llama.cpp (MoE CPU-offload) → consumes vipera manifest    │
+└──────────────────────────────────────────────────────────────────┘
+        ▲
+        │  reads artifact + manifest produced by the OPTIMIZER (docs/OPTIMIZER.md)
+┌───────┴──────────────────────────────────────────────────────────┐
+│  vipera OPTIMIZER: analyze → transform (reorder/quant/prune) →    │
+│  pack → model.vipera.gguf + model.vipera.json                     │
 └──────────────────────────────────────────────────────────────────┘
 ```
 
-**Thành phần & trạng thái trong 1 tháng:**
+**Components & status within one month:**
 
-| Thành phần | Vai trò | Trong 1 tháng? |
+| Component | Role | In scope this month? |
 |---|---|---|
-| Memory Manager (expert cache + KV) | **đóng góp lõi**, khác biệt so với có sẵn | ✅ Phase 2 |
-| Execution Engine (expert scheduler + prefetch) | dự đoán expert, overlap I/O | ✅ Phase 2 |
-| Model Manager | tải/convert GGUF, cache | ✅ Phase 0 |
-| Runtime Router | chọn backend | ⚠️ chỉ 2 nhánh (llama.cpp + Python ref) |
-| API Gate | OpenAI-compatible | ✅ Phase 5 (bản tối giản) |
+| Memory Manager (expert cache + KV) | **core contribution**, differs from off-the-shelf | ✅ Phase 2 |
+| Execution Engine (expert scheduler + prefetch) | predict experts, overlap I/O | ✅ Phase 2 |
+| Optimizer (file-layer transforms + manifest) | **core positioning** | ✅ Phase 2b |
+| Model Manager | download/convert GGUF, cache | ✅ Phase 0 |
+| Runtime Router | pick a backend | ⚠️ only two branches (llama.cpp + Python ref) |
+| API Gate | OpenAI-compatible | ✅ Phase 5 (minimal) |
 | Mobile runtime | NNAPI/Core ML | ❌ roadmap |
 
 ---
 
-## 3. So sánh với FreeToken và AirLLM
+## 3. Comparison with FreeToken and AirLLM
 
-| Tiêu chí | FreeToken | AirLLM | **vipera (đề xuất)** |
+| Criterion | FreeToken | AirLLM | **vipera (proposed)** |
 |---|---|---|---|
-| Trọng tâm | MoE serving trên PC consumer | layer-wise streaming | **MoE offload + expert cache trên máy yếu** |
-| Đơn vị offload | expert (fractional) | layer | expert + block |
-| Điểm mạnh | CPU–GPU co-exec, token-level split | chạy model > VRAM đơn giản | hợp nhất: streaming khi > RAM, cache khi vừa RAM |
-| Hạn chế | hướng GPU mạnh; chưa tối ưu máy 4 GB | I/O-bound, tốc độ thấp | (mới) |
-| Tăng tốc công bố | CPU–GPU 84–96% (T4), 11–89% (A10) | chạy 671B trên 12 GB | **mục tiêu: ≥ 2× token/s vs llama.cpp CPU-offload mặc định trên máy này** |
-| Phù hợp mobile | một phần | không | một phần (thiết kế tách backend) |
+| Focus | MoE serving on consumer PCs | layer-wise streaming | **model-file optimization + MoE offload on weak hardware** |
+| Offload unit | expert (fractional) | layer | expert + block |
+| Strength | CPU–GPU co-exec, token-level split | runs a model larger than VRAM, simply | unifies both: stream when > RAM, cache when it fits |
+| Limitation | assumes a capable GPU; not tuned for 4 GB | I/O-bound, slow | (new) |
+| Published speedup | CPU–GPU 84–96% (T4), 11–89% (A10) | runs 671B on 12 GB | **target: ≥ 2× tok/s vs default llama.cpp CPU-offload on this machine** |
+| Mobile-ready | partially | no | partially (backend is abstracted) |
 
-**vipera cải tiến gì:** FreeToken tối ưu cho GPU consumer *đủ mạnh*; AirLLM tối ưu *vượt VRAM*.
-Cả hai giả định nhiều RAM. Máy mục tiêu ở đây (**4 GB VRAM + 15 GB RAM, không swap, NVMe DRAM-less**)
-rơi đúng vào vùng mà **cả hai đều dở**: model vừa RAM nhưng quá VRAM, và đĩa chậm. Đóng góp của
-vipera là **bộ đệm expert thông minh + dự đoán routing để giảm I/O**, chứ không phải "stream nhanh".
+**What vipera improves:** FreeToken optimizes for a *capable* consumer GPU; AirLLM optimizes for
+*exceeding VRAM*. Both assume ample RAM. The target here (**4 GB VRAM + 15 GB RAM, no swap, DRAM-less
+NVMe**) lands exactly where **both are weak**: the model fits RAM but overflows VRAM, and the disk is
+slow. vipera's contribution is a **smart expert cache + routing prediction to cut I/O**, *plus* **a
+model-file optimization layer** (expert reorder, residency manifest) so a weak runtime reads less —
+not "fast streaming".
 
 ---
 
-## 4. Roadmap (co lại cho 1 tháng / 0đ)
+## 4. Roadmap (trimmed for one month / zero budget)
 
-| Phase | Nội dung | Kết quả đo được | Tuần |
+| Phase | Work | Measurable output | Week |
 |---|---|---|---|
-| **P0** | Baseline: build llama.cpp, chạy DeepSeek-V2-Lite Q4 (CPU-only & partial GPU), đo tokens/s, RAM/VRAM | bảng baseline trung thực | 1 |
-| **P1** | Quant + KV: so Q4_K_M/Q3_K_M, KV q8; đo chất lượng (perplexity) vs tốc độ | bảng đánh đổi | 1–2 |
-| **P2** | ★ **Expert cache (LRU/LFU) + routing prediction/prefetch** trên MoE | cache hit %, tokens/s vs P0 | 2–3 |
-| **P2b** | ★ **Optimizer tầng file**: reorder expert theo tần suất + residency manifest | bytes đọc/token, thời gian nạp lạnh | 3 |
-| **P3** | CPU + dGPU co-execution (overlap layer N/N+1) | tokens/s vs P2 | 3 |
-| **P4** | KV paged + speculative (Qwen2.5-0.5B draft) | speedup | 4 (nếu kịp) |
-| **P5** | API OpenAI-compatible + CLI + model manager | `curl` chạy được | 4 |
+| **P0** | Baseline: build llama.cpp, run DeepSeek-V2-Lite Q4 (CPU-only & partial GPU), measure tok/s, RAM/VRAM | an honest baseline table | 1 |
+| **P1** | Quant + KV: compare Q4_K_M/Q3_K_M, KV q8; measure quality (perplexity) vs speed | a trade-off table | 1–2 |
+| **P2** | ★ **Expert cache (LRU/LFU) + routing prediction/prefetch** on MoE | cache hit %, tok/s vs P0 | 2–3 |
+| **P2b** | ★ **File-layer optimizer**: reorder experts by frequency + residency manifest | disk bytes/token, cold-load time | 3 |
+| **P3** | CPU + dGPU co-execution (overlap layers N/N+1) | tok/s vs P2 | 3 |
+| **P4** | Paged KV + speculative (Qwen2.5-0.5B draft) | speedup | 4 (if time) |
+| **P5** | OpenAI-compatible API + CLI + model manager | a working `curl` | 4 |
 
-**Cắt khỏi 1 tháng (ghi vào roadmap v1.1+):** mobile runtime (NNAPI/Core ML/ExecuTorch),
-ONNX Runtime, gRPC, pruning/SVD/distillation, Qwen3-30B-A3B đầy đủ.
+**Cut from this month (moved to roadmap v1.1+):** mobile runtimes (NNAPI/Core ML/ExecuTorch), ONNX
+Runtime, gRPC, pruning/SVD/distillation, a full Qwen3-30B-A3B run.
 
-**Tiêu chí "thành công tối thiểu" cuối tháng:** chạy DeepSeek-V2-Lite trên máy này, có **API
-OpenAI-compatible**, và **chứng minh bằng số** rằng expert cache + prefetch thắng baseline rõ ràng
-(lý tưởng: hit ≥ 60%, token/s tăng ≥ 1.5×) — nếu không thắng, báo cáo trung thực là không thắng.
+**Minimum success criterion for the month:** run DeepSeek-V2-Lite on this machine, expose an
+**OpenAI-compatible API**, and **prove with numbers** that the expert cache + prefetch clearly beats
+baseline (idea: hit ≥ 60%, tok/s ≥ 1.5×). If it does not win, report honestly that it did not win.
 
 ---
 
-## 5. Tech stack đề xuất (theo ngân sách 0đ)
+## 5. Proposed tech stack (given zero budget)
 
-| Tầng | Chọn | Lý do |
+| Layer | Choice | Reason |
 |---|---|---|
-| Core engine | **C++ (llama.cpp fork/patch)** | tái dùng kernel + GGUF + CUDA sẵn có |
-| Điều phối/cache | **Python 3** | nhanh thử nghiệm, có `mmap`, `ctypes` |
-| Kernel tùy biến | C++ + CUDA (chỉ khi cần) | `nvcc` chưa cài — cài sau nếu cần |
-| Build | `cmake` + `gcc` (đã có) | không cần cargo |
-| Model format | **GGUF** (+ imatrix) | hệ sinh thái sẵn, hỗ trợ MoE offload |
-| Mobile (sau) | Kotlin (NNAPI), Swift (Core ML), ExecuTorch | roadmap, không trong 1 tháng |
-| Runtime khác | ONNX/MLC/ORT | để dành router, chưa làm |
+| Core engine | **C++ (llama.cpp fork/patch)** | reuse existing kernels + GGUF + CUDA |
+| Orchestration/cache | **Python 3** | fast experimentation, has `mmap`, `ctypes` |
+| Custom kernels | C++ + CUDA (only if needed) | `nvcc` not installed — add later if required |
+| Build | `cmake` + `gcc` (already present) | no cargo needed |
+| Model format | **GGUF** (+ imatrix) | mature ecosystem, MoE offload support |
+| Mobile (later) | Kotlin (NNAPI), Swift (Core ML), ExecuTorch | roadmap, not this month |
+| Other runtimes | ONNX/MLC/ORT | reserved for the router, not built yet |
 
 ---
 
-## 6. KPI (đo baseline riêng, không mượn số)
+## 6. KPIs (measure your own baseline; borrow no numbers)
 
-| Chỉ số | Cách đo |
+| Metric | How to measure |
 |---|---|
-| Tokens/s (prefill + decode) | đếm token thật / wall-clock, ≥ 3 lần chạy |
-| RAM đỉnh (RSS) | `/usr/bin/time -v` hoặc `ps` sampling |
-| VRAM đỉnh | `nvidia-smi --query-gpu=memory.used` |
-| Cache hit % (expert) | log bộ đệm, hit/tổng truy cập expert |
-| I/O mỗi token | `/proc/<pid>/io` read_bytes / token |
-| Latency first token | timestamp trước/sau token đầu |
-| Perplexity | `llama-perplexity` trên wiki test |
-| Nhiệt/điện | `nvidia-smi` + `powertop` (ưu tiên thấp trên PC) |
+| Tokens/s (prefill + decode) | count real tokens / wall-clock, ≥ 3 runs |
+| Peak RSS | `/usr/bin/time -v` or `ps` sampling |
+| Peak VRAM | `nvidia-smi --query-gpu=memory.used` |
+| Expert cache hit % | instrument the cache, hit / total expert accesses |
+| Disk I/O per token | `/proc/<pid>/io` read_bytes / tokens |
+| First-token latency | timestamps before/after the first token |
+| Perplexity | `llama-perplexity` on a wiki test set |
+| Thermals/power | `nvidia-smi` + `powertop` (low priority on a PC) |
 
-> **Không** dùng "Recall@5" hay số của FreeToken/AirLLM làm KPI của dự án này — đó là số của họ.
+> **Do not** use "Recall@5" or FreeToken/AirLLM numbers as this project's KPIs — those are theirs.
 
 ---
 
-## 7. Rủi ro & giảm thiểu
+## 7. Risks & mitigations
 
-| Rủi ro | Giảm thiểu |
+| Risk | Mitigation |
 |---|---|
-| **I/O bottleneck** (NVMe DRAM-less ~2 GB/s) | giữ expert nóng trong VRAM/RAM; đo hit trước khi tối ưu đọc |
-| **Model quá RAM** (Qwen3-30B-A3B 18.6 GB > 11 GiB) | chọn DeepSeek-V2-Lite cho P0–P2; Qwen3 chỉ khi có streaming |
-| **Không swap** ⇒ OOM chết tiến trình | đặt `--mlock` cẩn thận, giới hạn RSS, `systemd-run` giới hạn |
-| **Cài llama.cpp CUDA** cần `nvcc`? | build CPU trước (đã có gcc/cmake); CUDA chỉ khi cần |
-| Đĩa 404 GB trống đủ cho vài model ~30 GB | theo dõi dung lượng |
-| Chất lượng giảm khi Q3/lượng tử hóa mạnh | đo perplexity, không hạ bit nếu tăng > 0.3 |
-| Bản quyền model | chỉ dùng model license permissive (DeepSeek/Qwen đều cho phép) |
-| Nhiệt/throttle laptop | đo nhiệt, tránh chạy liên tục > 30 phút |
-| "Thắng" không đo được ⇒ tự lừa | chốt tiêu chí baseline trước, báo cáo cả khi thua |
-| NPU/Android không có máy test | ghi rõ là "chưa kiểm chứng", không nhận là đã làm |
+| **I/O bottleneck** (DRAM-less NVMe ~2 GB/s) | keep hot experts in VRAM/RAM; measure hit rate before optimizing reads |
+| **Model exceeds RAM** (Qwen3-30B-A3B 18.6 GB > 11 GiB) | use DeepSeek-V2-Lite for P0–P2; Qwen3 only once streaming exists |
+| **No swap** ⇒ OOM kills the process | use `--mlock` carefully, cap RSS, `systemd-run` limits |
+| **Building llama.cpp with CUDA** may need `nvcc` | build CPU first (gcc/cmake present); CUDA only if needed |
+| 404 GB free disk must hold several ~30 GB models | monitor free space |
+| Quality loss from Q3/aggressive quantization | measure perplexity; do not drop bits if it rises > 0.3 |
+| Model licensing | only use permissively licensed models (DeepSeek/Qwen allow it) |
+| Laptop thermals/throttling | measure temperature; avoid > 30 min continuous runs |
+| "Winning" not measurable ⇒ self-deception | fix the baseline criteria up front; report even when losing |
+| No NPU/Android device to test | mark as "unverified", never claim it was done |
 
 ---
 
 ## 8. Next 7 days — action plan
 
-**Ngày 1 — nền tảng đo**
-- [ ] Clone & build `llama.cpp` (CPU-only trước) bằng `cmake`.
-- [ ] Viết `bench/` (script Python): đo token/s, RSS, VRAM, I/O per token, chuẩn hóa output.
-- [ ] Chốt định dạng báo cáo baseline (bảng + JSON).
+**Day 1 — measurement foundation**
+- [ ] Clone & build `llama.cpp` (CPU-only first) with `cmake`.
+- [ ] Write `bench/` (Python): measure tok/s, RSS, VRAM, I/O per token, normalize output.
+- [ ] Fix the baseline report format (table + JSON).
 
-**Ngày 2 — model P0**
-- [ ] Tải DeepSeek-V2-Lite GGUF `Q4_K_M` (~10 GB) + lưu checksum.
-- [ ] Chạy baseline: CPU-only (`-ngl 0`), partial (`-ngl 99 --n-cpu-moe`), ghi số.
-- [ ] Xác nhận VRAM/RAM thực tế, ghi bảng.
+**Day 2 — P0 model**
+- [ ] Download DeepSeek-V2-Lite GGUF `Q4_K_M` (~10 GB) and record checksums.
+- [ ] Baseline runs: CPU-only (`-ngl 0`), partial (`-ngl 99 --n-cpu-moe`), record numbers.
+- [ ] Confirm actual VRAM/RAM usage, fill in the table.
 
-**Ngày 3 — quant & KV (P1)**
-- [ ] So `Q4_K_M` vs `Q3_K_M`; KV `f16` vs `q8_0` vs `q4_0`.
-- [ ] Đo perplexity từng cấu hình (wiki-test ngắn).
-- [ ] Bảng đánh đổi chất lượng/tốc độ/bộ nhớ.
+**Day 3 — quant & KV (P1)**
+- [ ] Compare `Q4_K_M` vs `Q3_K_M`; KV `f16` vs `q8_0` vs `q4_0`.
+- [ ] Measure perplexity for each configuration (short wiki test).
+- [ ] Produce the quality/speed/memory trade-off table.
 
-**Ngày 4 — thiết kế expert cache (P2)**
-- [ ] Viết spec: khóa cache, chính sách LRU vs LFU vs hybrid, kích thước theo VRAM còn trống.
-- [ ] Instrument llama.cpp/offload để **log expert nào được chọn** (dữ liệu cho dự đoán).
-- [ ] Thu trace routing ≥ 1k token làm dataset.
+**Day 4 — expert cache design (P2)**
+- [ ] Write the spec: cache key, LRU vs LFU vs hybrid policy, size based on free VRAM.
+- [ ] Instrument llama.cpp/offload to **log which experts are selected** (data for prediction).
+- [ ] Collect a routing trace of ≥ 1k tokens as a dataset.
 
-**Ngày 5 — dự đoán routing (P2)**
-- [ ] Phân tích trace: entropy routing, trùng lặp expert giữa lớp liền kề, tỉ lệ hit tiềm năng.
-- [ ] Prototype predictor đơn giản (freq + last-used) đo hit%.
+**Day 5 — routing prediction (P2)**
+- [ ] Analyze the trace: routing entropy, expert overlap between adjacent layers, potential hit rate.
+- [ ] Prototype a simple predictor (frequency + last-used) and measure hit %.
 
-**Ngày 6 — tích hợp & đo (P2)**
-- [ ] Nối cache + prefetch vào engine; chạy lại cùng benchmark ngày 2.
-- [ ] So P0 vs P2: hit %, token/s, I/O/token. Ghi thẳng cả khi thua.
+**Day 6 — integrate & measure (P2)**
+- [ ] Wire the cache + prefetch into the engine; rerun the Day-2 benchmark.
+- [ ] Compare P0 vs P2: hit %, tok/s, I/O per token. Record it even if it loses.
 
-**Ngày 7 — chốt tuần & quyết định**
-- [ ] Viết `docs/RESULTS-W1.md` với số thật.
-- [ ] Quyết định có đủ cơ sở làm P3 (co-exec) hay quay lại tối ưu cache.
+**Day 7 — close the week & decide**
+- [ ] Write `docs/RESULTS-W1.md` with the real numbers.
+- [ ] Decide whether there is enough evidence for P3 (co-exec) or whether to return to cache tuning.
 - [ ] Commit + tag `w1`.
 
 ---
 
-## Sơ đồ luồng một lượt decode (mục tiêu P2)
+## Flow of one decode step (P2 target)
 
 ```
 token t
   │
-  ├─ router layer n  ──► chọn expert {e1,e2,...}
+  ├─ router layer n  ──► selects experts {e1,e2,...}
   │        │
-  │        ├─ cache hit? ──► compute ngay (VRAM)
-  │        └─ miss ──► nạp từ RAM/đĩa (async) ──┐
-  │                                              │
-  ├─ predictor: dự đoán expert layer n+1 ──► prefetch (che latency)
+  │        ├─ cache hit? ──► compute now (VRAM)
+  │        └─ miss ──► load from RAM/disk (async) ──┐
+  │                                                 │
+  ├─ predictor: forecast layer n+1 experts ──► prefetch (hide latency)
   │
-  └─ KV cache: cấp page cho token mới (không copy cả KV)
+  └─ KV cache: allocate a page for the new token (no full KV copy)
 ```

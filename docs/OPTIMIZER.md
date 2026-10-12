@@ -1,55 +1,58 @@
-# OPTIMIZER — lớp tối ưu file model
+# OPTIMIZER — the model-file optimization layer
 
-> Đây là **định vị chính** của vipera: không viết runtime mới, mà **viết lại file model** để runtime
-> yếu đọc ít hơn và đọc tuần tự hơn. Runtime (llama.cpp) là *người tiêu thụ* artifact do vipera xuất ra.
+> This is **vipera's core positioning**: it does not write a new runtime — it **rewrites the model
+> file** so a weak runtime reads less and reads sequentially. The runtime (llama.cpp) is a *consumer*
+> of the artifact vipera produces.
 
 ---
 
-## 1. Vì sao tối ưu ở tầng file
+## 1. Why optimize at the file layer
 
-Trên máy mục tiêu (4 GB VRAM, 15 GiB RAM, NVMe DRAM-less), chi phí decode MoE bị chi phối bởi
-**số byte phải đọc cho mỗi token**. Tối ưu runtime (cache, prefetch) chỉ đẩy tới trần I/O; nó
-**không đổi được** việc file model xếp expert nóng rải rác khắp đĩa.
+On the target machine (4 GB VRAM, 15 GiB RAM, DRAM-less NVMe), MoE decode cost is dominated by
+**the number of bytes read per token**. Runtime tricks (cache, prefetch) only push toward the I/O
+ceiling; they **cannot change** the fact that hot experts are scattered across the disk in the
+original file.
 
-Chia nhỏ vấn đề:
+Break the problem down:
 
 ```
-chi phí token  =  (bytes đọc từ VRAM/RAM)  +  (bytes đọc từ đĩa)
-                  └─ nhanh, không đổi ─┘     └─ CHẬM (2 GB/s) — đây là chỗ tối ưu ─┘
+token cost  =  (bytes read from VRAM/RAM)  +  (bytes read from disk)
+               └─ fast, unchanged ─┘          └─ SLOW (2 GB/s) — this is what we optimize ─┘
 ```
 
-**Mục tiêu của lớp tối ưu:** giảm *bytes đọc từ đĩa*, và khi buộc phải đọc thì đọc **tuần tự**.
+**The optimization layer's goal:** reduce *bytes read from disk*, and when a read is unavoidable,
+make it **sequential**.
 
 ---
 
 ## 2. Pipeline
 
 ```
- safetensors / GGUF gốc
+ raw safetensors / GGUF
         │
         ▼
- ┌─────────────────┐   (1) phân tích
- │  ANALYZER       │   • trace routing (expert nào được chọn theo layer/token)
- │                 │   • độ phổ biến expert  • nhóm lỗi thời • kích thước tensor
+ ┌─────────────────┐   (1) analyze
+ │  ANALYZER       │   • routing traces (which expert is picked per layer/token)
+ │                 │   • expert frequency • stale groups • tensor sizes
  └────────┬────────┘
           ▼
- ┌─────────────────┐   (2) biến đổi (ghi rõ dữ liệu vào/ra)
- │  TRANSFORMER    │   • reorder expert  • prune/merge  • block-quant  • căn chunk
+ ┌─────────────────┐   (2) transform (inputs/outputs stated per transform)
+ │  TRANSFORMER    │   • expert reorder • prune/merge • block-quant • chunk align
  └────────┬────────┘
           ▼
- ┌─────────────────┐   (3) đóng gói
- │  PACKER         │   • artifact .gguf đã tối ưu
+ ┌─────────────────┐   (3) pack
+ │  PACKER         │   • optimized .gguf artifact
  │                 │   • `*.vipera.json` = residency manifest
  └────────┬────────┘
           ▼
-   runtime (llama.cpp) đọc manifest → biết cái gì ở đâu
+   runtime (llama.cpp) reads the manifest → knows what lives where
 ```
 
 ---
 
 ## 3. Residency manifest — `*.vipera.json`
 
-Hợp đồng giữa optimizer và runtime. Nội dung dự kiến:
+The contract between the optimizer and the runtime. Planned contents:
 
 ```jsonc
 {
@@ -58,96 +61,98 @@ Hợp đồng giữa optimizer và runtime. Nội dung dự kiến:
   "target": { "vram_mb": 4096, "ram_mb": 11264, "disk": "nvme-dramless" },
   "placement": {
     "resident_vram": ["attn.*", "shared_experts.*", "norm.*"],
-    "resident_ram":  ["hot_experts/*"],        // ví dụ 60% expert nóng
-    "spill_disk":    ["cold_experts/*"]        // đọc theo nhu cầu
+    "resident_ram":  ["hot_experts/*"],        // e.g. the 60% hottest experts
+    "spill_disk":    ["cold_experts/*"]        // read on demand
   },
-  "expert_order": "by_frequency",              // thứ tự trong file
+  "expert_order": "by_frequency",              // order within the file
   "routing": { "trace_tokens": 4096, "topk": 6, "hit_potential": 0.71 },
   "kv_cache": { "type_k": "q8_0", "type_v": "q8_0", "pages": 256 }
 }
 ```
 
-Runtime đọc manifest ⇒ **không phải dò/đoán** khi khởi động; tránh tự động chọn `-ngl`/`--n-cpu-moe`
-một cách mù quáng.
+The runtime reads the manifest ⇒ it does **not** have to probe or guess at startup, avoiding a blind
+choice of `-ngl`/`--n-cpu-moe`.
 
 ---
 
-## 4. Các transform, chi tiết
+## 4. Transforms in detail
 
 ### T1. Expert hot/cold reorder
-- **Vào:** trace routing (từ P2) + file gốc.
-- **Ra:** file có expert sắp theo tần suất; expert nóng **liền kề trên đĩa**.
-- **Vì sao thắng:** NVMe DRAM-less đọc tuần tự tốt hơn nhiều so với random. Nhiều expert nóng liền
-  nhau ⇒ **1 lần đọc tuần tự**, không phải N lần đọc rời.
-- **Rủi ro:** nếu phân bố expert đổi theo domain prompt, thứ tự tối ưu cho task này lại kém cho task
-  khác ⇒ cần reorder theo *nhiều* trace, không tin một trace.
+- **Input:** routing traces (from P2) + the original file.
+- **Output:** a file whose experts are ordered by frequency; hot experts **adjacent on disk**.
+- **Why it wins:** a DRAM-less NVMe reads sequentially far better than randomly. Many hot experts
+  adjacent ⇒ **one sequential read**, not N scattered reads.
+- **Risk:** if the expert distribution shifts by prompt domain, an order tuned for one task is worse
+  for another ⇒ reorder from *many* traces, not a single one.
 
 ### T2. Residency manifest
-- **Vào:** model + cấu hình máy.
-- **Ra:** `*.vipera.json` (mục 3).
-- **Vì sao thắng:** bỏ bước "đoán" khi chạy; placement tường minh ⇒ ít thử-sai, và nó là **đầu vào**
-  cho expert cache ở runtime.
+- **Input:** model + machine config.
+- **Output:** `*.vipera.json` (section 3).
+- **Why it wins:** it removes the guesswork at run time; placement is explicit ⇒ less trial and error,
+  and it becomes the **input** for the runtime's expert cache.
 
 ### T3. Block-wise quantization
-- **Vào:** safetensors (f16/bf16).
-- **Ra:** GGUF block 4-bit (block độc lập, mmap từng block).
-- **Vì sao thắng:** giảm bytes cả trên đĩa lẫn RAM; block độc lập ⇒ có thể `mmap` từng mảnh, hợp với
-  streaming. (AirLLM dùng đúng ý tưởng này để giảm I/O.)
+- **Input:** safetensors (f16/bf16).
+- **Output:** 4-bit block GGUF (independent blocks, mmap per block).
+- **Why it wins:** fewer bytes on disk and in RAM; independent blocks ⇒ each block can be `mmap`ed,
+  which pairs well with streaming. (AirLLM uses exactly this idea to cut I/O.)
 
-### T4. Expert pruning / merge
-- **Vào:** tần suất dùng expert + đóng góp chất lượng.
-- **Ra:** ít expert hơn (bỏ expert gần như chưa bao giờ được chọn; hoặc gộp cặp giống nhau).
-- **Vì sao thắng:** MoE thưa sẵn ⇒ cắt expert cho lợi ích bộ nhớ **trực tiếp**.
-- **Rủi ro:** **chất lượng tụt âm thầm**. Bắt buộc đo perplexity trước/sau; cắt quá tay ⇒ phải rollback.
+### T4. Expert pruning / merging
+- **Input:** per-expert usage frequency + quality contribution.
+- **Output:** fewer experts (drop those almost never selected, or merge similar pairs).
+- **Why it wins:** MoE is already sparse ⇒ cutting experts gives a **direct** memory win.
+- **Risk:** **silent quality loss**. Always measure perplexity before/after; over-pruning ⇒ roll back.
 
 ### T5. KV placement hints
-- **Vào:** cấu hình context mong muốn.
-- **Ra:** manifest (kiểu KV, số page).
-- **Vì sao thắng:** KV trên máy này dễ ăn hết RAM; đặt tường minh tránh OOM (máy **không có swap**).
+- **Input:** desired context configuration.
+- **Output:** manifest entries (KV type, page count).
+- **Why it wins:** KV easily exhausts RAM on this machine; stating it explicitly avoids OOM (the
+  machine has **no swap**).
 
 ### T6. Chunk alignment
-- **Vào:** file.
-- **Ra:** tensor căn theo page/đĩa.
-- **Vì sao thắng:** tránh đọc thừa byte ở rìa page — quan trọng khi đĩa DRAM-less.
+- **Input:** model file.
+- **Output:** tensors aligned to page/disk boundaries.
+- **Why it wins:** avoids over-reading bytes at page edges — important on a DRAM-less disk.
 
 ---
 
-## 5. Hợp đồng (interfaces)
+## 5. Interfaces
 
 ```python
-# vipera/optimizer.py (thiết kế, chưa cài đặt)
+# vipera/optimizer.py (design, not yet implemented)
 class Optimizer:
     def analyze(self, model_path: str, traces: list[str]) -> "Analysis": ...
     def transform(self, model_path: str, plan: "Plan") -> "Artifact": ...
     def write_manifest(self, artifact: "Artifact", target: "TargetHW") -> str: ...
 ```
 
-CLI dự kiến:
+Planned CLI:
 
 ```bash
-# phân tích: sinh trace + thống kê expert
+# analyze: emit traces + expert statistics
 vipera analyze models/deepseek-v2-lite-Q4_K_M.gguf --trace bench/prompts.txt -o analysis.json
 
-# tối ưu: ghi artifact + manifest
+# optimize: write the artifact + manifest
 vipera optimize models/deepseek-v2-lite-Q4_K_M.gguf --target hw/gtx1650.toml -o out/
 
-# xuất ra: out/model.vipera.gguf, out/model.vipera.json
+# output: out/model.vipera.gguf, out/model.vipera.json
 ```
 
-`hw/gtx1650.toml` mô tả máy mục tiêu (VRAM/RAM/đĩa) để placement tính được.
+`hw/gtx1650.toml` describes the target machine (VRAM/RAM/disk) so placement can be computed.
 
 ---
 
-## 6. Đo lường (bắt buộc trước khi tin bất kỳ transform nào)
+## 6. Measurement (mandatory before trusting any transform)
 
-| Transform | Cách kiểm |
+| Transform | How to verify |
 |---|---|
-| T1 reorder | bytes đọc/token trước-sau; hit%; tokens/s |
-| T2 manifest | sai số placement (dự đoán vs thực tế VRAM/RAM đỉnh) |
-| T3 block-quant | perplexity tăng ≤ 0.3 so với file gốc |
-| T4 prune/merge | perplexity trên **tập câu hỏi đa dạng**, không chỉ 1 prompt |
-| T5 KV hints | RAM đỉnh, có OOM không |
-| T6 align | thời gian nạp lạnh (cold cache) |
+| T1 reorder | bytes read/token before–after; hit %; tok/s |
+| T2 manifest | placement error (predicted vs actual peak VRAM/RAM) |
+| T3 block-quant | perplexity rise ≤ 0.3 vs the original file |
+| T4 prune/merge | perplexity on a **diverse question set**, not one prompt |
+| T5 KV hints | peak RAM, no OOM |
+| T6 align | cold-load time (cold cache) |
 
-**Nguyên tắc:** mỗi transform phải **tự chứng minh** bằng số trước/sau. Transform nào không thắng
-trên máy mục tiêu thì **tắt mặc định** và ghi lại là thất bại — không giữ lại cho đẹp.
+**Principle:** every transform must **prove itself** with before/after numbers. Any transform that
+does not win on the target machine is **disabled by default** and recorded as a failure — it is not
+kept around to look good.

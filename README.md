@@ -1,67 +1,68 @@
 # vipera
 
-**Lớp tối ưu file model AI (local LLM) để chạy trên máy yếu** — bắt đầu từ **máy tính cá nhân**,
-mở rộng ra **điện thoại**.
+**An optimization layer for local LLM model files, so they run on weak hardware** — starting with
+**personal computers**, then **phones**.
 
-`vipera` không phải một runtime mới. Nó là **một lớp nằm giữa file model và runtime**: nhận một
-artifact (GGUF/safetensors), **viết lại thành artifact đã tối ưu** + một *manifest* cho runtime biết
-cái gì nằm ở đâu (VRAM/RAM/đĩa), thứ tự nạp, và expert nào "nóng".
+`vipera` is not another runtime. It is **a layer between the model file and the runtime**: it takes an
+artifact (GGUF/safetensors), **rewrites it into an optimized artifact**, and emits a *manifest* that
+tells the runtime what lives where (VRAM/RAM/disk), in what load order, and which experts are "hot".
 
-Lấy cảm hứng từ [FreeToken](https://github.com/FlashML-org/FreeToken) (MoE serving trên consumer
-hardware) và [AirLLM](https://github.com/lyogavin/airllm) (layer-wise streaming) — nhưng hai dự án
-đó giả định nhiều GPU/RAM. `vipera` nhắm đúng vùng khó: **model vừa RAM nhưng quá VRAM, đĩa chậm**.
+Inspired by [FreeToken](https://github.com/FlashML-org/FreeToken) (MoE serving on consumer hardware)
+and [AirLLM](https://github.com/lyogavin/airllm) (layer-wise streaming) — but both assume plenty of
+GPU/RAM. `vipera` targets the hard spot: **the model fits in RAM yet overflows VRAM, on a slow disk**.
 
-> Trạng thái: **đang thiết kế (Phase 0)**. Chưa có code chạy. Số in đậm là đo trên máy mục tiêu;
-> số của FreeToken/AirLLM là **theo công bố của họ**, chưa kiểm chứng lại.
+> Status: **design phase (Phase 0)**. No runnable code yet. Bold numbers are measured on the target
+> machine; FreeToken/AirLLM figures are **as published by them**, not re-verified here.
 
 ---
 
-## Ý tưởng: tối ưu ở **tầng file**, không chỉ ở runtime
+## The idea: optimize at the **file** layer, not just at runtime
 
-Tối ưu runtime (cache expert, prefetch) chỉ giúp được tới trần I/O. `vipera` đi thêm một bước:
-**sắp đặt lại chính file model** để runtime yếu đọc ít hơn và đọc tuần tự hơn.
+Runtime tricks (expert cache, prefetch) only get you to the I/O ceiling. `vipera` goes one step
+further: **rearrange the model file itself** so a weak runtime reads less and reads sequentially.
 
-| Transform (tầng file) | Đọc file gốc | Xuất ra | Lợi ích trên máy yếu |
+| File-layer transform | Input | Output | Benefit on weak hardware |
 |---|---|---|---|
-| **Expert hot/cold reorder** | trace routing | epoch layout lại | expert nóng nằm liền kề ⇒ prefetch 1 lần đọc |
-| **Residency manifest** | model + hardware | `*.vipera.json` | runtime biết chia VRAM/RAM/đĩa không cần đoán |
-| **Block-wise quant** | safetensors | GGUF block 4-bit | stream từng block qua `mmap` |
-| **Expert pruning/merge** | tần suất dùng | ít expert hơn | nhỏ hơn, vừa RAM hơn |
-| **KV placement hints** | cấu hình | manifest | KV ở đâu, quant bao nhiêu bit |
-| **Chunk alignment** | model | căn theo page/đĩa | tránh đọc thừa trên NVMe DRAM-less |
+| **Expert hot/cold reorder** | routing traces | re-laid-out file | hot experts become contiguous ⇒ one sequential read |
+| **Residency manifest** | model + hardware | `*.vipera.json` | runtime knows the VRAM/RAM/disk split instead of guessing |
+| **Block-wise quant** | safetensors | 4-bit block GGUF | stream block by block via `mmap` |
+| **Expert pruning/merge** | usage frequency | fewer experts | smaller ⇒ fits RAM |
+| **KV placement hints** | config | manifest | where KV lives, how many bits |
+| **Chunk alignment** | model | page/disk aligned | avoids over-reading on a DRAM-less NVMe |
 
-## Máy mục tiêu (đo 12/10)
+## Target machine (measured 2026-10-12)
 
 | | |
 |---|---|
-| CPU | Intel i5-11300H — 4C/8T, ≤ 4.4 GHz |
-| RAM | 15 GiB, khả dụng ~10 GiB, **không swap** |
+| CPU | Intel i5-11300H — 4C/8T, up to 4.4 GHz |
+| RAM | 15 GiB, ~10 GiB available, **no swap** |
 | GPU | NVIDIA **GTX 1650 Max-Q, 4 GB VRAM** (compute 7.5) |
-| iGPU | Intel Iris Xe (TigerLake) |
-| Disk | WD SN530 NVMe **DRAM-less**, 404 GB trống |
+| iGPU | Intel Iris Xe (Tiger Lake) |
+| Disk | WD SN530 NVMe **DRAM-less**, 404 GB free |
 | OS | Linux |
 
-## Model mục tiêu
+## Target models
 
-| Phase | Model | Tổng / active | Q4_K_M (ước lượng) | Vừa RAM 11 GiB? |
+| Phase | Model | Total / active | Q4_K_M (estimated) | Fits 11 GiB RAM? |
 |---|---|---|---|---|
 | P0–P2 | **DeepSeek-V2-Lite** | 15.7B / 2.4B | ~9.5–10.4 GB | ✅ |
-| stretch | Qwen3-30B-A3B | 30.5B / 3.3B | ~18.6 GB | ❌ (cần streaming) |
+| stretch | Qwen3-30B-A3B | 30.5B / 3.3B | ~18.6 GB | ❌ (needs streaming) |
 
-**Con số quyết định:** với DeepSeek-V2-Lite, expert nằm RAM → trần ≈ **~33 tok/s**; nhưng cache
-miss đọc từ NVMe (DRAM-less ~2 GB/s) → **~1.7 tok/s**. Chênh **~20×** ⇒ mục tiêu số 1 của vipera là
-**giảm số lần đọc đĩa** cho expert.
+**The decisive number:** for DeepSeek-V2-Lite, experts resident in RAM imply a ceiling of
+**~33 tok/s**; but a cache miss reading from the NVMe (DRAM-less, ~2 GB/s) drops it to **~1.7 tok/s**.
+A **~20×** gap ⇒ vipera's primary goal is **fewer disk reads for experts**.
 
-## Tài liệu
+## Documents
 
-- [`docs/OPTIMIZER.md`](docs/OPTIMIZER.md) — **lớp tối ưu file model** (định vị chính của vipera).
-- [`docs/ALGORITHMS.md`](docs/ALGORITHMS.md) — phân tích thuật toán (streaming, MoE offloading,
-  co-execution, quantization, KV cache, speculative decoding, nén model).
-- [`docs/DESIGN.md`](docs/DESIGN.md) — kiến trúc, so sánh FreeToken/AirLLM, roadmap 1 tháng, tech
-  stack, KPI, rủi ro, **kế hoạch 7 ngày**.
+- [`docs/OPTIMIZER.md`](docs/OPTIMIZER.md) — **the model-file optimization layer** (vipera's core
+  positioning).
+- [`docs/ALGORITHMS.md`](docs/ALGORITHMS.md) — algorithm analysis (streaming, MoE offloading,
+  co-execution, quantization, KV cache, speculative decoding, model compression).
+- [`docs/DESIGN.md`](docs/DESIGN.md) — architecture, FreeToken/AirLLM comparison, 1-month roadmap,
+  tech stack, KPIs, risks, **7-day plan**.
 
-## Phạm vi (1 tháng, 0đ)
+## Scope (one month, zero budget)
 
-- ✅ PC-first (không có máy Android để test ⇒ "phone" chỉ ở mức thiết kế/portability).
-- ✅ GGUF + llama.cpp, Python cho tầng optimizer.
-- ❌ Không: ONNX/ExecuTorch/LiteRT runtime, gRPC, distillation trong tháng này.
+- ✅ PC-first (no Android device available to test ⇒ "phone" stays at the design/portability level).
+- ✅ GGUF + llama.cpp, Python for the optimizer layer.
+- ❌ Not this month: ONNX/ExecuTorch/LiteRT runtimes, gRPC, distillation.

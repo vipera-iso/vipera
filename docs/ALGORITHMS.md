@@ -1,182 +1,187 @@
-# ALGORITHMS — Phân tích thuật toán chạy LLM/MoE trên thiết bị yếu
+# ALGORITHMS — Running LLM/MoE on weak hardware
 
-> Tài liệu này là **phần quan trọng nhất** của dự án (mục 1 trong prompt gốc).
-> Mọi con số in đậm là **đo trên máy mục tiêu** hoặc **suy ra từ đo**; con số khác ghi rõ là ước lượng.
-> Các kết quả của FreeToken/AirLLM/edge0 là **theo công bố của chính họ**, chưa kiểm chứng lại ở đây.
+> This document is **the most important part** of the project (section 1 of the original prompt).
+> Every **bold** number is **measured on the target machine** or **derived from a measurement**;
+> other numbers are explicitly marked as estimates. Results attributed to FreeToken/AirLLM/edge0 are
+> **as published by them** and have not been re-verified here.
 
 ---
 
-## 0. Máy mục tiêu (đo 12/10)
+## 0. Target machine (measured 2026-10-12)
 
-| Thành phần | Thông số | Ý nghĩa với thuật toán |
+| Component | Spec | Why it matters for the algorithms |
 |---|---|---|
-| CPU | Intel i5-11300H, **4 core / 8 thread**, tối đa 4.4 GHz | tính toán MoE rơi vào CPU sẽ chậm; bandwidth DDR4 mới là trần |
-| RAM | **15 GiB**, khả dụng ~10 GiB, **không swap** | model phải ≤ ~11 GiB nếu muốn resident; quá ngưỡng ⇒ phải streaming |
-| GPU | **GTX 1650 Max-Q, 4 GB VRAM**, compute 7.5 (Turing) | chứa attention + KV + vài expert; **không chứa nổi cả model** |
-| iGPU | Intel Iris Xe (TigerLake) | có thể tính chung nhưng không có API hợp nhất với NVIDIA |
-| Disk | **WD SN530 NVMe (DRAM-less)**, ~404 GB trống | streaming đọc tuần tự tốt, nhưng **DRAM-less** ⇒ burst/random kém hơn NVMe có DRAM |
-| Có sẵn | `python3`, `cmake`, `gcc` | thiếu `llama.cpp`, `ollama`, `cargo`, `nvcc` |
+| CPU | Intel i5-11300H, **4 cores / 8 threads**, up to 4.4 GHz | MoE compute that falls back to CPU is slow; DDR4 bandwidth is the real ceiling |
+| RAM | **15 GiB**, ~10 GiB available, **no swap** | a model must be ≤ ~11 GiB to stay resident; above that it must stream |
+| GPU | **GTX 1650 Max-Q, 4 GB VRAM**, compute 7.5 (Turing) | holds attention + KV + a few experts; **cannot hold the whole model** |
+| iGPU | Intel Iris Xe (Tiger Lake) | could co-compute, but there is no unified API with NVIDIA |
+| Disk | **WD SN530 NVMe (DRAM-less)**, ~404 GB free | good sequential reads, but **DRAM-less** ⇒ worse burst/random |
+| Available | `python3`, `cmake`, `gcc` | missing `llama.cpp`, `ollama`, `cargo`, `nvcc` |
 
-**Trần lý thuyết (suy ra, không phải đo):** decode LLM là bài toán **memory-bandwidth-bound**.
-- RAM DDR4-3200 dual-channel ≈ **40–45 GB/s** thực dụng.
-- VRAM GTX 1650 ≈ **192 GB/s**.
-- NVMe SN530 đọc tuần tự ~**1.5–2.0 GB/s** thực dụng (DRAM-less).
+**Theoretical ceilings (derived, not measured):** LLM decode is **memory-bandwidth-bound**.
+- DDR4-3200 dual-channel RAM ≈ **40–45 GB/s** practical.
+- GTX 1650 VRAM ≈ **192 GB/s**.
+- SN530 NVMe sequential read ≈ **1.5–2.0 GB/s** practical (DRAM-less).
 
-⇒ Mỗi token phải đọc bộ trọng số *đang hoạt động*. Vậy:
-`tokens/s ≈ bandwidth / (bytes trọng số hoạt động mỗi token)`.
+⇒ Each token must read the *active* weights. Therefore:
+`tokens/s ≈ bandwidth / (active weight bytes per token)`.
 
 ---
 
 ## 1.a Layer-wise Streaming (AirLLM)
 
-**Cơ chế.** Không nạp cả model; nạp **một layer** vào compute unit, tính, giải phóng, sang layer kế.
+**Mechanism.** Do not load the whole model; load **one layer** into the compute unit, compute, free
+it, move to the next layer.
 
 ```
-VRAM_đỉnh = max(kích thước 1 layer) + KV + activation + overhead   (KHÔNG phụ thuộc tổng model)
+peak VRAM = max(size of one layer) + KV + activations + overhead   (INDEPENDENT of total model size)
 ```
 
-**Trade-off trung tâm.** Đổi *dung lượng* lấy *I/O*. Với model **lớn hơn RAM**, streaming là bắt buộc.
-Với model **vừa RAM**, streaming là tự sát về tốc độ.
+**The central trade-off.** Capacity in exchange for I/O. For a model **larger than RAM**, streaming is
+mandatory. For a model that **fits RAM**, streaming is self-defeating for speed.
 
-**Con số trên máy này.** Một MoE 30B Q4 (≈18.6 GB) không vừa 11 GiB RAM ⇒ phải streaming từ NVMe:
+**Numbers on this machine.** A 30B Q4 MoE (≈18.6 GB) does not fit in 11 GiB of RAM ⇒ it must stream
+from the NVMe:
 ```
-18.6 GB / 2.0 GB/s ≈ 9.3 s cho MỘT lượt đọc toàn bộ
+18.6 GB / 2.0 GB/s ≈ 9.3 s for ONE full pass
 ```
-Nếu mỗi token phải đọc lại toàn bộ ⇒ **~0.1 token/s** — vô dụng. ⇒ Streaming chỉ thắng khi
-**phần lớn trọng số nằm resident**, chỉ stream phần ít dùng.
+If every token needs a full pass ⇒ **~0.1 token/s** — useless. ⇒ Streaming only wins when **most
+weights stay resident** and only the rarely used part streams.
 
-**Tối ưu I/O (thứ tự ưu tiên):**
-1. **mmap** trọng số (`mmap` + `MADV_WILLNEED`) để OS page cache lo việc đọc.
-2. **Prefetch layer N+1 trong lúc tính layer N** (một luồng I/O riêng + ring buffer).
-3. **Double buffering**: 2 buffer, DMA/đọc async trong khi compute buffer kia.
-4. **Pinned (page-locked) host memory** để H2D qua PCIe không bị chặn.
-5. **NVMe là trần cứng** — không thuật toán nào vượt được 2 GB/s đọc đĩa.
+**I/O optimization (priority order):**
+1. **mmap** the weights (`mmap` + `MADV_WILLNEED`) so the OS page cache handles reads.
+2. **Prefetch layer N+1 while computing layer N** (a dedicated I/O thread + ring buffer).
+3. **Double buffering**: two buffers, async reads into one while computing on the other.
+4. **Pinned (page-locked) host memory** so the H2D copy over PCIe does not block.
+5. **The NVMe is a hard ceiling** — no algorithm reads disk faster than 2 GB/s.
 
-**Áp dụng cho dense vs MoE:** dense buộc stream *cả layer*; MoE có thể stream **theo expert**
-(hạt mịn hơn ⇒ ít I/O hơn nhiều). Đây là lý do 1.c/1.b quan trọng hơn 1.a trên máy yếu.
+**Dense vs MoE:** dense forces streaming *the whole layer*; MoE can stream **per expert**
+(finer granularity ⇒ far less I/O). This is why 1.c/1.b matter more than 1.a on weak hardware.
 
 ---
 
-## 1.b MoE Inference trên thiết bị yếu
+## 1.b MoE inference on weak hardware
 
-**Cơ chế.** MoE có `N` expert/layer, mỗi token chỉ đi qua `k` expert (top-k). Chỉ nạp `k` expert đó.
+**Mechanism.** MoE has `N` experts per layer, but each token visits only `k` experts (top-k). Load
+only those `k`.
 
 ```
-VRAM/RAM_cần = Σ (shared/attention, resident) + max(k expert) + router   (nhỏ hơn nhiều so với Σ N expert)
+needed VRAM/RAM = Σ (shared/attention, resident) + max(k experts) + router   (much less than Σ N experts)
 ```
 
-| Model | Tổng | Active/token | Lớp | Expert/lớp | top-k | Q4_K_M (ước lượng) |
+| Model | Total | Active/token | Layers | Experts/layer | top-k | Q4_K_M (estimated) |
 |---|---|---|---|---|---|---|
-| DeepSeek-V2-Lite | 15.7B | 2.4B | 27 | 64 + 2 shared | 6 | **~9.5–10.4 GB → VỪA 11 GiB RAM** |
-| Qwen3-30B-A3B | 30.5B | 3.3B | 48 | 128 | 8 | **~18.6 GB → KHÔNG vừa ⇒ cần stream/Q3** |
+| DeepSeek-V2-Lite | 15.7B | 2.4B | 27 | 64 + 2 shared | 6 | **~9.5–10.4 GB → FITS 11 GiB RAM** |
+| Qwen3-30B-A3B | 30.5B | 3.3B | 48 | 128 | 8 | **~18.6 GB → does NOT fit ⇒ stream/Q3** |
 
-**Bốn trụ kỹ thuật:**
-1. **Expert offloading** — expert không dùng nằm ở RAM/đĩa; chỉ expert được router chọn lên VRAM.
-2. **Expert cache (LRU/LFU)** — giữ expert "nóng" trong VRAM. Cache hit ⇒ 0 I/O.
-3. **Routing prediction / prefetch** — đọc trước expert mà *lớp kế* sẽ chọn, che latency.
-   MoE có tính **định xứ theo lớp**: expert lớp n+1 phụ thuộc hidden state lớp n ⇒ dự đoán được.
-4. **Expert reuse** — tinh chỉnh router để tăng trùng lặp expert giữa các token (ReMoE).
+**Four engineering pillars:**
+1. **Expert offloading** — unused experts live in RAM/disk; only the router-selected expert goes to VRAM.
+2. **Expert cache (LRU/LFU)** — keep "hot" experts in VRAM. A cache hit ⇒ zero I/O.
+3. **Routing prediction / prefetch** — read the experts the *next layer* will pick, hiding latency.
+   MoE is **layer-local**: layer n+1's experts depend on layer n's hidden state ⇒ predictable.
+4. **Expert reuse** — tune the router to raise expert overlap across tokens (ReMoE).
 
-**Các thuật toán trong tài liệu (mô tả, chưa tự kiểm chứng):** FloE (offload theo tần suất),
-EdgeMoE (offload expert ra đĩa cho edge), ReMoE (router tăng reuse), MoE-APEX (prefetch),
-MergeMoE (gộp expert ít dùng), BigLittle-MoE (lượng tử hóa expert theo mức dùng).
+**Algorithms in the literature (described, not independently verified):** FloE (frequency-based
+offload), EdgeMoE (disk offload for edge), ReMoE (router that increases reuse), MoE-APEX (prefetch),
+MergeMoE (merge rarely used experts), BigLittle-MoE (quantize experts by usage tier).
 
-**Trần tốc độ trên máy này (suy ra):** decode MoE ~ memory-bandwidth-bound.
-- DeepSeek-V2-Lite, expert **resident trong RAM** (40 GB/s): 2.4B × 0.5 B ≈ **1.2 GB/token**
-  → trần ≈ **~33 tok/s**; nếu expert nằm VRAM (192 GB/s) thì trần cao hơn nhiều.
-- Nếu expert trong RAM nhưng **cache miss ⇒ đọc từ NVMe** (2 GB/s) → **~1.7 tok/s**. Chênh **~20×**.
-  ⇒ **Mục tiêu số 1 của dự án là tối đa cache hit**, không phải "stream nhanh".
+**Speed ceilings on this machine (derived):** decode is ~ memory-bandwidth-bound.
+- DeepSeek-V2-Lite with experts **resident in RAM** (40 GB/s): 2.4B × 0.5 B ≈ **1.2 GB/token**
+  → ceiling ≈ **~33 tok/s**; with experts in VRAM (192 GB/s) the ceiling is far higher.
+- If experts are in RAM but a **cache miss reads from the NVMe** (2 GB/s) → **~1.7 tok/s**. A **~20×**
+  difference ⇒ **the project's number-one goal is maximizing cache hit rate**, not "fast streaming".
 
-> **Kết luận thiết kế:** chọn **DeepSeek-V2-Lite** làm model Phase-0/1 (vừa RAM, chạy được thật);
-> **Qwen3-30B-A3B** là mục tiêu Phase-2 dưới dạng "chứng minh vượt RAM bằng streaming + expert cache".
+> **Design conclusion:** pick **DeepSeek-V2-Lite** for Phase 0/1 (fits RAM, actually runnable);
+> **Qwen3-30B-A3B** is a Phase-2 goal, framed as "prove streaming + expert cache can exceed RAM".
 
 ---
 
-## 1.c CPU–GPU–NPU Co-execution
+## 1.c CPU–GPU–NPU co-execution
 
-**Cơ chế.** GPU không chờ CPU: **GPU tính layer N trong khi CPU đọc/tính layer N+1**. Chia tải theo
-bandwidth thời gian thực (q* policy của FreeToken): PCIe chậm ⇒ đẩy nhiều layer sang CPU; PCIe nhanh
-⇒ dồn về GPU.
+**Mechanism.** The GPU does not wait for the CPU: **the GPU computes layer N while the CPU
+reads/computes layer N+1**. Split the work by real-time bandwidth (FreeToken's q* policy): slow PCIe
+⇒ push more layers to CPU; fast PCIe ⇒ shift back to GPU.
 
 **Layer-wise scheduling:**
 ```
-[CPU: prefetch layer N+1]  ║  [GPU: compute layer N]   →  đổi buffer
+[CPU: prefetch layer N+1]  ║  [GPU: compute layer N]   →  swap buffers
 ```
 
-**Trên máy này (đo được):** có dGPU (NVIDIA) + iGPU (Intel Iris Xe), nhưng **không có API hợp nhất**
-để hai GPU chia một model (khác HeteroMosaic trên SoC di động nơi CPU/iGPU/NPU chung bộ nhớ).
-⇒ Thiết kế thực tế: **CPU + dGPU co-execution**; iGPU/NPU để dành cho lộ trình mobile (NNAPI/Core ML).
+**On this machine (measured):** there is a dGPU (NVIDIA) + iGPU (Intel Iris Xe), but **no unified API**
+to split one model across both GPUs (unlike HeteroMosaic on mobile SoCs with shared memory).
+⇒ The realistic design is **CPU + dGPU co-execution**; iGPU/NPU is reserved for the mobile roadmap
+(NNAPI/Core ML).
 
 ---
 
-## 1.d Quantization cho thiết bị di động
+## 1.d Quantization for mobile
 
-| Kỹ thuật | Bit | Ứng dụng | Ghi chú |
+| Technique | Bits | Use | Note |
 |---|---|---|---|
-| Block-wise quant (AirLLM) | 4-bit | giảm lượng đọc đĩa | block độc lập ⇒ mmap từng block |
-| AWQ | 4-bit | mobile | activation-aware, giữ chất lượng |
-| GPTQ | 4-bit | mobile | post-training, nhanh |
-| QAT (Squat) | sub-8-bit | SLM | train kèm lượng tử hóa |
-| Token-adaptive | 3–4-bit | mobile | đổi bit theo token |
+| Block-wise quant (AirLLM) | 4-bit | cut disk reads | blocks are independent ⇒ mmap per block |
+| AWQ | 4-bit | mobile | activation-aware, preserves quality |
+| GPTQ | 4-bit | mobile | post-training, fast |
+| QAT (Squat) | sub-8-bit | SLM | trained with quantization |
+| Token-adaptive | 3–4-bit | mobile | per-token bit width |
 
-**Trên máy này:** dùng **GGUF K-quants + imatrix** (hệ sinh thái llama.cpp có sẵn). Cân nhắc:
-- DeepSeek-V2-Lite: `Q4_K_M` (~10 GB, vừa RAM) là mặc định; `Q3_K_M` (~8 GB) nếu cần chừa RAM cho KV.
-- Qwen3-30B-A3B: `Q3_K_M` (~14.8 GB) là mức thấp nhất còn chấp nhận được, vẫn **quá** 11 GiB ⇒
-  buộc phải có offloading.
-
----
-
-## 1.e KV Cache Management
-
-**Cơ chế.** KV cache lớn tuyến tính theo context → ăn hết RAM/VRAM trên máy yếu.
-- **PagedAttention (vLLM):** chia KV thành page, cấp phát theo nhu cầu, giảm phân mảnh.
-- **Compression / quantization:** KV xuống 8-bit hoặc 4-bit (gần như miễn phí chất lượng).
-- **Eviction:** bỏ KV ít quan trọng (H2O, sliding window).
-- **Semantic anchor (FreeToken):** lưu checkpoint trạng thái hồi quy để không phải tính lại khi context đổi.
-
-**Trên máy này:** mặc định `--cache-type-k q8_0 --cache-type-v q8_0` trong llama.cpp; bật eviction
-khi context > 4k trên model 10 GB.
+**On this machine:** use **GGUF K-quants + imatrix** (available in the llama.cpp ecosystem). Consider:
+- DeepSeek-V2-Lite: `Q4_K_M` (~10 GB, fits RAM) as default; `Q3_K_M` (~8 GB) if KV needs headroom.
+- Qwen3-30B-A3B: `Q3_K_M` (~14.8 GB) is the lowest still acceptable, and still **too large** ⇒
+  offloading is unavoidable.
 
 ---
 
-## 1.f Speculative Decoding trên thiết bị yếu
+## 1.e KV cache management
 
-**Cơ chế.** Draft model nhỏ sinh `γ` token, target model verify một lượt.
+**Mechanism.** KV cache grows linearly with context → it eats all RAM/VRAM on weak hardware.
+- **PagedAttention (vLLM):** split KV into pages, allocate on demand, reduce fragmentation.
+- **Compression / quantization:** KV down to 8-bit or 4-bit (nearly free in quality terms).
+- **Eviction:** drop unimportant KV (H2O, sliding window).
+- **Semantic anchor (FreeToken):** store recurrent-state checkpoints to avoid recompute when context changes.
+
+**On this machine:** default to `--cache-type-k q8_0 --cache-type-v q8_0` in llama.cpp; enable
+eviction when context > 4k on a 10 GB model.
+
+---
+
+## 1.f Speculative decoding on weak hardware
+
+**Mechanism.** A small draft model emits `γ` tokens; the target model verifies in one pass.
 
 ```
-tăng tốc ≈ (1 − α) / (1 − α·β)      α = tỉ lệ draft đúng, β = chi phí draft/target
+speedup ≈ (1 − α) / (1 − α·β)      α = draft acceptance rate, β = draft/target cost ratio
 ```
 
-**SS-MoE:** dùng chính model nhỏ hơn (hoặc expert nhỏ) làm draft. **Draft-then-verify:** model nhỏ
-local sinh nháp, model lớn verify.
+**SS-MoE:** use a smaller model (or a small expert) as the draft. **Draft-then-verify:** a small local
+model drafts, the large model verifies.
 
-**Trên máy này:** draft = một dense **Qwen2.5-0.5B Q4 (~0.4 GB)**; target = DeepSeek-V2-Lite.
-Hai model phải nằm chung ngân sách RAM 11 GiB ⇒ khả thi, nhưng chỉ đáng làm ở **Phase 4**.
-
----
-
-## 1.g Nén model khác
-
-- **Pruning** (structured/unstructured): bỏ head/neuron/expert ít dùng.
-- **Low-rank (SVD)**: tách ma trận W ≈ U·Σ·V, giảm tham số.
-- **Distillation**: model lớn → SLM chạy mobile.
-- **Weight sharing / n-gram embedding compression**: nén embedding table (áp dụng cho vocab lớn).
-
-Trên máy này ưu tiên **pruning expert ít dùng** (song song với MergeMoE) hơn là SVD, vì MoE thưa sẵn
-nên cắt expert cho lợi ích bộ nhớ trực tiếp.
+**On this machine:** draft = a dense **Qwen2.5-0.5B Q4 (~0.4 GB)**; target = DeepSeek-V2-Lite. Both
+must share the 11 GiB RAM budget ⇒ feasible, but only worth doing in **Phase 4**.
 
 ---
 
-## 2. Bảng tổng hợp: kỹ thuật nào cho lợi ích gì trên máy mục tiêu
+## 1.g Other model compression
 
-| Kỹ thuật | Giảm | Tăng | Chi phí | Ưu tiên 1 tháng |
+- **Pruning** (structured/unstructured): drop rarely used heads/neurons/experts.
+- **Low-rank (SVD)**: factorize W ≈ U·Σ·V to reduce parameters.
+- **Distillation**: large model → an SLM that runs on mobile.
+- **Weight sharing / n-gram embedding compression**: compress the embedding table (large vocab).
+
+On this machine, prioritize **pruning rarely used experts** (alongside MergeMoE) over SVD: MoE is
+already sparse, so cutting experts yields a direct memory win.
+
+---
+
+## 2. Summary: which technique buys what on the target machine
+
+| Technique | Reduces | Increases | Cost | 1-month priority |
 |---|---|---|---|---|
-| MoE expert offloading + cache | RAM/VRAM lớn | cache hit | phức tạp | ⭐⭐⭐ (lõi) |
-| Routing prediction/prefetch | latency I/O | throughput | vừa | ⭐⭐⭐ |
-| Quantization Q4/Q3 + KV q8 | bộ nhớ ~4× | — | thấp | ⭐⭐⭐ |
-| Layer-wise streaming | RAM (vượt RAM) | — | I/O trần đĩa | ⭐⭐ (chỉ khi > RAM) |
-| CPU–GPU co-execution | — | throughput 10–80%* | cao | ⭐⭐ |
-| Speculative decoding | — | 1.5–2.5×* | vừa | ⭐ |
-| Pruning/SVD/distill | bộ nhớ | chất lượng↓ | rất cao | ✗ (ngoài 1 tháng) |
+| MoE expert offloading + cache | RAM/VRAM footprint | cache hit | complex | ⭐⭐⭐ (core) |
+| Routing prediction/prefetch | I/O latency | throughput | medium | ⭐⭐⭐ |
+| Quantization Q4/Q3 + KV q8 | memory ~4× | — | low | ⭐⭐⭐ |
+| Layer-wise streaming | RAM (beyond RAM) | — | disk I/O ceiling | ⭐⭐ (only when > RAM) |
+| CPU–GPU co-execution | — | throughput 10–80%* | high | ⭐⭐ |
+| Speculative decoding | — | 1.5–2.5×* | medium | ⭐ |
+| Pruning/SVD/distill | memory | quality↓ | very high | ✗ (beyond 1 month) |
 
-\* khoảng giá trị **theo công bố của FreeToken/ tài liệu**, chưa đo trên máy này.
+\* range **as published by FreeToken / the literature**, not measured on this machine.
