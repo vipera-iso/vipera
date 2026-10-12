@@ -20,6 +20,7 @@ from .gguf import GGUFError, read_gguf
 from .manifest import Target, dumps, plan
 from .schedule import Optimizations, Quant, dumps as schedule_dumps, simulate
 from .scoring import local_llm_16gb_score
+from .trace import TraceError, dumps as trace_dumps, load_trace, stats as trace_stats, validate as validate_trace
 
 MIB = 1024 * 1024
 
@@ -114,6 +115,11 @@ def cmd_schedule(args: argparse.Namespace) -> int:
         kv_bits=args.kv_bits,
         draft_tokens=args.draft_tokens,
     )
+    routing = None
+    if args.trace:
+        routing = load_trace(args.trace, limit=args.tokens + 2)
+        validate_trace(routing, n_layers=arch.n_layers, n_experts=arch.n_experts,
+                       top_k=arch.top_k)
     result = simulate(
         arch, target,
         quant=_QUANTS[args.quant](),
@@ -122,6 +128,7 @@ def cmd_schedule(args: argparse.Namespace) -> int:
         tokens=args.tokens,
         prefetch=not args.no_prefetch,
         cache_policy=args.cache_policy,
+        routing=routing,
     )
     r = result.manifest["residency"]
     p = result.manifest["performance"]
@@ -159,6 +166,23 @@ def cmd_schedule(args: argparse.Namespace) -> int:
         print(f"\nmanifest written to {path}")
     for w in result.warnings:
         print(f"warning: {w}", file=sys.stderr)
+    return 0
+
+
+def cmd_trace(args: argparse.Namespace) -> int:
+    arch = Architecture.from_toml(args.arch)
+    routing = load_trace(args.trace)
+    validate_trace(routing, n_layers=arch.n_layers, n_experts=arch.n_experts, top_k=arch.top_k)
+    s = trace_stats(routing, n_experts=arch.n_experts, cache_fraction=args.cache_fraction)
+    if args.json:
+        sys.stdout.write(trace_dumps(s))
+        return 0
+    print(f"trace         {args.trace}")
+    print(f"architecture  {arch.name}")
+    print(f"tokens        {s.tokens}   layers {s.layers}   top_k {s.top_k}")
+    print(f"mean entropy  {s.mean_entropy:.3f}  (1.0 = uniform, no cache can help)")
+    print(f"static cache  {s.static_cache_fraction * 100:.1f}% of experts -> "
+          f"hit ceiling {s.static_cache_hit_ceiling * 100:.1f}%")
     return 0
 
 
@@ -263,6 +287,15 @@ def build_parser() -> argparse.ArgumentParser:
                     help="accepted tokens per target forward pass (MTP/speculative)")
     sc.add_argument("--cache-policy", choices=["lru", "lfu"], default="lru",
                     help="expert cache eviction policy")
+    sc.add_argument("--trace", help="routing trace (JSONL) to drive the simulation")
+
+    tr = sub.add_parser("trace", help="inspect a routing trace against an architecture")
+    tr.add_argument("trace")
+    tr.add_argument("--arch", required=True, help="architecture profile (TOML)")
+    tr.add_argument("--cache-fraction", type=float, default=0.03,
+                    help="static cache size as a fraction of experts per layer")
+    tr.add_argument("--json", action="store_true")
+    tr.set_defaults(func=cmd_trace)
     sc.add_argument("--out", help="directory to write <arch>.vipera.json into")
     sc.set_defaults(func=cmd_schedule)
 
@@ -289,7 +322,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     try:
         return args.func(args)
-    except GGUFError as e:
+    except (GGUFError, TraceError) as e:
         print(f"error: {e}", file=sys.stderr)
         return 2
 

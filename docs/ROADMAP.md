@@ -1,0 +1,147 @@
+# ROADMAP — vipera decomposed into solvable sub-problems
+
+> A research-engineering decomposition: what the project must solve, in what
+> order, with measurable success criteria. Plus the log of the first autonomous
+> loop round (spec → code → test → review → integrate → reflect).
+>
+> Status labels: **done**, **in progress**, **blocked**, **open**.
+
+---
+
+## 1. Sub-problems
+
+| # | Sub-problem | Research question | Input → Output | Depends on | Difficulty | Priority | Success criterion |
+|---|---|---|---|---|---|---|---|
+| **S1** | **Routing trace capture & loader** | Is expert routing skewed and locally consistent enough for a cache to help? | JSONL trace → `routing` structure + skew/entropy/ceiling stats | — | 2 | **5** | **done** — loader+stats+validator, 95 tests, CLI `vipera trace` |
+| **S2** | **Cache policy: pinned hot-set + admission control** | Can a policy reach the static-cache ceiling? | trace + cache size → hit rate | S1 | 3 | 5 | hit rate ≥ 0.9× the static ceiling on a held-out trace |
+| **S3** | **Per-layer cache allocation** | How many slots should each layer get? | per-layer frequency → slot budget | S1 | 4 | 4 | ≥ +5 points hit over uniform allocation |
+| **S4** | **Tier-aware bit allocation (TAW)** | Which component should absorb the next lower bit? | sensitivity + tier cost → per-component bits | S10 | 5 | 4 | +10% tok/s at equal perplexity |
+| **S5** | **Energy model + energy-aware tiering (EAT)** | When does SSD offload violate a watt cap? | tier table → J/token | S7 | 3 | 4 | modelled J/token within 20% of wattmeter |
+| **S6** | **Gated expert pruning with rollback (GEP)** | Which experts are safe to delete? | routing mass + drift proxy → keep-set | S1, S10 | 4 | 4 | quality-loss variance halved at equal sparsity |
+| **S7** | **On-hardware benchmark harness** | What does the target machine actually do? | model + flags → tok/s, RSS, VRAM, disk, W | — | 2 | **5** | reproducible JSON for ≥2 configs |
+| **S8** | **Dense-model streaming scheduler** | How fast can a dense model stream from disk? | arch + hw → residency/bytes per token | — | 3 | 3 | modelled vs measured within 25% (needs S7) |
+| **S9** | **GGUF writer / packer (T1, T3, T6)** | Can the file itself be made cheaper to read? | GGUF → repacked GGUF | — | 4 | 3 | byte-exact round-trip + measured cold-load delta |
+| **S10** | **Quality evaluation harness** | What did compression cost? | model + config → ppl / MMLU / GSM8K | S7 | 3 | **5** | repro a published quant-quality gap within 0.5 pts |
+
+---
+
+## 2. Dependency graph
+
+```mermaid
+graph TD
+  S1[S1 trace loader ✅] --> S2[S2 cache policy]
+  S1 --> S3[S3 per-layer allocation]
+  S1 --> S6[S6 gated pruning]
+  S7[S7 bench harness] --> S5[S5 energy model]
+  S7 --> S8[S8 dense scheduler]
+  S7 --> S10[S10 quality harness]
+  S10 --> S4[S4 tier-aware bits]
+  S10 --> S6
+  S9[S9 GGUF packer]
+```
+
+---
+
+## 3. Recommended order
+
+Topological, weighted by (priority − risk-of-waiting):
+
+1. **S7 bench harness** and **S10 quality harness** — nothing else can be *trusted*
+   without them; every claim in `PROPOSALS.md`/`RESEARCH.md` currently rests on
+   published numbers.
+2. **S1 trace loader** — **done**.
+3. **S2 cache policy**, then **S3 per-layer allocation** — S1 unblocks them and
+   they need no hardware.
+4. **S6 gated pruning** — needs S1 + S10.
+5. **S5 energy model**, then **S4 tier-aware bits** — need S7/S10 inputs.
+6. **S8**, **S9** — valuable but not on the critical path to a verified result.
+
+**Why risk matters:** S4/S5/S6 all depend on measurements vipera cannot produce
+today. Building them first would encode unknown constants — exactly the failure
+mode `docs/PROPOSALS.md` §7 warns about.
+
+---
+
+## 4. Autonomous loop — round 1 log
+
+**Picked sub-problem: S1 (highest priority that is unblocked).**
+
+### BƯỚC 1 — Research
+The gap was already established in `RESEARCH.md`/`PROPOSALS.md`: routing is
+modelled, not measured, so every cache claim is suspect. No new search was needed
+beyond confirming the standard cache rule (≈2× active experts) [RESEARCH.md S3].
+
+### BƯỚC 3 — Spec
+* **Goal:** consume real routing traces; report the statistics that decide whether a cache can help.
+* **Input/Output:** JSONL `{"t": i, "layers": [[e,…], …]}` → `routing[token][layer][slot]`.
+* **Algorithm:** line-parse + validate (layer count, top_k, id range); histogram per layer; normalised entropy `H = −Σp·log₂p / log₂E`; static-cache ceiling = Σ(top-F experts)/Σ(all) per layer.
+* **Complexity:** O(T·L·K) time, O(E·L) memory.
+* **Edge cases:** empty file, malformed JSON, missing `layers`, expert id out of range, wrong `top_k`.
+
+### BƯỚC 4–5 — Code + test
+* `vipera/trace.py` — `load_trace`, `validate`, `stats`, `synth_trace`, `save_trace`.
+* CLI: `vipera trace <file> --arch <arch.toml> [--json]`; `vipera schedule … --trace <file>`.
+* `tests/test_trace.py` — 13 tests: round-trip, limit, 5 validation failures, entropy, ceiling, skew ordering, JSON-serialisability.
+* **Result: 95 tests, OK.**
+
+### BƯỚC 6 — Review (hostile)
+* `stats()` is O(T·L·E) *memory-free* but rebuilds a histogram per layer per call — fine for planning, not for a hot loop.
+* The "static cache ceiling" is an **oracle** (it uses the full trace's frequency); it is an upper bound, **not** an achievable online result. Labelled as such in the docstring/api.
+* `load_trace(limit=…)` silently truncates — acceptable for smoke runs, but callers must know; the CLI passes `tokens+2`.
+* No streaming/mmap for very large traces — a 100k-token trace is fine, a 10M-token one is not (known limitation).
+* `synth_trace` is Zipf by construction, so tests that use it validate the *code*, not the *world*.
+
+### BƯỚC 7 — Integrate
+`schedule --trace` validates the trace against the architecture before simulating,
+so a mismatched trace fails loudly (exit 2) instead of silently producing nonsense.
+
+### BƯỚC 8 — Reflect (measured, trace-driven)
+
+Trace: `synth_trace(64 tokens, 45 layers, 288 experts, top_k=8, skew=1.2)`.
+
+| policy | hit rate | tok/s |
+|---|---|---|
+| LRU | 33.5% | 0.626 |
+| LFU | **43.0%** | **0.712** |
+| *static-cache oracle ceiling (3% of experts)* | **48.1%** | — |
+
+**Findings.**
+1. LFU now reaches **~0.9× the static oracle ceiling** — the policy is no longer the
+   bottleneck; the *cache size* is.
+2. The modelled-Zipf numbers (21.5%/32.6%) were **pessimistic** vs this trace
+   (33.5%/43.0%) — the synthetic model understated cache value. A real trace is
+   required before any of it is trusted.
+3. Workload flips to **compute-bound** at 43% hit rate, so the next lever after
+   cache is S10/S4 (bits) or speculative decoding — not more cache.
+
+**Next sub-problem:** S2 (reach the ceiling with pinned hot-set + admission
+control), then S7/S10 to replace modelled inputs with measured ones.
+
+---
+
+## 5. Open problems (from Prompt 7)
+
+| # | Open problem | Why hard | Why it matters | Anyone solving it? |
+|---|---|---|---|---|
+| O1 | **Cache policy that generalises across domains** | routing shifts; LFU has no aging | cache claims currently valid only for stationary traces | research on local routing consistency [RESEARCH.md S3] |
+| O2 | **Per-layer cache allocation under a global byte budget** | knapsack over layers with shifting demand | the remaining gap to the ceiling is *allocation*, not policy | MoEpic-style per-layer solvers [PROPOSALS.md P2] |
+| O3 | **Schedulable energy constraint** | needs a per-tier J/byte model that vipera lacks | 65 W-class problems fail on energy, not time | SSD-energy result exists [RESEARCH.md §6] |
+| O4 | **Cheap quality proxy for pruning** | quality is non-separable across components | pruning is the decisive MoE lever but unverified | pruning tooling warns it needs validation [RESEARCH.md S13] |
+
+**Most worth solving:** O1 and O2 — both are reachable with S1 already done, and
+both are the difference between "cache helps" and "cache is at its ceiling".
+
+## 6. Research problems (Prompt 9, condensed)
+
+1. **Routing-consistency-aware cache sizing** — predict the useful cache size from a short trace instead of the fixed ≈2× rule. Metric: hit rate at fixed bytes.
+2. **Non-stationary expert caching** — a policy with provable regret against an adaptive optimum under distribution shift.
+3. **Energy-constrained offload scheduling** — minimise latency s.t. J/token ≤ budget; currently unexplored (latency-only literature).
+4. **Sensitivity-estimating quantizer** — learn `σᵢ` (quality per bit) with few probes, then solve P2 TAW.
+5. **Prune-then-heal gate** — a proxy guaranteeing ΔQ ≤ ε before committing a layer.
+6. **File-layer reorder under a real trace** — does T1 (hot/cold reorder) actually cut disk bytes on a DRAM-less disk?
+7. **Cross-layer expert co-activation** — exploit inter-layer routing correlation to prefetch.
+8. **KV placement under no-swap** — allocation that never triggers OOM on a swap-less box.
+9. **Dense streaming vs offload boundary** — the exact model size where streaming beats partial residency.
+10. **Honest evaluation protocol** — reusable, noise-controlled local-inference benchmark (the missing S7+S10).
+
+Each is impact **4–5** if solved; #1/#2 are the cheapest to attack from here.

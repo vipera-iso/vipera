@@ -127,6 +127,10 @@ in its §Sources; unpublished numbers are marked "no data".
 
 ## Documents
 
+- [`docs/ROADMAP.md`](docs/ROADMAP.md) — the project decomposed into sub-problems with a
+  dependency graph, priorities, success criteria, open problems, and the log of the first
+  autonomous solving round.
+
 - [`docs/PROPOSALS.md`](docs/PROPOSALS.md) — **research proposals**: four new/improved
   algorithms (skew-adaptive cache, tier-aware bit allocation, energy-aware tiering, gated pruning)
   with pseudocode, complexity, experiment design and a hostile self-review. P1 is implemented.
