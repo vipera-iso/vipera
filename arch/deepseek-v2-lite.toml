@@ -1,0 +1,45 @@
+# DeepSeek-V2-Lite — the model this repo actually has on disk, and therefore the
+# one architecture whose numbers can be checked against something other than a
+# published config. No profile for it existed, which is why `schedule --trace`
+# could never be run on a trace captured from the real model.
+#
+# Values are read from the real GGUF's own metadata:
+#
+#   python3 -c "from vipera.gguf import read_gguf; g=read_gguf('models/DeepSeek-V2-Lite.Q4_K_M.gguf'); \
+#     [print(k,'=',v) for k,v in sorted(g.metadata.items()) if k.startswith('deepseek2.')]"
+#
+# 27 blocks, hidden 2048, vocab 102400, 64 routed experts with top-6, 2 shared
+# experts of width 1408, MLA attention on every layer: 16 heads, key 192 (= 128
+# nope + 64 rope from `rope.dimension_count`), value 128, kv_lora 512.
+# `stated_*` are the published 15.7B total / 2.4B active, used only to report the
+# calibration residual.
+#
+# Known approximation: the file declares `leading_dense_block_count = 1`, so
+# layer 0 is a dense FFN of width 10944 and vipera has no per-layer dense flag —
+# the same one-layer approximation `arch/glm-4.5-air.toml` documents, and the
+# reason the residual from the real model's own header is a few percent rather
+# than ~0. It is reported by `vipera arch`, not hidden here.
+name = "deepseek-v2-lite"
+n_layers = 27
+hidden = 2048
+vocab = 102400
+n_experts = 64
+top_k = 6
+moe_inter = 1408
+n_shared_experts = 2
+shared_inter = 1408
+kda_layers = 0
+mla_layers = 27
+full_layers = 0
+mhc_streams = 0
+mtp_layers = 0
+vision_params = 0
+stated_total = 15700000000
+stated_active = 2400000000
+
+[mla]
+n_heads = 16
+qk_nope = 128
+qk_rope = 64
+v_head = 128
+kv_lora = 512

@@ -329,9 +329,30 @@ routing trace, and the official `gguf` reader as an independent cross-check of t
   And separating model load from steady state needs a cold page cache: `drop_caches` needs root, which
   this box does not grant, which is why the disk-read figures are given as a range.
 
+**The real model now has an architecture profile** (`arch/deepseek-v2-lite.toml`), which it did not
+before: values read from the file's own metadata (`block_count`, `expert_count`, `expert_used_count`,
+`expert_shared_count`, `key_length` split into nope/rope, `kv_lora_rank`), `stated_*` from the
+published 15.7B/2.4B. `vipera arch` reports the residual — **+1.9% total, +2.2% active** — which is
+the modelled cost of not having a per-layer dense flag (see the blocker below). That profile makes
+`vipera sweep` answerable for the model actually on disk, and the answer lands on the measurement:
+**q4-experts predicts 20.04 tok/s** for this target against **20.03–20.2 tok/s** measured. That is the
+first place in this repo where a modelled number and a real run of the same model on the same machine
+agree to 0.1%.
+
+**Blocker: the fork's trace cannot drive those commands — [open].** The trace patch records
+`ffn_moe_topk` per layer, so a trace carries **MoE layers only**: 26 for DeepSeek-V2-Lite, whose
+`block_count` is 27 with `leading_dense_block_count = 1`. vipera has no way to express a dense leading
+block, so `validate` compares 26 against `n_layers = 27` and `trace`, `prune` and `schedule --trace`
+all reject a trace captured from the real model with exit 2
+(`error: token 0: trace has 26 layers, architecture has 27`). The real routing is therefore still
+unusable on the one model in the repo — the loop that matters is not closed, and the profile alone
+does not close it. `arch/glm-4.5-air.toml` has carried the same unexpressible fact since the first
+review (`first_k_dense_replace = 1`, documented there as "a small, one-layer approximation"); this is
+that approximation reaching a command that cannot work around it.
+
 | Status | Count | Items |
 |---|---|---|
 | fixed since the real-model run | 2 | the `~33 tok/s` ceiling, the disk-derived miss cost |
-| open since the real-model run | 1 | the ✅ RAM verdict reads as a process footprint when it is a file size |
+| open since the real-model run | 2 | the ✅ RAM verdict reads as a process footprint when it is a file size; a real trace cannot drive `trace`/`prune`/`schedule --trace` |
 | left for a doc sweep | 1 | 2 GB/s still quoted in FEASIBILITY §1/§4, DESIGN §152, OPTIMIZER §20 |
 | test suite | 190 | unchanged — this pass touched no code |
