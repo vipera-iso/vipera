@@ -249,12 +249,49 @@ Two consequences worth carrying forward:
   measured 0.99× at ctx 512 and a mean of 0.99× across three ctx 2048 runs. Whatever KV placement
   would add, it is not what `-ctk q8_0 -ctv q8_0` already does.
 
+### The GPU verdict, re-measured — it survives, and it is worse than it looked
+
+Deliverable 3 read "CUDA 6.90 / Vulkan 3.40 vs CPU-only 22.90". Checking the provenance of those
+numbers before writing them up showed the same defect just found in the four-build table: the
+Vulkan run was issued with **no `--threads` at all** (llama.cpp's default, not `-t 4`) and
+compared against a CPU baseline of 11.7 t/s — a number now known to be 1.79× off. The GPU builds
+were therefore being judged against a CPU that was leaving a third of itself on the table, and
+`-t` matters to them too, because with `--n-cpu-moe` the experts execute on the CPU.
+
+Re-measured at the correct footing, 2026-10-13, all `[measured]`, ctx 512, `-n 32`, `-t 4`,
+run **sequentially**, one process at a time:
+
+| build | command | generation |
+|---|---|---|
+| CPU-only, `mmap` | `python3 -m vipera run models/DeepSeek-V2-Lite.Q4_K_M.gguf --target hw/gtx1650.toml --context 512 --n-predict 32 --threads 4` | **16.00 t/s** |
+| CPU-only, `mlock` | same + `-- -lm mlock` | **22.90 t/s** |
+| CUDA | `… --binary ~/dev/llama.cpp/build-cuda/bin/llama-cli --context 512 --n-predict 32 --threads 4 -- --moe-cache-mib 1024` | **6.80 t/s** |
+| Vulkan | `… --binary ~/dev/llama.cpp/build-vulkan/bin/llama-cli … --threads 4 -- --device Vulkan1 --moe-cache-mib 512` | **3.40 t/s** |
+
+**The verdict holds and the gap widens.** Comparing on the footing each build can actually reach
+(both `mmap`, since `mlock` is unavailable to Vulkan — see below): CUDA returns **0.43×** and
+Vulkan **0.21×** of an unaided CPU. The mechanism named earlier still explains it — with
+`--n-cpu-moe` the 2.4B active expert params run on the CPU either way, so the GPU is asked to
+accelerate attention while adding a device transfer at every layer boundary, and it does not come
+close to paying for that.
+
+Two secondary findings:
+
+- **`-lm mlock` aborts the Vulkan build**: SIGABRT after 1.4 s at peak RSS 146 MiB, i.e. it dies
+  during load rather than failing a later allocation. Any comparison that puts `mlock` on the CPU
+  side and not the Vulkan side is therefore comparing different load modes, not just different
+  backends; the table above says so explicitly rather than hiding it behind a single column.
+- The mlock gain at `-t 4` is **+43%** (16.00 → 22.90) in a fresh-process run. That sits between
+  the cold-start +121% and steady-state +11% recorded earlier, which is where a one-shot
+  `--compare`-style run should land: cold enough to pay the first page-in, warm enough not to pay
+  it repeatedly.
+
 **Deliverables 2–5 of the brief, answered:**
 
 | # | Deliverable | Answer |
 |---|---|---|
 | 2 | Bottleneck report | **compute** (43.7 ms/token, 74%), not disk (≤0.2%). Paging is 26% and self-inflicted — removed by `-lm`. |
-| 3 | GPU verdict | **No, under every condition measured**: CUDA 6.90 / Vulkan 3.40 vs CPU-only 22.90 tok/s. Closed. |
+| 3 | GPU verdict | **No — confirmed and widened on re-measurement (2026-10-13).** At `-t 4`, ctx 512: CPU-only **16.00** mmap / **22.90** mlock · CUDA **6.80** · Vulkan **3.40** tok/s. Fair comparison (both `mmap`, since `-lm mlock` aborts the Vulkan build): CUDA returns **0.43×** and Vulkan **0.21×** of what the CPU already does unaided. The old 12.80-vs-7.00/2.60 framing understated the gap, because the CPU baseline it used was leaving a third of itself on the table. |
 | 4 | Trace ≥2000 tokens | **Not captured, and no longer needed.** STEP 1 killed the disk hypothesis that the trace feeds. |
 | 5 | GLM 5.3 verdict | **Does not run — and the reason is now specific: it is short of ALU, not RAM.** 18B active vs 2.4B is 7.5× the arithmetic against a ceiling already at 99.5%, and ALU cannot be reordered at the file layer. |
 

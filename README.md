@@ -424,10 +424,31 @@ not fit 4 GB of VRAM.
 
 | build | generation | note |
 |---|---|---|
-| CPU-only | 11.70 t/s `[superseded]` | re-measured at `-t 4 -lm mlock`: **22.90 t/s** |
-| Vulkan | 2.60 t/s `[superseded]` | GTX 1650 via the driver's Vulkan ICD |
-| CUDA | 7.00 t/s `[superseded]` | needed `--moe-cache-mib 1024`; the manifest's 2789 MiB did not fit |
-| CUDA + prefetch | 2.00 t/s `[superseded]` | patch's verdict: 11.2% useful, +44 GiB of extra upload |
+| CPU-only | 11.70 t/s `[superseded]` | → **16.00** at `-t 4`, **22.90** at `-t 4 -lm mlock` |
+| Vulkan | 2.60 t/s `[superseded]` | → **3.40** at `-t 4` |
+| CUDA | 7.00 t/s `[superseded]` | → **6.80** at `-t 4`; still needs `--moe-cache-mib 1024` (the manifest's 2789 MiB does not fit) |
+| CUDA + prefetch | 2.00 t/s `[superseded]` | not re-measured; the patch's own verdict was 11.2% useful for +44 GiB upload |
+
+**Re-measured at the correct footing, 2026-10-13** — ctx 512, 32 tokens, `-t 4`, run sequentially,
+same model, same machine (`[measured]`, reproducible with the commands in `plantodo.md`):
+
+| build | generation | vs CPU-only, mmap |
+|---|---|---|
+| CPU-only, `mmap` | **16.00 t/s** | 1.00× |
+| CPU-only, `-lm mlock` | **22.90 t/s** | 1.43× |
+| CUDA | **6.80 t/s** | **0.43×** |
+| Vulkan | **3.40 t/s** | **0.21×** |
+
+The ranking is unchanged and the gap is wider, so the verdict stands on better evidence than it
+had. Two things the old table could not show: the `-t 4` change moved CPU-only from 11.70 to
+16.00 on its own, so the old comparison had been against a CPU baseline that was leaving a third
+of itself on the table; and the loss is not marginal — CUDA returns 43% and Vulkan 21% of what the
+CPU already does without a GPU.
+
+One cost of the correction worth naming: **`-lm mlock` aborts the Vulkan build** (SIGABRT after
+1.4 s, peak RSS 146 MiB — it dies during load), so the Vulkan row is `mmap` while the CPU row can
+be `mlock`. The comparison above therefore uses the footing each build can actually reach, and the
+CPU's best is better still than the table shows.
 
 CUDA is ~2.7× Vulkan here and still loses to CPU-only. That is the honest shape of this machine:
 with every expert on the CPU the GPU accelerates only attention and pays PCIe for each expert it
