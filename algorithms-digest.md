@@ -178,7 +178,7 @@ then re-pins the top K. The value **8** is **measured**, not picked at random:
 | no aging | — | 0.70 (does not keep up) |
 | **8×** | **> 0.9** | **> 0.9** |
 
-### 4.2 Measured (modelled over Zipf)
+### 4.2 Modelled over synthetic Zipf routing — **not measured**
 
 ```
 python3 -m vipera schedule arch/glm-5.3-flash.toml --target hw/gtx1650.toml --quant q4-experts --cache-policy lru
@@ -190,7 +190,16 @@ python3 -m vipera schedule arch/glm-5.3-flash.toml --target hw/gtx1650.toml --qu
 | LRU | 21.5% | 3.11 GiB | 0.544 |
 | **LFU (P1)** | **32.6%** | **2.66 GiB** | **0.620** |
 
-→ **+11.1 points of hit rate, +14% throughput, no loss of quality.**
+→ **+11.1 points of hit rate, +14% modelled throughput**, on a *synthetic* Zipf routing
+distribution. `[modelled]`
+
+> **These are not throughput measurements and were being read as if they were.** `vipera schedule`
+> reports a model, and the routing here is modelled Zipf rather than a captured trace. The one
+> real measurement of the same machinery — the manifest, which carries the cache placement —
+> moves generation throughput by **0.92–1.00×** on the target machine (`docs/FINDINGS.md` §Round 4),
+> and cutting disk reads by 26% moved it by −4%. Hit rate is real and is worth points; **the
+> conversion from hit rate to tokens per second does not survive contact with a RAM-resident
+> model**, because disk is ≤0.2% of decode there and there is nothing for the saved reads to buy.
 
 On the **real OLMoE trace** (511 tokens, 64 experts, top-8), against the ceiling at the same size:
 
@@ -582,7 +591,7 @@ Each entry = one **MoE block** (the leading dense block has no router).
 |---|---|---|
 | A. Tensor classification | ✅ | `analyze` |
 | B. Residency planning (greedy) | ✅ | `plan`, `schedule` |
-| C. Expert cache LRU/LFU/`hot` | ✅ | +11 points of hit rate, +14% tok/s |
+| C. Expert cache LRU/LFU/`hot` | ✅ hit rate · **❌ throughput** | +11 pts hit `[modelled]`; the **+14% tok/s** previously claimed here is modelled over synthetic Zipf and is contradicted by the one real measurement: **0.92–1.00×** |
 | D. Per-layer water-filling | ✅ | **does not help** → default `global` |
 | E. Trace + entropy + ceiling | ✅ | `global_cache_ceiling` |
 | F. Trace-driven prefetch | ✅ (via patch, env) | 8.7–11.2% useful |
@@ -598,6 +607,12 @@ Each entry = one **MoE block** (the leading dense block has no router).
    efficiency.
 2. Default routing is **modelled Zipf**, replaced by a real trace only when `--trace` is passed.
 3. Energy and quality are **not** modelled ⇒ P2/P3 depend on inputs vipera cannot produce yet.
+4. **A hit-rate gain does not convert to throughput on a RAM-resident model.** This was measured,
+   not assumed: hit rate rose 11.1 points and disk reads fell 26%, and generation throughput moved
+   by **−4%** (`docs/FINDINGS.md` §Round 4). The reason is in the attribution — disk is **≤0.2% of
+   decode** on this machine, so reads that never happen were never on the critical path. The hit
+   rate is real and worth points; **the conversion factor from hit rate to tok/s is what failed**,
+   and any figure that applies one should say which regime it assumes.
 4. `vram_bw_gbs = 192` is a **datasheet** figure, not measured (a root-free CUDA toolkit and a
    `libggml-cuda` build now exist, but no VRAM bandwidth probe has been run).
 5. The GPU measurements are **one run per configuration**, not averaged; `disk read` is noisy with the

@@ -8,14 +8,31 @@
 **personal computers**, then **phones**.
 
 `vipera` is not another runtime. It is **a layer between the model file and the runtime**: it takes an
-artifact (GGUF/safetensors), **rewrites it into an optimized artifact**, and emits a *manifest* that
-tells the runtime what lives where (VRAM/RAM/disk), in what load order, and which experts are "hot".
-`vipera run` then **drives an existing runtime** (llama.cpp) from that manifest — it executes the
-model instead of only predicting its speed, without reimplementing a runtime.
+artifact (GGUF/safetensors), analyzes it, and emits a *manifest* that says what lives where
+(VRAM/RAM/disk), in what load order, and which experts are "hot". `vipera run` then **drives an
+existing runtime** (llama.cpp) from that manifest — it executes the model instead of only predicting
+its speed, without reimplementing a runtime. (The tensor data itself is **not** rewritten yet; see
+Status below.)
 
 Inspired by [FreeToken](https://github.com/FlashML-org/FreeToken) (MoE serving on consumer hardware)
 and [AirLLM](https://github.com/lyogavin/airllm) (layer-wise streaming) — but both assume plenty of
-GPU/RAM. `vipera` targets the hard spot: **the model fits in RAM yet overflows VRAM, on a slow disk**.
+GPU/RAM. `vipera` targets **models that sit at the edge of RAM**, where the default load mode pages
+the file it just evicted and that paging costs **26% of decode** `[measured]`.
+
+### What vipera claims now, and what it no longer claims
+
+> **vipera is a measurement and planning layer.** On a model that fits in RAM, its runtime
+> advantage is **subsumed by flags llama.cpp already had**: measured on the target machine, the
+> manifest moves throughput by **0.92–1.00×**, while `-t <physical cores> -lm mlock` — which it
+> does not recommend and does not need it for — is worth **1.79×**. Its value in the spill and
+> long-context regimes is **unproven on this hardware**: the one model that spills past RAM here
+> cannot be loaded at all, and on a CPU-only build the manifest reduces to KV quantization because
+> there is no VRAM to place anything into and no per-expert placement for llama.cpp to execute.
+> `[measured]` See [`docs/FINDINGS.md`](docs/FINDINGS.md) for the six rounds behind this.
+
+The earlier formulation — *"optimize at the file layer, not just at runtime"* — described a regime
+this machine cannot reach, and the measurements do not support it as a general claim. It is
+withdrawn rather than softened.
 
 > Status: **stage 3 — it runs.** stage 1 (analyzer + residency planner) and stage 2 (per-layer
 > architecture model + a bandwidth/cache-aware streaming scheduler) plan a residency manifest, and
@@ -25,15 +42,11 @@ GPU/RAM. `vipera` targets the hard spot: **the model fits in RAM yet overflows V
 existing one from its own manifest — but the layer no longer only predicts. Everything `schedule`
 > reports is still **modelled** and says so; `run`'s numbers are measured.
 
-> **Before relying on any figure here, read [`docs/FINDINGS.md`](docs/FINDINGS.md).** Six rounds of
-> measurement on the target machine re-derived the project's headline numbers, and two of them did
-> not survive: the manifest's **1.22×** re-metracts to a measured **0.92–1.00×**, and the GPU
-> comparison had been made against a CPU baseline that was itself leaving a third of the machine
-> idle. The largest measured lever on this hardware is **`-t <physical cores> -lm mlock` at 1.79×**,
-> which needs no rebuild and no code and is not produced by any vipera output. The narrowing of the
-> "file layer, not just runtime" claim is **open**, and §4 of the findings states why: on a CPU-only
-> build the manifest reduces to KV quantization, because llama.cpp cannot execute per-expert
-> placement on any backend.
+> **Every benchmark figure in this README predates the re-measurement above.** Several were taken
+> on a thrashing page cache at `-t 8`, and one — the four-build CPU/Vulkan/CUDA table — carried a
+> number whose stated conditions did not match the run it came from. Figures that have been
+> re-derived are marked `[superseded]` beside their replacement; the rest should be read as
+> historical until re-measured. `docs/FINDINGS.md` §7 is the reproduction index.
 
 ---
 

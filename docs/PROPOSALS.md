@@ -99,9 +99,11 @@ python3 -m vipera schedule arch/glm-5.3-flash.toml --target hw/gtx1650.toml \
 | LRU | 21.5% | 3.11 GiB | 0.544 |
 | **LFU (P1 core)** | **32.6%** | **2.66 GiB** | **0.620** |
 
-A **+11.1-point** hit-rate gain and **+14%** throughput from a policy change
-alone, with **no quality cost**. (Modelled, on simulated Zipf routing — see §6 for
-why that caveat matters.)
+**+11.1 points** of hit rate `[modelled]`, from a policy change alone, with **no quality cost**.
+The **+14% throughput** figure this section previously led with is **not a measurement** — it is
+modelled over simulated Zipf routing, and the one real measurement of the same machinery on a
+RAM-resident model is **0.92–1.00×** (`docs/FINDINGS.md` §Round 4). See §6 for why that caveat
+decides the result rather than qualifying it.
 
 ### Risks & mitigations
 * **Stale hot set** under distribution shift (LFU never forgets) → add **aging**
@@ -290,7 +292,7 @@ Recovers most of the quality lost by unguarded pruning at moderate sparsity
 
 | Proposal | Gap it closes | Bytes/token | Quality risk | Energy | Implemented? | Evidence |
 |---|---|---|---|---|---|---|
-| **P1 SAC** (skew-adaptive cache) | fixed cache policy | ↓ (hit ↑) | none | n/a | **yes** | **measured: +11 pts hit, +14% tok/s** |
+| **P1 SAC** (skew-adaptive cache) | fixed cache policy | ↓ (hit ↑) | none | n/a | **yes** | hit rate **+11 pts** `[modelled]`; the `+14% tok/s` once claimed here is modelled over synthetic Zipf and the real measurement is **0.92–1.00×** |
 | **P2 TAW** (tier-aware bits) | scheduler-blind quantization | ↓ (realloc) | medium | n/a | no | estimate |
 | **P3 EAT** (energy-aware tiering) | latency-only offload | ~ | none | **↓ 20–40%** | no | published energy ratio |
 | **P4 GEP** (gated pruning) | unverified pruning | ↓↓ (MoE) | **reduced** | n/a | no | estimate |
