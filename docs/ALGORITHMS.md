@@ -95,8 +95,10 @@ MergeMoE (merge rarely used experts), BigLittle-MoE (quantize experts by usage t
 bandwidth one, and the lower of the two binds.
 - **Arithmetic:** 2.4B active × 2 = **4.8 GFLOP/token** against the measured **110 GFLOP/s** (8 threads,
   `bench/hwprobe.c`) → **~23 tok/s**. This is the one that binds: llama.cpp on the real 9.65 GiB
-  Q4_K_M file measures **20.0 tok/s** (pp32 43.7, three runs within 4%), 87% of it. Earlier drafts
-  derived **~33 tok/s** from bandwidth alone and ignored this bound.
+  Q4_K_M file measures **17.4–20.1 tok/s** over six runs (3× `llama-bench`, 3× `llama-cli`, pp32 43.7),
+  the top of the range being 87% of the ceiling. Earlier drafts derived **~33 tok/s** from bandwidth
+  alone and ignored this bound. The spread is not fully explained: separating load from steady state
+  needs a cold page cache and `drop_caches` needs root.
 - **Bandwidth:** 2.4B × 0.5 B ≈ **1.2 GB/token** against the measured **44 GB/s** → ~37 tok/s, so at 8
   threads bandwidth alone does not bind; with experts in VRAM (192 GB/s, datasheet) far higher.
 - **Disk:** a cache miss read at the measured **8 GB/s** costs 1.2 GB ≈ **6.7 tok/s**, not the ~1.7

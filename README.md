@@ -57,9 +57,13 @@ further: **rearrange the model file itself** so a weak runtime reads less and re
 
 **The decisive number:** for DeepSeek-V2-Lite the RAM-resident ceiling is **~23 tok/s**, and it is an
 *arithmetic* ceiling, not a bandwidth one: 2.4B active × 2 = 4.8 GFLOP/token against the measured
-**110 GFLOP/s**. The real 9.65 GiB Q4_K_M file decodes at **20.0 tok/s** — 87% of that ceiling, with
-`plan` reporting 0 spill and the run moving 11.8 MiB/token from disk against ~1.2 GB/token of weight
-traffic — measured with:
+**110 GFLOP/s**. The real 9.65 GiB Q4_K_M file decodes at **17.4–20.1 tok/s** across six runs — three
+with `llama-bench`, three with `llama-cli` — and the top of that range is 87% of the ceiling. During
+decode the same runs read **11.8–148 MiB/token** from disk across three runs (192/32/32 tokens, page
+cache in a different state each time). Both ranges are far below the ~1.2 GB/token of weight traffic,
+which is what `plan`'s "0 spill" means in practice: nothing streams. The spread itself is not fully
+explained — separating load from steady state needs a cold cache, and `drop_caches` needs root, which
+this box does not grant. One measured setting, reproducible with:
 
 ```bash
 llama-bench -m models/DeepSeek-V2-Lite.Q4_K_M.gguf -ngl 0 -t 8 -p 32 -n 64 -r 1   # tg64 20.0, pp32 43.7

@@ -296,10 +296,13 @@ routing trace, and the official `gguf` reader as an independent cross-check of t
 - **The `~33 tok/s` ceiling was wrong by 1.65× — [fixed].** It derived the ceiling from bandwidth
   alone (1.2 GB/token at 40 GB/s). Decode is bounded by *both* bandwidth (measured 44 GB/s → ~37
   tok/s) and arithmetic (4.8 GFLOP/token against the measured 110 GFLOP/s → **~23 tok/s**), and the
-  arithmetic bound is the lower one, so the published figure was never reachable. Measured: **20.0
-  tok/s** tg64, 19.24 tg128, 19.60 tg32 — three runs within 4%, i.e. 87% of the ALU ceiling and 61%
-  of the published one. `README.md` and `docs/ALGORITHMS.md` §1.b now state ~23 and the measured 20.0
-  with the command that reproduces it.
+  arithmetic bound is the lower one, so the published figure was never reachable. Measured: 19.24 tg128,
+  19.60 tg32, 20.03 tg64 under `llama-bench`, then 19.7, 20.1 and **17.4** under `llama-cli` — **17.4–
+  20.1 tok/s over six runs**, the top being 87% of the ALU ceiling and 61% of the published one. The
+  spread is real and not fully explained (the later `llama-cli` runs were slower and read more from
+  disk, consistent with page-cache pressure from the runs before them); separating load from steady
+  state needs a cold cache and `drop_caches` needs root. `README.md` and `docs/ALGORITHMS.md` §1.b now
+  state ~23 and the range rather than a single point.
 - **The disk-derived figures restated — [fixed].** At the measured 8 GB/s a miss read costs ~1.2 GB
   ≈ 0.15 s/token ≈ **6.7 tok/s**, so the gap to the resident case is **~3×**, not ~20×: still a real
   target, but the old constant overstated it by ~4×. This supersedes the *headline numbers* row of
@@ -307,18 +310,28 @@ routing trace, and the official `gguf` reader as an independent cross-check of t
 - **What the run confirmed rather than contradicted:** the parser and the verdict. `analyze` on the
   real file takes 0.374 s for 377 tensors; the official reader agrees on every tensor — 0/377
   mismatched on offset, type, bytes and element count, the same 10,360,420,352-byte total, the same
-  `data_offset`, 45/45 metadata keys. `plan` says 0 spill on both targets and the run honours it:
-  11.8 MiB/token of disk read against ~1.2 GB/token of weight traffic, and 20 tok/s where streaming
-  the 8.87 GiB expert pool would give 0.84 tok/s.
-- **Two things the run does not settle, now stated as open.** The 10 GiB `usable_ram` budget is a
-  planning figure, not a memory ceiling: peak RSS on the real run was **13.28 GiB** against a
-  `MemAvailable` of 13.0 GiB (13,672,876 kB) sampled during it, and RSS counts the mmap'd model's
-  reclaimable pages. Decode also scales oddly with threads (4 → 8 threads buys +6%), so
-  how much of the per-token cost is bandwidth rather than ALU is unknown; `docs/ALGORITHMS.md` §1.b
-  now says that instead of asserting "decode is ~ memory-bandwidth-bound".
+  `data_offset`, 45/45 metadata keys. `plan` says 0 spill on both targets and the runs honour it:
+  **11.8–148 MiB/token** of disk read against ~1.2 GB/token of weight traffic (three runs of
+  192/32/32 tokens, page cache differently warmed each time), and ~20 tok/s where streaming the
+  8.87 GiB expert pool would give 0.84 tok/s. The first pass through these notes quoted only the
+  favourable end of that range; the range is what the evidence supports, and the weakness in it is
+  stated rather than smoothed over.
+- **The ✅ "fits 11 GiB RAM" is a claim about the file, not the process — [open].** Running the
+  9.65 GiB model needs **13.0–13.3 GiB** of resident memory: 12.97 GiB peak RSS through `bench`,
+  13.22 GiB sampled from `/proc`, and 13.28 GiB of `anon-rss` in the kernel's OOM record. `llama-cli`
+  at its **default** context is OOM-killed on this box (`-c 4096` → SIGKILL after 7 s; `-c 512`
+  completes), on a machine with 15.4 GiB total and no swap. The target table and `plan`'s 10 GiB
+  `usable_ram` budget describe the weights, not the runtime's footprint, and the table's "Fits 11 GiB
+  RAM?" column is read as if they were the same number.
+- **Two things the run does not settle, now stated as open.** Decode scales oddly with threads (4 → 8
+  threads buys +6%), so how much of the per-token cost is bandwidth rather than ALU is unknown;
+  `docs/ALGORITHMS.md` §1.b now says that instead of asserting "decode is ~ memory-bandwidth-bound".
+  And separating model load from steady state needs a cold page cache: `drop_caches` needs root, which
+  this box does not grant, which is why the disk-read figures are given as a range.
 
 | Status | Count | Items |
 |---|---|---|
 | fixed since the real-model run | 2 | the `~33 tok/s` ceiling, the disk-derived miss cost |
+| open since the real-model run | 1 | the ✅ RAM verdict reads as a process footprint when it is a file size |
 | left for a doc sweep | 1 | 2 GB/s still quoted in FEASIBILITY §1/§4, DESIGN §152, OPTIMIZER §20 |
 | test suite | 190 | unchanged — this pass touched no code |
