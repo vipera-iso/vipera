@@ -25,6 +25,16 @@ GPU/RAM. `vipera` targets the hard spot: **the model fits in RAM yet overflows V
 existing one from its own manifest — but the layer no longer only predicts. Everything `schedule`
 > reports is still **modelled** and says so; `run`'s numbers are measured.
 
+> **Before relying on any figure here, read [`docs/FINDINGS.md`](docs/FINDINGS.md).** Six rounds of
+> measurement on the target machine re-derived the project's headline numbers, and two of them did
+> not survive: the manifest's **1.22×** re-metracts to a measured **0.92–1.00×**, and the GPU
+> comparison had been made against a CPU baseline that was itself leaving a third of the machine
+> idle. The largest measured lever on this hardware is **`-t <physical cores> -lm mlock` at 1.79×**,
+> which needs no rebuild and no code and is not produced by any vipera output. The narrowing of the
+> "file layer, not just runtime" claim is **open**, and §4 of the findings states why: on a CPU-only
+> build the manifest reduces to KV quantization, because llama.cpp cannot execute per-expert
+> placement on any backend.
+
 ---
 
 ## The idea: optimize at the **file** layer, not just at runtime
