@@ -58,7 +58,8 @@ weights stay resident** and only the rarely used part streams.
 2. **Prefetch layer N+1 while computing layer N** (a dedicated I/O thread + ring buffer).
 3. **Double buffering**: two buffers, async reads into one while computing on the other.
 4. **Pinned (page-locked) host memory** so the H2D copy over PCIe does not block.
-5. **The NVMe is a hard ceiling** — no algorithm reads disk faster than 2 GB/s.
+5. **The NVMe is a hard ceiling** — no algorithm reads disk faster than the disk itself: **8 GB/s**
+   measured on this machine (`hw/gtx1650.toml:7`), not the 2 GB/s earlier drafts assumed.
 
 **Dense vs MoE:** dense forces streaming *the whole layer*; MoE can stream **per expert**
 (finer granularity ⇒ far less I/O). This is why 1.c/1.b matter more than 1.a on weak hardware.
@@ -90,11 +91,17 @@ needed VRAM/RAM = Σ (shared/attention, resident) + max(k experts) + router   (m
 offload), EdgeMoE (disk offload for edge), ReMoE (router that increases reuse), MoE-APEX (prefetch),
 MergeMoE (merge rarely used experts), BigLittle-MoE (quantize experts by usage tier).
 
-**Speed ceilings on this machine (derived):** decode is ~ memory-bandwidth-bound.
-- DeepSeek-V2-Lite with experts **resident in RAM** (40 GB/s): 2.4B × 0.5 B ≈ **1.2 GB/token**
-  → ceiling ≈ **~33 tok/s**; with experts in VRAM (192 GB/s) the ceiling is far higher.
-- If experts are in RAM but a **cache miss reads from the NVMe** (2 GB/s) → **~1.7 tok/s**. A **~20×**
-  difference ⇒ **the project's number-one goal is maximizing cache hit rate**, not "fast streaming".
+**Speed ceilings on this machine (measured 2026-10-13):** decode has an arithmetic ceiling and a
+bandwidth one, and the lower of the two binds.
+- **Arithmetic:** 2.4B active × 2 = **4.8 GFLOP/token** against the measured **110 GFLOP/s** (8 threads,
+  `bench/hwprobe.c`) → **~23 tok/s**. This is the one that binds: llama.cpp on the real 9.65 GiB
+  Q4_K_M file measures **20.0 tok/s** (pp32 43.7, three runs within 4%), 87% of it. Earlier drafts
+  derived **~33 tok/s** from bandwidth alone and ignored this bound.
+- **Bandwidth:** 2.4B × 0.5 B ≈ **1.2 GB/token** against the measured **44 GB/s** → ~37 tok/s, so at 8
+  threads bandwidth alone does not bind; with experts in VRAM (192 GB/s, datasheet) far higher.
+- **Disk:** a cache miss read at the measured **8 GB/s** costs 1.2 GB ≈ **6.7 tok/s**, not the ~1.7
+  the pre-measurement 2 GB/s figure gave. The gap to the resident case is **~3×** (20.0 vs 6.7), which
+  still makes **maximizing cache hit rate the number-one goal** — "fast streaming" cannot close it.
 
 > **Design conclusion:** pick **DeepSeek-V2-Lite** for Phase 0/1 (fits RAM, actually runnable);
 > **Qwen3-30B-A3B** is a Phase-2 goal, framed as "prove streaming + expert cache can exceed RAM".

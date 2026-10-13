@@ -55,9 +55,22 @@ further: **rearrange the model file itself** so a weak runtime reads less and re
 | P0–P2 | **DeepSeek-V2-Lite** | 15.7B / 2.4B | ~9.5–10.4 GB | ✅ |
 | stretch | Qwen3-30B-A3B | 30.5B / 3.3B | ~18.6 GB | ❌ (needs streaming) |
 
-**The decisive number:** for DeepSeek-V2-Lite, experts resident in RAM imply a ceiling of
-**~33 tok/s**; but a cache miss reading from the NVMe (DRAM-less, ~2 GB/s) drops it to **~1.7 tok/s**.
-A **~20×** gap ⇒ vipera's primary goal is **fewer disk reads for experts**.
+**The decisive number:** for DeepSeek-V2-Lite the RAM-resident ceiling is **~23 tok/s**, and it is an
+*arithmetic* ceiling, not a bandwidth one: 2.4B active × 2 = 4.8 GFLOP/token against the measured
+**110 GFLOP/s**. The real 9.65 GiB Q4_K_M file decodes at **20.0 tok/s** — 87% of that ceiling, with
+`plan` reporting 0 spill and the run moving 11.8 MiB/token from disk against ~1.2 GB/token of weight
+traffic — measured with:
+
+```bash
+llama-bench -m models/DeepSeek-V2-Lite.Q4_K_M.gguf -ngl 0 -t 8 -p 32 -n 64 -r 1   # tg64 20.0, pp32 43.7
+```
+
+The earlier **~33 tok/s** here came from bandwidth alone; the measured ALU bound rules it out.
+
+A cache miss reading the same weights from the NVMe — measured at **8 GB/s**, not the 2 GB/s this
+paragraph used to assume — costs ~1.2 GB ≈ **0.15 s/token**, i.e. **~6.7 tok/s**. That is a **~3×**
+gap, not the ~20× the old constant implied: still worth removing, which keeps vipera's primary goal
+**fewer disk reads for experts**.
 
 ## Quick start
 

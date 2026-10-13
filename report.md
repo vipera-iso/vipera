@@ -169,12 +169,14 @@ one (`-n 16` vs `-n 128`), evict the file cache between runs, take a pre-run GPU
   `docs/ALGORITHMS.md:157` reads `speedup ≈ (1 − α) / (1 − α·β)`, which *falls* as acceptance rises
   (0.22 at α=0.8, β=0.1). The standard form is `(1 − α^(γ+1)) / ((1 − α)(γβ + 1))`, which gives 2.4
   there.
-- **The headline numbers still rest on an assumed bandwidth — [partial], now a visible
-  contradiction.** The tiers have been measured (`hw/gtx1650.toml:7` records 8–9 GB/s for the NVMe,
-  `:34` sets `disk_bw_gbs = 8.0`). But `README.md:59` still says a cache miss on the DRAM-less NVMe
-  runs at "**~2 GB/s**" and derives "**~1.7 tok/s**" and the "20×" gap from it. The README's own
-  hardware profile says 8.0. Restate the derived figures from the measured constants, or the
-  "decisive number" in the README is wrong by ~4×.
+- **The headline numbers rested on an assumed bandwidth — [fixed].** The README's target-model
+  section (previously `README.md:59`) said a cache miss on the DRAM-less NVMe ran at "**~2 GB/s**"
+  and derived "**~1.7 tok/s**" and a "20×" gap from it, while the measured tier is 8 GB/s
+  (`hw/gtx1650.toml:7`). `README.md` and `docs/ALGORITHMS.md`
+  §1.b now use the measured constant: ~1.2 GB ≈ 0.15 s/token ≈ **6.7 tok/s**, a **~3×** gap, not
+  ~20×. The same stale constant still sits in `docs/FEASIBILITY.md:50,86-87`, `docs/DESIGN.md:152`
+  and `docs/OPTIMIZER.md:20`; the restatement stopped at the two files whose claims the measurement
+  itself changes.
 - **"not another runtime" vs the design — [partial].** `README.md:10` still says it, while
   `docs/DESIGN.md:127` reserves ONNX/MLC/ORT "for the router, not built yet" and `DESIGN.md:200-215`
   sketches "Flow of one decode step (P2 target)" with a router and a predictor. The design does mark
@@ -255,9 +257,10 @@ to the parser, the CLI, the bench harness and their tests.
 
 The parser items that used to produce wrong totals with exit 0 are closed, and so are the two ways
 its malformed input used to crash. The verdict-changing findings were fixed straight after this pass
-(below), which leaves the README's own prose — still deriving `~2 GB/s`, `~1.7 tok/s` and `~20×`
-from the pre-measurement disk figure — as the one place where the stale assumption is still
-published.
+(below), which left the README's own prose — deriving `~2 GB/s`, `~1.7 tok/s` and `~20×` from the
+pre-measurement disk figure — as the one place where the stale assumption was still published. The
+real-model run below restates that prose from measurement, and corrects a second ceiling the same
+prose got wrong.
 
 ## Since the third pass
 
@@ -283,3 +286,39 @@ closed immediately, and each fix was measured on the same input before and after
 | fixed since the third pass | 3 | `gtx1650` RAM budget, derived spill penalty, malformed-header bounds |
 | still open | 7 | the remaining open items in the ledger above |
 | test suite | 190 | was 180; ten new tests cover the three fixes |
+
+## Since the real-model run
+
+The headline numbers were then checked by running the machine instead of re-deriving them: the real
+9.65 GiB `DeepSeek-V2-Lite.Q4_K_M.gguf`, `llama-bench` on CPU at 8 threads, the captured OLMoE
+routing trace, and the official `gguf` reader as an independent cross-check of the parser.
+
+- **The `~33 tok/s` ceiling was wrong by 1.65× — [fixed].** It derived the ceiling from bandwidth
+  alone (1.2 GB/token at 40 GB/s). Decode is bounded by *both* bandwidth (measured 44 GB/s → ~37
+  tok/s) and arithmetic (4.8 GFLOP/token against the measured 110 GFLOP/s → **~23 tok/s**), and the
+  arithmetic bound is the lower one, so the published figure was never reachable. Measured: **20.0
+  tok/s** tg64, 19.24 tg128, 19.60 tg32 — three runs within 4%, i.e. 87% of the ALU ceiling and 61%
+  of the published one. `README.md` and `docs/ALGORITHMS.md` §1.b now state ~23 and the measured 20.0
+  with the command that reproduces it.
+- **The disk-derived figures restated — [fixed].** At the measured 8 GB/s a miss read costs ~1.2 GB
+  ≈ 0.15 s/token ≈ **6.7 tok/s**, so the gap to the resident case is **~3×**, not ~20×: still a real
+  target, but the old constant overstated it by ~4×. This supersedes the *headline numbers* row of
+  the third-pass ledger above; its other `partial` (`README.md:10` positioning) is untouched.
+- **What the run confirmed rather than contradicted:** the parser and the verdict. `analyze` on the
+  real file takes 0.374 s for 377 tensors; the official reader agrees on every tensor — 0/377
+  mismatched on offset, type, bytes and element count, the same 10,360,420,352-byte total, the same
+  `data_offset`, 45/45 metadata keys. `plan` says 0 spill on both targets and the run honours it:
+  11.8 MiB/token of disk read against ~1.2 GB/token of weight traffic, and 20 tok/s where streaming
+  the 8.87 GiB expert pool would give 0.84 tok/s.
+- **Two things the run does not settle, now stated as open.** The 10 GiB `usable_ram` budget is a
+  planning figure, not a memory ceiling: peak RSS on the real run was **13.28 GiB** against a
+  `MemAvailable` of 13.0 GiB (13,672,876 kB) sampled during it, and RSS counts the mmap'd model's
+  reclaimable pages. Decode also scales oddly with threads (4 → 8 threads buys +6%), so
+  how much of the per-token cost is bandwidth rather than ALU is unknown; `docs/ALGORITHMS.md` §1.b
+  now says that instead of asserting "decode is ~ memory-bandwidth-bound".
+
+| Status | Count | Items |
+|---|---|---|
+| fixed since the real-model run | 2 | the `~33 tok/s` ceiling, the disk-derived miss cost |
+| left for a doc sweep | 1 | 2 GB/s still quoted in FEASIBILITY §1/§4, DESIGN §152, OPTIMIZER §20 |
+| test suite | 190 | unchanged — this pass touched no code |
