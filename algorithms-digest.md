@@ -490,7 +490,33 @@ Honest notes:
 - The manifest's `2789 MiB` cache **does not fit the real VRAM** (Vulkan fails to allocate, CUDA fails
   to create a context) ⇒ it has to be lowered to 1024 through the `--` pass-through.
 - `disk read` is noisy with the page cache; `prompt t/s` is noisy because the prompt is short.
-- `--compare` on the CPU build: default 12.20 → manifest (`-ctk/-ctv q8_0`) 14.90 t/s = **1.22×**.
+- `--compare` on the CPU build: default 12.20 → manifest (`-ctk/-ctv q8_0`) 14.90 t/s = **1.22×**
+  **[superseded — re-measured 2026-10-13, see below]**
+- **Re-measured `--compare`, same build, DeepSeek-V2-Lite Q4_K_M, `-t 4`, ctx 512, 32 tokens, 2
+  reps each** `[measured]` — the 1.22× above **does not reproduce**, on either footing:
+
+  | baseline | manifest | speedup | notes |
+  |---|---|---|---|
+  | 22.80 tok/s (`-lm mlock`) | 22.50 | **0.99×** | clean page cache, no paging at all |
+  | 22.60 tok/s (`-lm mlock`) | 22.50 | **1.00×** | second repetition |
+  | 13.50 tok/s (`mmap`, default) | 12.90 | **0.96×** | default path, page cache thrashing |
+
+  So the manifest is worth **nothing to −4%** whether the baseline is clean or thrashing. Two
+  things fall out of this, both `[measured]`:
+  - **The old 1.22× cannot be attributed to KV quantization at ctx 512.** q8_0 vs f16 is worth
+    ~0 at this context (16.41 vs 16.51 tok/s in `bench/step1_attrib.py`), and the manifest maps
+    on a CPU-only build to exactly `-ngl 0 -ctk q8_0 -ctv q8_0` and nothing else
+    (`vipera run … --dry-run`). Whatever produced 14.90 needs re-isolating before it is claimed.
+  - **Reducing disk read does not improve throughput on a RAM-resident model.** On the `mmap`
+    run the manifest cut disk read by 3918 MiB (−26%) and still scored 0.96×. This is the
+    direct, non-inferential form of the STEP 1 finding that decode touches 0.4 MiB/token.
+  - The manifest's value is confined to placement across VRAM/RAM/disk, and on a CPU-only build
+    with the model resident in RAM that placement has nothing to act on. Its case has to be made
+    on a model that spills, or at long context — see `plantodo.md`.
+- `--compare` at ctx 2048 is **not a valid comparison for this model on 15 GiB RAM**: the
+  baseline's f16 KV cache needs ~22.5 GB and the process is SIGKILL'd by the OOM killer, so
+  `generation t/s` reports `n/a` for the baseline and no speedup is computed. Use ctx ≤ 512, or
+  a quantized KV on *both* sides.
 
 ---
 

@@ -278,12 +278,42 @@ difference, so a "beats the default" claim is a measurement rather than a target
 ```
 metric                  baseline      manifest         delta
 ------------------------------------------------------------
-generation t/s              ~20           ~20           1.00x
-peak RSS                  ~13000        ~13000         +0 MiB
-disk read                  ~5000         ~5000        +0 MiB
+generation t/s             22.80          22.50          0.99x
+prompt t/s                  38.8           39.4
+peak RSS                 10083 MiB     10024 MiB        -59 MiB
+disk read                 7118 MiB      9673 MiB      +2555 MiB
 
-manifest / baseline generation speedup: 1.00x
+manifest / baseline generation speedup: 0.99x
 ```
+
+Measured 2026-10-13 on DeepSeek-V2-Lite Q4_K_M, `-t 4 -lm mlock --context 512 --n-predict 32`.
+Reproduce:
+
+```bash
+python3 -m vipera run models/DeepSeek-V2-Lite.Q4_K_M.gguf \
+    --manifest out/DeepSeek-V2-Lite.Q4_K_M.vipera.json \
+    --compare --context 512 --n-predict 32 --threads 4 -- -lm mlock
+```
+
+**On a model that fits in RAM, the manifest currently measures ≈1.00× — it does not beat the
+default.** Three runs agree: 0.99×, 1.00× on a clean (`-lm mlock`) baseline and 0.96× on the
+default `mmap` baseline. That is the honest state of the claim, and `--compare` is what keeps it
+honest.
+
+The reason is structural, not a bug. On a CPU-only build the manifest maps to
+`-ngl 0 -ctk q8_0 -ctv q8_0` and nothing else (`--dry-run` shows the mapped command), because its
+whole substance is *placement across VRAM/RAM/disk* — and with the model resident in RAM there is
+nothing to place. The clearest evidence: on the `mmap` run the manifest cut disk read by 3918 MiB
+(−26%) and still scored 0.96×, i.e. **fewer disk reads bought no throughput**, which is what it
+means for decode to touch only 0.4 MiB/token.
+
+Where the manifest has a real case is a model that **spills** past RAM, or a long context where
+KV placement matters. Those are the measurements that decide whether vipera's positioning holds;
+see `plantodo.md`.
+
+> Note: `--compare` at `--context 2048` is not usable for a 15.7B model in 15 GiB RAM — the
+> baseline's f16 KV cache needs ~22.5 GB and is killed by the OOM killer, so the baseline reports
+> `n/a` and no speedup is computed. Stay at ctx ≤ 512, or quantize KV on both sides.
 
 ### Prefetch from a routing trace
 

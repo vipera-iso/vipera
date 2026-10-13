@@ -8,6 +8,7 @@ bench/results/*
 !bench/results/hwprobe-run2.json
 !bench/results/olmoe-ppl-baseline.json
 !bench/results/olmoe-1b-7b-prefetch-table.txt
+!bench/results/step1-attrib.json
 *.gguf
 __pycache__/
 .venv/
@@ -17,3 +18,6 @@ build/
 out/
 .bridge/
 graphify-out/
+
+# Personal working notes — kept out of the repository on purpose.
+viperasuport.md
