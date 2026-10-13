@@ -26,9 +26,12 @@ this project intends to follow [Semantic Versioning](https://semver.org/).
   (`LLAMA_MOE_PREFETCH`) in one step. The patch is driven through its env vars and
   is not forked; a binary without it is detected and reported. The table logic
   moved to `vipera/prefetch.py`, with `bench/prefetch_table.py` kept as its CLI.
-- **Vulkan build path** — `vipera run` can target a `GGML_VULKAN` llama.cpp build
-  so the manifest's VRAM placement is actually exercised on a machine with no
-  CUDA toolkit.
+- **GPU build paths** — `vipera run` targets a `GGML_VULKAN` or `GGML_CUDA`
+  llama.cpp build so the manifest's VRAM placement is actually exercised. Both are
+  verified on the target machine; CUDA installs root-free from NVIDIA's PyPI
+  wheels (no `nvcc` was present before). Measured on the same model: CUDA 7.00
+  tok/s against Vulkan 2.60 and CPU-only 11.70, with experts on the CPU because
+  the model does not fit 4 GB of VRAM.
 - **GGUF analyzer and residency planner** — reads a model's header and tensor
   descriptors (never the tensor data) and splits bytes into always-resident
   versus routable-expert buckets.
@@ -56,6 +59,11 @@ this project intends to follow [Semantic Versioning](https://semver.org/).
   measurement protocol, with a measured 7% noise band).
 - **Documentation** — `docs/RESEARCH.md`, `PROPOSALS.md`, `ROADMAP.md`,
   `FEASIBILITY.md`, `OPTIMIZER.md`, `ALGORITHMS.md`, `DESIGN.md`.
+- **Install section** — the README now states what running vipera actually takes:
+  the optimizer is pure standard library and needs only Python >= 3.11; the
+  `vipera` command goes into a venv because a PEP 668 "externally managed" Python
+  refuses an editable install; and `vipera run` needs a `llama-cli` binary plus a
+  GGUF file, with GPU backends optional (CPU is fastest on the target machine).
 - **Repository hygiene** — `LICENSE` (MIT), `CONTRIBUTING.md`, `.editorconfig`,
   this changelog, and a CI workflow running the suite on Python 3.11–3.14.
 

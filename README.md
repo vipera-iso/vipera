@@ -80,9 +80,45 @@ paragraph used to assume — costs ~1.2 GB ≈ **0.15 s/token**, i.e. **~6.7 tok
 gap, not the ~20× the old constant implied: still worth removing, which keeps vipera's primary goal
 **fewer disk reads for experts**.
 
-## Quick start
+## Install
 
-Pure stdlib, Python >= 3.11 (uses `tomllib`). No dependencies to install.
+The optimizer is **pure standard library** — there is nothing to `pip install` for `analyze`,
+`plan`, `schedule`, `trace`, `prune` or `score`. Python >= 3.11 is the whole requirement (3.11 is
+the floor because the hardware profiles are parsed with `tomllib`):
+
+```bash
+python3 -m vipera analyze models/model.gguf        # works with no install step at all
+```
+
+For the `vipera` command itself, install into a virtual environment. On a PEP 668
+"externally managed" Python (Arch, Debian, Fedora, ...) the system pip refuses an editable
+install, and overriding it with `--break-system-packages` is not worth the risk:
+
+```bash
+python3 -m venv .venv && .venv/bin/pip install -e .
+.venv/bin/vipera --version
+```
+
+`vipera run` **executes** a model, so it needs two things that are not Python packages:
+
+| Need | Why | Get it with |
+|---|---|---|
+| a `llama-cli` binary | `run` launches it — vipera never reimplements a runtime | `cmake`, `gcc`/`g++`, `make` |
+| a GGUF model file | the artifact being run | e.g. DeepSeek-V2-Lite Q4_K_M |
+
+```bash
+# the minimum: a CPU build of llama.cpp
+cmake -S ~/dev/llama.cpp -B ~/dev/llama.cpp/build -DCMAKE_BUILD_TYPE=Release -DLLAMA_CURL=OFF
+cmake --build ~/dev/llama.cpp/build --target llama-cli -j"$(nproc)"
+```
+
+GPU backends are **optional**. CPU-only runs, and on the target machine it is the *fastest* of the
+three because the model does not fit in 4 GB of VRAM — the Vulkan and root-free CUDA recipes, and
+the measured numbers, are under [Exercising the VRAM half](#exercising-the-vram-half).
+
+The test suite is `unittest` from the standard library, so `pytest` is not required.
+
+## Quick start
 
 ```bash
 # inventory a model without reading its tensor data
@@ -310,6 +346,47 @@ extra upload, and the run got slower. That is the same lesson `docs/ROADMAP.md` 
 table concentrated enough to fit a small cache does not come from a short trace. The number is the
 patch's, not vipera's, and the runner only surfaces it (`-v` is added automatically so the verdict
 is not hidden).
+
+### CUDA, without root
+
+NVIDIA publishes the CUDA components as PyPI wheels — tarballs of `nvcc`, headers and libraries —
+so a toolkit installs with no root and no system packages:
+
+```bash
+# the *-cu13 names are deprecated stubs that fail to build; the plain names are real
+python3 -m pip install --target ~/cuda-sdk/pkgs \
+    nvidia-cuda-nvcc nvidia-cuda-runtime nvidia-cuda-cccl nvidia-cuda-nvrtc nvidia-cublas
+
+# flatten nvidia/cu13/{bin,include,lib} into the layout CMake looks for
+ROOT=~/cuda-sdk/pkgs/nvidia/cu13; TK=~/cuda-sdk/toolkit; mkdir -p $TK
+ln -s $ROOT/bin $TK/bin; ln -s $ROOT/include $TK/include
+ln -s $ROOT/lib $TK/lib; ln -s $ROOT/lib $TK/lib64
+(cd $ROOT/lib; for f in *.so.13; do ln -sf $f ${f%%.so*}.so; done)
+
+cmake -S ~/dev/llama.cpp -B ~/dev/llama.cpp/build-cuda -DCMAKE_BUILD_TYPE=Release \
+    -DGGML_CUDA=ON -DCMAKE_CUDA_ARCHITECTURES=75 -DLLAMA_CURL=OFF \
+    -DCUDAToolkit_ROOT=$TK -DCMAKE_CUDA_COMPILER=$TK/bin/nvcc \
+    -DCMAKE_EXE_LINKER_FLAGS="-L$TK/lib -Wl,-rpath,$TK/lib"
+cmake --build ~/dev/llama.cpp/build-cuda --target llama-cli -j4
+```
+
+CUDA 13.4 still supports Turing (it dropped only pre-Turing), which is what the GTX 1650 needs. The
+link flags matter: the wheels ship no static `libcublas`, and the CUDA symbols are versioned
+(`cudaMemcpyAsync@libcudart.so.13`), so the executable link needs the toolkit on its search path.
+
+Four builds of the same model, same machine, ctx 512, 24 tokens, 8 threads, experts on the CPU
+because the 9.65 GiB model does not fit 4 GB of VRAM:
+
+| build | generation | note |
+|---|---|---|
+| CPU-only | **11.70 t/s** | |
+| Vulkan | 2.60 t/s | GTX 1650 via the driver's Vulkan ICD |
+| CUDA | 7.00 t/s | needs `--moe-cache-mib 1024`; the manifest's 2789 MiB does not fit |
+| CUDA + prefetch | 2.00 t/s | patch's verdict: 11.2% useful, +44 GiB of extra upload |
+
+CUDA is ~2.7× Vulkan here and still loses to CPU-only. That is the honest shape of this machine:
+with every expert on the CPU the GPU accelerates only attention and pays PCIe for each expert it
+has to fetch, and the prefetch that is meant to hide that cost makes it worse on a 199-token table.
 
 ## Skill
 

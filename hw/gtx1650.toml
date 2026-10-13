@@ -13,10 +13,12 @@
 #                Cross-checked against a real model: OLMoE-1B-7B Q4_K_M decodes
 #                at 41.2 tok/s here (llama-bench, ngl=0), i.e. an effective
 #                2*1.18e9*41.2 = ~97 GFLOP/s. Was 50.0, an estimate.
-#   vram_bw_gbs  NOT MEASURABLE on this box: no CUDA toolkit (nvcc), no OpenCL
-#                ICD, and the local llama.cpp build is CPU-only (no libggml-cuda).
-#                The GPU cannot be exercised, so 192 stays a datasheet figure and
-#                no result in this repo currently depends on it.
+#   vram_bw_gbs  NOT MEASURED. A root-free CUDA toolkit and a libggml-cuda build
+#                now exist (README "Exercising the VRAM half"), so the GPU can be
+#                exercised, but no bandwidth probe has been run yet: 192 stays a
+#                datasheet figure and no result in this repo depends on it. The
+#                GPU runs taken so far (Vulkan 2.60, CUDA 7.00 tok/s) are end-to-end
+#                decode rates with experts on the CPU, not VRAM bandwidth.
 #   ram_headroom_mb  MEASURED budget (README target table, 2026-10-12): 15 GiB total,
 #                ~10 GiB available, no swap — so ~5 GiB belongs to the OS and the working
 #                environment, not to the model. Was 1536 (1.5 GiB), the generic KV/activation
