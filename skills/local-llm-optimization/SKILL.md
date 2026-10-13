@@ -13,7 +13,14 @@ description: A decision-tree + playbook + toolset for running large LLMs on pers
 
 ## TL;DR
 
-1. **Decode is memory-bandwidth-bound.** `tok/s ≈ tier_bandwidth / bytes_read_per_token`. Compression and multi-token prediction win; FLOP tricks do not.
+0. **Fix the invocation first: `-t <physical cores>` and `-lm mlock`.** Together **1.79×** on a
+   4C/8T laptop (12.80 → 22.90 tok/s, 18× tighter variance), no rebuild, no code (vipera,
+   measured 2026-10-13). Larger than anything below, and independent of the model.
+1. **Decode is usually memory-bandwidth-bound** — `tok/s ≈ tier_bandwidth / bytes_read_per_token`. Compression and multi-token prediction win; FLOP tricks do not. **But check: it is not
+   universal.** On a 15.7B MoE with the page cache out of the way, decode sat at **99.5% of the
+   ALU ceiling** and disk was ≤0.2% of token time — bandwidth had stopped binding and the
+   arithmetic was the wall (vipera, measured 2026-10-13). The test is thread scaling: gains that
+   fall away (here 1.80× → 1.52× → 0.91×) mean you have hit compute, not bandwidth.
 2. **Quantize first.** `Q4_K_M` is the default sweet spot; it is "best of the three 4-bit formats" in an independent 2026 comparison and preserves most task quality [S9][S10].
 3. **Fit the KV cache too, not just the weights.** At long context KV can be most of the footprint — quantize it (fp8/q8) or the model "fits" in weights but OOMs in practice [S12].
 4. **On MoE, the expert pool is the battle.** Only ~2× the active-expert count fits a cache; if the pool is 30× the cache, expert pruning is the only thing that changes the verdict [S3][S6] (vipera).
@@ -50,7 +57,13 @@ defensibly, and to know *why* a config is slow.
 
 **Minimum requirements**
 * Software: a runtime (`llama.cpp` / `Ollama` are the CPU-friendly default [S19]), Python ≥3.11 for the scripts here, and a model in `GGUF` (CPU/mixed) or `EXL2`/`GPTQ`/`AWQ` (GPU).
-* Hardware: any machine; the limiting factor is memory *capacity* and *bandwidth*, not FLOPs. On-device, memory bandwidth is **50–90 GB/s** vs **2–3 TB/s** on datacenter GPUs — a **30–50× gap** (published) [S7].
+* Hardware: any machine; the limiting factor is memory *capacity* and *bandwidth* — **unless it
+  is not.** On-device memory bandwidth is **50–90 GB/s** vs **2–3 TB/s** on datacenter GPUs, a
+  **30–50× gap** (published) [S7], so bandwidth is the usual first wall. But once the page cache
+  is out of the way a 15.7B MoE on a 4C/8T laptop reached **99.5% of its ALU ceiling** with disk
+  at ≤0.2% of token time — there the limiting factor is FLOPs, and no amount of bandwidth,
+  caching or file reordering moves it (vipera, measured 2026-10-13). Determine which you are in
+  with thread scaling, not assumption.
 * Knowledge: how to run a CLI and read a `nvidia-smi` / `free` output.
 
 **Non-negotiable rules**
@@ -60,6 +73,27 @@ defensibly, and to know *why* a config is slow.
 ---
 
 ## 2. Decision tree
+
+> **STEP 0 — fix the invocation before touching the model.** Two flags, no rebuild, no code,
+> measured on a 4C/8T laptop against a 15.7B MoE: **12.80 → 22.90 tok/s = 1.79×**, and variance
+> tightened 18× (vipera, measured 2026-10-13). Every step below assumes you have already done
+> this, because otherwise you are tuning a model while leaving ~45% of the machine on the table.
+>
+> ```
+> 1. -t <physical cores>, NOT the logical count.
+>    Hyperthreads cost 9% here (22.90 → 20.75 tok/s at -t 8): gains fell 1.80x → 1.52x → 0.91x,
+>    i.e. the arithmetic ran out before the cores did. More threads is not more speed.
+> 2. -lm mlock (or -lm dio) when the model fits in RAM.
+>    The default mmap re-faults model pages it just evicted when weights + KV approach usable
+>    RAM: 13757 MiB moved from NVMe where dio moved exactly the 9880 MiB file once.
+>    Cold start +121%, steady state +11%, spread ±24% → ±1%.
+> 3. Then measure the baseline. `--compare` at ctx >= 1024 can report `n/a` because the f16
+>    baseline was OOM-killed, which looks like a missing number, not a failure.
+> ```
+>
+> **Why this belongs first:** it is the largest measured lever on this hardware, it costs
+> nothing but a flag, and it is *independent of the model*. Nothing in steps 1–4 below can
+> return 1.79×. Skip it and you will misattribute the win to whatever you did afterwards.
 
 ```
 START: what is the model's weight size at your chosen quant?  W  (GB)
@@ -76,6 +110,13 @@ START: what is the model's weight size at your chosen quant?  W  (GB)
                                         accept the I/O ceiling; add speculative
                                         decoding; consider layer pruning last
 ```
+
+> **Where STEP 0 does not apply.** Once the model *spills* past RAM, `-lm mlock` fails outright
+> (there is nothing to lock) and mmap paging becomes the real cost — which is exactly the regime
+> where placement, expert cache and prefetch start to earn their keep. STEP 0 is for the
+> fits-in-RAM case, and it is worth knowing that in that case placement has nothing to act on:
+> measured on a RAM-resident MoE, cutting disk reads by 26% changed throughput by −4%
+> (vipera, measured 2026-10-13).
 
 ### Quick lookup by configuration
 
