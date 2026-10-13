@@ -179,7 +179,7 @@ def format_table(report: dict) -> str:
     return "\n".join(lines)
 
 
-def main(argv: list[str] | None = None) -> int:
+def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="bench", description=__doc__)
     p.add_argument("--bin", default=DEFAULT_BIN, help="llama-bench executable")
     p.add_argument("--model", required=True)
@@ -191,14 +191,31 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--timeout", type=float, default=None)
     p.add_argument("--no-gpu", action="store_true", help="skip nvidia-smi sampling")
     p.add_argument("--json", dest="json_path", help="write the report here")
-    p.add_argument("extra", nargs="*", help="extra flags passed through to llama-bench")
-    args = p.parse_args(argv)
+    return p
+
+
+def split_args(argv: list[str] | None = None) -> tuple[argparse.Namespace, list[str]]:
+    """Parse bench's own flags and hand the rest through to llama-bench.
+
+    Unknown flags (e.g. `-r 1 --no-warmup`) are returned verbatim and in order, so
+    a documented llama-bench flag no longer has to be hidden behind a `--`
+    separator. `parse_known_args` keeps a stray positional in the same list.
+    """
+    args, extra = build_parser().parse_known_args(argv)
+    # argparse hands the `--` separator itself back in extras; it is bench's own
+    # delimiter, not a llama-bench flag, so drop it.
+    extra = [a for a in extra if a != "--"]
+    return args, extra
+
+
+def main(argv: list[str] | None = None) -> int:
+    args, extra = split_args(argv)
 
     binary = shutil.which(args.bin) or args.bin
     report = run_bench(
         binary, args.model,
         ngl=args.ngl, threads=args.threads, pp=args.pp, tg=args.tg,
-        extra=args.extra, sample_interval=args.interval, gpu=not args.no_gpu,
+        extra=extra, sample_interval=args.interval, gpu=not args.no_gpu,
         timeout=args.timeout,
     )
     print(format_table(report))

@@ -116,10 +116,27 @@ def plan(inv: Inventory, target: Target, sharpness: float = 1.0) -> Plan:
     spill = remaining - expert_ram
 
     if spill > 0:
-        warnings.append(
-            f"{spill / MIB:.0f} MiB of experts spill to disk; on a DRAM-less NVMe "
-            "expect roughly a 20x decode slowdown on cache misses"
-        )
+        # Derive the cache-miss penalty from the target's own tiers instead of asserting
+        # one number. The flat "20x" this used to print came from the first pass's assumed
+        # tiers (40 GB/s RAM against 2 GB/s disk) and stayed put after both were measured,
+        # so it mispriced every machine the planner was pointed at.
+        spill_share = (spill / expert) if expert else 0.0
+        if target.disk_bw_gbs > 0:
+            miss_penalty = target.ram_bw_gbs / target.disk_bw_gbs
+            warnings.append(
+                f"{spill / MIB:.0f} MiB of experts ({spill_share:.0%} of the pool) spill to "
+                f"disk ({target.disk}); with {target.ram_bw_gbs:g} GB/s RAM against "
+                f"{target.disk_bw_gbs:g} GB/s disk a missed expert costs "
+                f"~{miss_penalty:.1f}x a resident one, so decode slows by up to "
+                f"~{miss_penalty:.1f}x and by ~{1 + spill_share * (miss_penalty - 1):.1f}x "
+                "averaged over the pool"
+            )
+        else:
+            warnings.append(
+                f"{spill / MIB:.0f} MiB of experts ({spill_share:.0%} of the pool) spill to "
+                f"disk ({target.disk}); the target declares no disk bandwidth "
+                "(disk_bw_gbs=0), so the cost of a miss cannot be derived from it"
+            )
 
     cache_fraction = (cache_vram / expert) if expert else 0.0
 

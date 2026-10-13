@@ -17,15 +17,32 @@
 #                ICD, and the local llama.cpp build is CPU-only (no libggml-cuda).
 #                The GPU cannot be exercised, so 192 stays a datasheet figure and
 #                no result in this repo currently depends on it.
+#   ram_headroom_mb  MEASURED budget (README target table, 2026-10-12): 15 GiB total,
+#                ~10 GiB available, no swap — so ~5 GiB belongs to the OS and the working
+#                environment, not to the model. Was 1536 (1.5 GiB), the generic KV/activation
+#                reserve copied from the 32 GB instance profiles; that left 13.5 GiB of usable
+#                RAM and made every RAM verdict optimistic. Measured on a 15.9 GiB
+#                Qwen3-30B-shaped header: with 1536 the plan reports **0 MiB of spill**
+#                (i.e. the planner says a model the docs mark ❌ "needs streaming" stays
+#                resident), with 5120 the same file spills **2.40 GiB**. 5120 holds back the
+#                5 GiB the machine really does not have, so usable RAM is the documented
+#                10 GiB; DeepSeek-V2-Lite still plans with no spill, as the docs say it should.
+#                KV cache and activations are budgeted inside that 10 GiB by the scheduler.
+#                Re-measure with:
+#                  awk '/MemTotal|MemAvailable|SwapTotal/' /proc/meminfo
+#                (a 2026-10-13 probe on an idle box read MemAvailable = 13924024 kB =
+#                 13.3 GiB; the conservative working-environment figure is kept on purpose,
+#                 because that is what a run can count on while the dev environment is up.)
 name = "gtx1650-laptop"
 vram_mb = 4096          # GTX 1650 Max-Q
 ram_mb = 15360          # 15 GiB, no swap
 disk = "nvme-dramless"
 
 # Headroom held back from the totals above so the runtime can still allocate
-# KV cache and activations. Tuned by measurement later; conservative for now.
+# KV cache and activations (VRAM) and so that "usable RAM" means the RAM a run can
+# actually get (RAM — see the ram_headroom_mb provenance above).
 vram_headroom_mb = 512
-ram_headroom_mb = 1536
+ram_headroom_mb = 5120
 
 # Memory tiers in GB/s (decimal). These decide how long a byte costs, so they
 # belong to the machine description.

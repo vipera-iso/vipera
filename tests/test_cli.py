@@ -5,7 +5,7 @@ import tempfile
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
 
-from tests._fixture import make_gguf
+from tests._fixture import make_gguf, make_unknown_quant_gguf
 from vipera.cli import main
 from vipera.schedule import Quant, plan_residency
 from vipera.arch import Architecture
@@ -15,6 +15,7 @@ from vipera.trace import save_trace, synth_trace
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 HW = os.path.join(REPO_ROOT, "hw", "gtx1650.toml")
 GLM = os.path.join(REPO_ROOT, "arch", "glm-5.3-flash.toml")
+OLMOE = os.path.join(REPO_ROOT, "arch", "olmoe-1b-7b.toml")
 LLAMA = os.path.join(REPO_ROOT, "arch", "llama3-70b.toml")
 LLAMA16 = os.path.join(REPO_ROOT, "hw", "laptop16-igpu.toml")
 
@@ -97,6 +98,15 @@ class TestCLI(unittest.TestCase):
         self.assertEqual(data["algorithm"], "gated-expert-pruning")
         self.assertEqual(data["rolled_back_layers"] + data["pruned_layers"], 45)
 
+    def test_sweep_runs_on_a_small_model(self):
+        # Regression: sweep asks for keep_layers=25, which used to crash on a
+        # model with fewer than 25 layers.
+        out = io.StringIO()
+        with redirect_stdout(out):
+            code = main(["sweep", OLMOE, "--target", HW])
+        self.assertEqual(code, 0)
+        self.assertIn("all values MODELLED", out.getvalue())
+
     def test_score_fails_the_local_llm_16gb_instance(self):
         out = io.StringIO()
         with redirect_stdout(out):
@@ -106,6 +116,50 @@ class TestCLI(unittest.TestCase):
         text = out.getvalue()
         self.assertIn("FAIL", text)
         self.assertIn("tokens/s", text)
+
+
+class TestCLIErrorExitCodes(unittest.TestCase):
+    """Bad input must exit 2, not 1 (which `plan` uses to mean "doesn't fit")."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.path = os.path.join(self.tmp.name, "tiny.gguf")
+        make_gguf(self.path, block_count=2, n_experts=4)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def _run(self, argv):
+        with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+            return main(argv)
+
+    def test_missing_model_file_is_exit_2(self):
+        code = self._run(["analyze", os.path.join(self.tmp.name, "nope.gguf")])
+        self.assertEqual(code, 2)
+
+    def test_unreadable_target_is_exit_2(self):
+        code = self._run(["plan", self.path, "--target", os.path.join(self.tmp.name, "nope.toml")])
+        self.assertEqual(code, 2)
+
+    def test_bad_toml_is_exit_2(self):
+        bad = os.path.join(self.tmp.name, "bad.toml")
+        with open(bad, "w") as f:
+            f.write("this is = = not toml\n")
+        code = self._run(["plan", self.path, "--target", bad])
+        self.assertEqual(code, 2)
+
+    def test_target_missing_a_key_is_exit_2(self):
+        incomplete = os.path.join(self.tmp.name, "incomplete.toml")
+        with open(incomplete, "w") as f:
+            f.write('name = "x"\n')  # no vram_mb / ram_mb
+        code = self._run(["plan", self.path, "--target", incomplete])
+        self.assertEqual(code, 2)
+
+    def test_unknown_quant_model_is_exit_2(self):
+        path = os.path.join(self.tmp.name, "mxfp4.gguf")
+        make_unknown_quant_gguf(path, ggml_type=999)
+        code = self._run(["analyze", path])
+        self.assertEqual(code, 2)
 
 
 if __name__ == "__main__":

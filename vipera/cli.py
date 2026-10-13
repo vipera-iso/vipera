@@ -12,6 +12,7 @@ import argparse
 import json
 import os
 import sys
+import tomllib
 
 from . import __version__
 from .analyze import analyze, to_dict
@@ -493,6 +494,12 @@ def main(argv: list[str] | None = None) -> int:
     try:
         return args.func(args)
     except (GGUFError, TraceError) as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 2
+    except KeyError as e:
+        print(f"error: missing required key {e} in profile", file=sys.stderr)
+        return 2
+    except (OSError, tomllib.TOMLDecodeError) as e:
         print(f"error: {e}", file=sys.stderr)
         return 2
 

@@ -12,6 +12,7 @@ from bench.bench import (
     main,
     parse_llama_bench_json,
     run_bench,
+    split_args,
     test_label,
     total_tokens,
 )
@@ -45,6 +46,15 @@ sys.exit(3)
 STUB_GARBAGE = """\
 #!/usr/bin/env python3
 print("this is not json")
+"""
+
+# Records the argv it was handed, so the test can see what reached llama-bench.
+STUB_ARGV = """\
+#!/usr/bin/env python3
+import json, os, sys
+with open(os.path.abspath(__file__) + ".argv", "w") as f:
+    json.dump(sys.argv, f)
+print("[]")
 """
 
 
@@ -144,6 +154,35 @@ class TestRunBench(unittest.TestCase):
         with open(path) as f:
             saved = json.load(f)
         self.assertEqual(saved["tokens_processed"], 640)
+
+
+class TestPassthroughFlags(unittest.TestCase):
+    """llama-bench flags bench does not define must reach llama-bench unchanged."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.bin = os.path.join(self.tmp.name, "stub-bench")
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_split_args_keeps_unknown_flags_in_order(self):
+        _, extra = split_args(["--model", "m", "-r", "1", "--no-warmup"])
+        self.assertEqual(extra, ["-r", "1", "--no-warmup"])
+
+    def test_split_args_drops_the_separator(self):
+        _, extra = split_args(["--model", "m", "--", "--n-cpu-moe", "2"])
+        self.assertEqual(extra, ["--n-cpu-moe", "2"])
+
+    def test_documented_flags_reach_llama_bench_without_a_separator(self):
+        _write_stub(self.bin, STUB_ARGV)
+        with redirect_stdout(io.StringIO()):
+            code = main(["--bin", self.bin, "--model", "stub.gguf", "--no-gpu",
+                         "--interval", "0.05", "-r", "1", "--no-warmup"])
+        self.assertEqual(code, 0)
+        with open(self.bin + ".argv") as f:
+            argv = json.load(f)
+        self.assertEqual(argv[-3:], ["-r", "1", "--no-warmup"])
 
 
 if __name__ == "__main__":

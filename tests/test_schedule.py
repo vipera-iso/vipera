@@ -10,6 +10,7 @@ GLM = os.path.join(REPO_ROOT, "arch", "glm-5.3-flash.toml")
 HW = os.path.join(REPO_ROOT, "hw", "gtx1650.toml")
 LLAMA = os.path.join(REPO_ROOT, "arch", "llama3-70b.toml")
 LLAMA_HW = os.path.join(REPO_ROOT, "hw", "llama70b-pc.toml")
+OLMOE = os.path.join(REPO_ROOT, "arch", "olmoe-1b-7b.toml")
 
 
 def glm() -> Architecture:
@@ -139,6 +140,15 @@ class TestOptimizations(unittest.TestCase):
         self.assertEqual(cut.manifest["architecture"]["n_layers"], 25)
         self.assertEqual(len(cut.manifest["layers"]), 25)
         self.assertLess(cut.bytes_per_token, full.bytes_per_token)
+
+    def test_keep_layers_beyond_the_model_is_clamped(self):
+        # `sweep` hardcodes keep_layers=25; on a 16-layer model that used to leave
+        # `kinds` shorter than `n_layers` and crash on `kinds[i]`.
+        a = Architecture.from_toml(OLMOE)
+        r = simulate(a, gtx1650(), quant=Quant.q4_experts(), tokens=2, warmup=1,
+                     optimizations=Optimizations(keep_layers=25))
+        self.assertEqual(r.manifest["architecture"]["n_layers"], a.n_layers)
+        self.assertEqual(len(r.manifest["layers"]), a.n_layers)
 
     def test_kv_bits_shrink_the_kv_cache(self):
         a = glm()

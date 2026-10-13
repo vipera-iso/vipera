@@ -129,6 +129,22 @@ disk bytes per token for each of the 45 layers).
    this document roughly 4× faster than the tables below show.
 4. **KV cache** is modelled at 2048 tokens (76 MiB). At the model's 1M-token
    context it grows to ~37 GiB and would not fit at all.
+5. **RAM budget**: `hw/gtx1650.toml` used to leave **13.5 GiB** of RAM usable, while
+   the README target table measures **~10 GiB available** (15 GiB total, no swap).
+   The profile now holds the difference back, so every hit-rate and `tok/s` figure
+   above was modelled against a machine with 3.5 GiB more RAM than it has. Same
+   model, same command, old vs fixed profile:
+
+   | Strategy | hit (old → fixed) | tok/s (old → fixed) |
+   |---|---|---|
+   | baseline fp8 | 19.9% → **0.0%** | 0.96 → 0.83 |
+   | q4 experts | 28.7% → **19.9%** | 1.84 → 1.72 |
+   | + prune 25% experts | 43.9% → **30.6%** | 2.09 → 1.87 |
+
+   The FP8 baseline loses its expert cache entirely at the honest budget, which is
+   the honest reading: its always-resident set plus KV no longer leaves room. The
+   verdicts do not move, the margins do — and the tables in §4 and §9 now need
+   re-running before they are quoted.
 
 ---
 
