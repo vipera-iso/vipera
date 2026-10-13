@@ -116,7 +116,8 @@ GPU backends are **optional**. CPU-only runs, and on the target machine it is th
 three because the model does not fit in 4 GB of VRAM — the Vulkan and root-free CUDA recipes, and
 the measured numbers, are under [Exercising the VRAM half](#exercising-the-vram-half).
 
-The test suite is `unittest` from the standard library, so `pytest` is not required.
+The suite runs under both `unittest` (standard library, what CI uses) and `pytest` — 225 tests
+either way, with `pytest` needing no plugin or config.
 
 ## Quick start
 

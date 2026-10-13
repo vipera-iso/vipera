@@ -83,6 +83,11 @@ this project intends to follow [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- **The suite now runs under `pytest`.** `bench/bench.py` named its row labeller
+  `test_label` (`bench.py:56`); importing it into `tests/test_bench.py` put a
+  `test_*` function with a required argument at module scope, which pytest tried to
+  collect as a test and failed on. Renamed to `row_label`. `unittest` was never
+  affected and still passes the same 225 tests.
 - The S1 hit-rate baseline compared against a ceiling at the wrong cache size,
   which made a correct policy look better than the bound it was measured against.
 - `sweep` requested 25 kept layers on a 16-layer model, leaving the layer list

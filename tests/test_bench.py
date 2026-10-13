@@ -11,9 +11,9 @@ from bench.bench import (
     build_command,
     main,
     parse_llama_bench_json,
+    row_label,
     run_bench,
     split_args,
-    test_label,
     total_tokens,
 )
 from bench.measure import bytes_per_token, read_proc_io, read_rss_kb
@@ -86,13 +86,13 @@ class TestHelpers(unittest.TestCase):
         self.assertEqual(total_tokens(parse_llama_bench_json(GOOD_JSON)), 640)
 
     def test_label_is_derived_when_absent(self):
-        self.assertEqual(test_label({"n_prompt": 512, "n_gen": 0}), "pp512")
-        self.assertEqual(test_label({"n_prompt": 0, "n_gen": 128}), "tg128")
-        self.assertEqual(test_label({"n_prompt": 256, "n_gen": 64}), "pp256+tg64")
-        self.assertEqual(test_label({}), "unknown")
+        self.assertEqual(row_label({"n_prompt": 512, "n_gen": 0}), "pp512")
+        self.assertEqual(row_label({"n_prompt": 0, "n_gen": 128}), "tg128")
+        self.assertEqual(row_label({"n_prompt": 256, "n_gen": 64}), "pp256+tg64")
+        self.assertEqual(row_label({}), "unknown")
 
     def test_label_is_kept_when_present(self):
-        self.assertEqual(test_label({"test": "pp512", "n_prompt": 512}), "pp512")
+        self.assertEqual(row_label({"test": "pp512", "n_prompt": 512}), "pp512")
 
     def test_bytes_per_token_guards(self):
         self.assertIsNone(bytes_per_token(None, 100))

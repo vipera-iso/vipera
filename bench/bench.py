@@ -53,7 +53,7 @@ def parse_llama_bench_json(text: str) -> list[dict]:
     return data
 
 
-def test_label(r: dict) -> str:
+def row_label(r: dict) -> str:
     """Human label for one llama-bench row.
 
     llama-bench's JSON has no `test` field (only the markdown table does), so the
@@ -141,7 +141,7 @@ def run_bench(binary: str, model: str, *, ngl: int | None = None, threads: int |
     read_bytes = report.get("io", {}).get("read_bytes")
     report["results"] = [
         {
-            "test": test_label(r),
+            "test": row_label(r),
             "n_prompt": r.get("n_prompt"),
             "n_gen": r.get("n_gen"),
             "avg_ts": r.get("avg_ts"),
