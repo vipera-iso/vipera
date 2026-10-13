@@ -339,20 +339,48 @@ the modelled cost of not having a per-layer dense flag (see the blocker below). 
 first place in this repo where a modelled number and a real run of the same model on the same machine
 agree to 0.1%.
 
-**Blocker: the fork's trace cannot drive those commands — [open].** The trace patch records
+**Blocker: the fork's trace could not drive those commands — [fixed].** The trace patch records
 `ffn_moe_topk` per layer, so a trace carries **MoE layers only**: 26 for DeepSeek-V2-Lite, whose
-`block_count` is 27 with `leading_dense_block_count = 1`. vipera has no way to express a dense leading
-block, so `validate` compares 26 against `n_layers = 27` and `trace`, `prune` and `schedule --trace`
-all reject a trace captured from the real model with exit 2
-(`error: token 0: trace has 26 layers, architecture has 27`). The real routing is therefore still
-unusable on the one model in the repo — the loop that matters is not closed, and the profile alone
-does not close it. `arch/glm-4.5-air.toml` has carried the same unexpressible fact since the first
-review (`first_k_dense_replace = 1`, documented there as "a small, one-layer approximation"); this is
-that approximation reaching a command that cannot work around it.
+`block_count` is 27 with `leading_dense_block_count = 1`. vipera had no way to express a dense leading
+block, so `validate` compared 26 against `n_layers = 27` and `trace`, `prune` and `schedule --trace`
+all rejected a trace captured from the real model with exit 2
+(`error: token 0: trace has 26 layers, architecture has 27`). `arch/glm-4.5-air.toml` had carried the
+same unexpressible fact since the first review (`first_k_dense_replace = 1`, "a small, one-layer
+approximation").
+
+`Architecture` now has `leading_dense_layers` + `dense_inter`: the dense blocks keep their attention,
+gain one always-resident FFN, and contribute **no** router, shared experts or pool slots, so
+`moe_layers = n_layers - leading_dense_layers` (26 here) is the dimension a trace carries. The
+existing profiles are untouched by construction — `leading_dense_layers = 0` reduces every count to
+the old `n_layers * ...` — and that is checked, not asserted: all four pre-existing profiles, the
+OLMoE trace run and the GLM sweep are byte-identical before and after (133 lines of CLI output), and
+`dense_ffn` is absent from the parameter summary unless a profile has one.
+
+**The loop is now closed on the real model**, and both halves of it line up:
+
+| check | modelled | measured |
+|---|---|---|
+| decode speed, `sweep` on the profile | 20.04 tok/s | 20.03–20.2 tok/s |
+| decode speed, `schedule --trace` on the real 199-token trace | 22.35 tok/s | 20.2 tok/s |
+| routed/shared/dense/MLA/router parameters | within 0.02% of the file's own `n_elements` | — |
+
+The trace-driven figure is the honest one to quote first: it is 10% optimistic where the
+bandwidth-and-ALU-only model was 0.1% off, because it charges the measured 110 GFLOP/s in full while
+llama.cpp delivers ~90% of it. `schedule --trace` on that trace reports a **95.6% hit rate** at 3156
+slots, 804.2 MiB resident and 6.70 GiB of experts, and `prune` on the same routing says 1292 of 1664
+experts (77.6% of the pool) retain 95.3% of the routing mass.
+
+**The profile now matches the file's own tensors, which explains the residual.** Summing `n_elements`
+per component from the real GGUF gives routed 14.395B, shared 0.450B, dense FFN 0.067B, MLA 0.372B,
+router 0.003B — every one of them matching the profile to 0.00%. The remaining −1.3% on the total is
+one tensor the model does not count: the file carries **both** `token_embd.weight` and a separate
+`output.weight` (209.7M each, 1.34% of the model), and `params_summary` counts `vocab × hidden` once.
+That untied output head is still unmodelled — it is read once per token, so it affects modelled I/O
+as well as the total — and is left as an open item rather than quietly absorbed.
 
 | Status | Count | Items |
 |---|---|---|
-| fixed since the real-model run | 2 | the `~33 tok/s` ceiling, the disk-derived miss cost |
-| open since the real-model run | 2 | the ✅ RAM verdict reads as a process footprint when it is a file size; a real trace cannot drive `trace`/`prune`/`schedule --trace` |
+| fixed since the real-model run | 3 | the `~33 tok/s` ceiling, the disk-derived miss cost, the dense leading block blocking every trace command |
+| open since the real-model run | 2 | the ✅ RAM verdict reads as a process footprint when it is a file size; the untied output head is not counted (−1.3%) |
 | left for a doc sweep | 1 | 2 GB/s still quoted in FEASIBILITY §1/§4, DESIGN §152, OPTIMIZER §20 |
 | test suite | 190 | unchanged — this pass touched no code |

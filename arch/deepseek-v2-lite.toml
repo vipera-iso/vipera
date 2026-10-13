@@ -14,11 +14,18 @@
 # `stated_*` are the published 15.7B total / 2.4B active, used only to report the
 # calibration residual.
 #
-# Known approximation: the file declares `leading_dense_block_count = 1`, so
-# layer 0 is a dense FFN of width 10944 and vipera has no per-layer dense flag —
-# the same one-layer approximation `arch/glm-4.5-air.toml` documents, and the
-# reason the residual from the real model's own header is a few percent rather
-# than ~0. It is reported by `vipera arch`, not hidden here.
+# The one tensor still not counted: the file carries `token_embd.weight` *and* a
+# separate `output.weight` (209.7M each), while `params_summary` counts
+# `vocab * hidden` once. That untied head is the whole of the remaining -1.3%
+# total residual (report.md, "Since the real-model run"); everything else matches
+# the file's own `n_elements` to 0.00%.
+#
+# `leading_dense_block_count = 1`: block 0 is a dense FFN of width
+# `feed_forward_length = 10944` with no router. That is expressed here rather
+# than approximated — `leading_dense_layers` keeps its FFN resident and out of
+# the expert pool, and makes `moe_layers` 26, which is the number of layers a
+# routing trace carries (the fork patch records `ffn_moe_topk`, and a dense block
+# has none). Before the field existed this profile could not be built at all.
 name = "deepseek-v2-lite"
 n_layers = 27
 hidden = 2048
@@ -34,6 +41,8 @@ full_layers = 0
 mhc_streams = 0
 mtp_layers = 0
 vision_params = 0
+leading_dense_layers = 1
+dense_inter = 10944
 stated_total = 15700000000
 stated_active = 2400000000
 

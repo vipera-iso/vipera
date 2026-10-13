@@ -118,6 +118,11 @@ class ModelBytes:
     embeddings: int
     mtp: int
     vision: int
+    # Blocks that carry an expert pool. The dense leading blocks do not, so the
+    # pool is smaller than `len(layers)` for DeepSeek/GLM-shaped models; `None`
+    # keeps the old "every layer has experts" reading for anything that builds
+    # this without telling us.
+    moe_layers: int | None = None
 
     @property
     def resident_total(self) -> int:
@@ -126,7 +131,8 @@ class ModelBytes:
 
     @property
     def expert_pool(self) -> int:
-        return self.expert_each * len(self.layers) * self.n_experts
+        n = len(self.layers) if self.moe_layers is None else self.moe_layers
+        return self.expert_each * n * self.n_experts
 
 
 def model_bytes(
@@ -137,24 +143,33 @@ def model_bytes(
     if n_layers is not None:
         kinds = kinds[:n_layers]
     dense = arch.dense
+    # Leading blocks with a dense FFN route nothing: they keep their attention,
+    # and gain one always-resident FFN instead of a router, shared experts and an
+    # expert pool.
+    n_dense_blocks = min(arch.leading_dense_layers, len(kinds))
+    dense_ffn_bytes = int(3 * arch.hidden * arch.dense_inter * quant.expert_bytes)
     layers: list[LayerBytes] = []
     for i, kind in enumerate(kinds):
+        dense_block = i < n_dense_blocks
         layers.append(
             LayerBytes(
                 index=i,
                 kind=kind,
                 attention=int(arch.attn_params(kind) * quant.attention_bytes),
-                router=int(arch.router_params() * quant.other_bytes),
-                shared=int(arch.shared_expert_params() * quant.expert_bytes),
+                router=0 if dense_block else int(arch.router_params() * quant.other_bytes),
+                shared=0 if dense_block else int(arch.shared_expert_params() * quant.expert_bytes),
                 mhc=int(arch.mhc_params() * quant.other_bytes),
                 # Dense: the FFN is one always-needed block, not a routable pool.
-                ffn=int(arch.expert_params_each * quant.expert_bytes) if dense else 0,
+                ffn=dense_ffn_bytes if dense_block else (
+                    int(arch.expert_params_each * quant.expert_bytes) if dense else 0
+                ),
             )
         )
     return ModelBytes(
         layers=layers,
         expert_each=0 if dense else int(arch.expert_params_each * quant.expert_bytes),
         n_experts=1 if dense else (n_experts if n_experts is not None else arch.n_experts),
+        moe_layers=len(layers) - n_dense_blocks,
         embeddings=int(arch.vocab * arch.hidden * quant.other_bytes),
         mtp=int(arch.mtp_params() * quant.expert_bytes),
         vision=int(arch.vision_params * quant.other_bytes),
@@ -189,6 +204,9 @@ class Plan:
     expert_pool: int
     expert_spill: int
     total_experts: int
+    # Leading blocks with a dense FFN: the trace's layer `l` is block
+    # `l + leading_dense` for those models, and they use no cache slots.
+    leading_dense: int = 0
     warnings: list[str] = field(default_factory=list)
 
     @property
@@ -223,6 +241,12 @@ def plan_residency(
     n_experts = max(arch.top_k, int(round(arch.n_experts * opt.prune_experts)))
     mb = model_bytes(arch, quant, n_layers=n_layers, n_experts=n_experts)
     kinds = arch.layer_kinds()[:n_layers]
+    # The dense leading blocks have no experts, so they are not part of the pool
+    # and not part of the per-layer cache fraction a trace's ceiling is compared
+    # against (they are the layers just before the MoE blocks, so dropping layers
+    # from the end never removes them).
+    leading_dense = min(arch.leading_dense_layers, n_layers)
+    moe_n = n_layers - leading_dense
 
     # always-needed weights first; whatever is left over becomes the expert cache
     resident_total = mb.resident_total
@@ -239,7 +263,7 @@ def plan_residency(
     f_ram = resident_ram / resident_total if resident_total else 0.0
     f_disk = resident_spill / resident_total if resident_total else 0.0
 
-    total_experts = n_layers * n_experts
+    total_experts = moe_n * n_experts
     expert_pool = mb.expert_each * total_experts
     expert_spill = max(0, expert_pool - cache_bytes)
 
@@ -276,6 +300,7 @@ def plan_residency(
         expert_pool=expert_pool,
         expert_spill=expert_spill,
         total_experts=total_experts,
+        leading_dense=leading_dense,
         warnings=warnings,
     )
 
@@ -642,15 +667,19 @@ def simulate(
         """Seconds to read `nbytes` when they are spread across the tiers."""
         return nbytes * (f_vram / bw("vram") + f_ram / bw("ram") + f_disk / bw("disk")) / 1e9
 
+    # A trace carries one entry per MoE block, so the dense leading blocks are
+    # indexed out of it rather than into it.
+    leading_dense = plan.leading_dense
+    moe_n = n_layers - leading_dense
     if routing is None:
-        routing = _routing(n_layers, n_experts, arch.top_k, tokens + warmup, skew, seed)
+        routing = _routing(moe_n, n_experts, arch.top_k, tokens + warmup, skew, seed)
         routing_source = f"modelled_zipf(skew={skew},seed={seed})"
     else:
         routing_source = "trace"
 
     # Expert cache over (layer, expert). `hot` adds an admission filter and a
     # pinned hot set on top of LFU (see ExpertCache).
-    cache = ExpertCache(slots, cache_policy, n_layers=n_layers, alloc=cache_alloc)
+    cache = ExpertCache(slots, cache_policy, n_layers=moe_n, alloc=cache_alloc)
 
     # Per-layer accumulators, averaged over the measured (post-warmup) tokens.
     acc = [
@@ -681,7 +710,9 @@ def simulate(
             expert_disk = 0
             hits = 0
             misses = 0
-            for e in tok[i]:
+            # A dense leading block taps no expert: it costs its attention and its
+            # FFN (both in `lb.resident`) and takes no cache slots.
+            for e in tok[i - leading_dense] if i >= leading_dense else ():
                 if cache.access((i, e)):
                     hits += 1
                     expert_cached += mb.expert_each
@@ -745,6 +776,8 @@ def simulate(
         "architecture": {
             "name": arch.name,
             "n_layers": n_layers,
+            "moe_layers": moe_n,
+            "leading_dense_layers": leading_dense,
             "n_experts": n_experts,
             "top_k": arch.top_k,
             "kda_layers": kinds.count("kda"),

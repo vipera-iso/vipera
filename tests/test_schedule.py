@@ -3,7 +3,8 @@ import unittest
 
 from vipera.arch import Architecture
 from vipera.manifest import MIB, Target
-from vipera.schedule import Optimizations, Quant, model_bytes, simulate
+from vipera.schedule import Optimizations, Quant, model_bytes, plan_residency, simulate
+from vipera.trace import synth_trace
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 GLM = os.path.join(REPO_ROOT, "arch", "glm-5.3-flash.toml")
@@ -30,12 +31,89 @@ def roomy() -> Target:
     )
 
 
+def deepseek_shaped() -> Architecture:
+    """Small model with the shape that matters: one dense block, then five MoE."""
+    return Architecture(
+        name="ds", n_layers=6, hidden=64, vocab=128, n_experts=8, top_k=2,
+        moe_inter=32, n_shared_experts=2, shared_inter=32,
+        kda_layers=0, mla_layers=0, full_layers=6,
+        leading_dense_layers=1, dense_inter=192,
+    )
+
+
+class TestLeadingDenseBlock(unittest.TestCase):
+    """The dense leading block is resident and takes no cache slot."""
+
+    def test_dense_block_has_an_ffn_and_no_router(self):
+        mb = model_bytes(deepseek_shaped(), Quant.q4_experts())
+        self.assertGreater(mb.layers[0].ffn, 0)
+        self.assertEqual(mb.layers[0].router, 0)
+        self.assertEqual(mb.layers[0].shared, 0)
+        # the MoE blocks after it still route
+        self.assertGreater(mb.layers[1].router, 0)
+        self.assertEqual(mb.moe_layers, 5)
+
+    def test_expert_pool_excludes_the_dense_block(self):
+        a = deepseek_shaped()
+        mb = model_bytes(a, Quant.q4_experts())
+        self.assertEqual(mb.expert_pool, mb.expert_each * 5 * a.n_experts)
+        self.assertLess(mb.expert_pool, mb.expert_each * a.n_layers * a.n_experts)
+
+    def test_plan_meters_experts_over_moe_layers_only(self):
+        a = deepseek_shaped()
+        plan = plan_residency(a, gtx1650(), quant=Quant.q4_experts())
+        self.assertEqual(plan.leading_dense, 1)
+        self.assertEqual(plan.total_experts, 5 * a.n_experts)
+
+    def test_trace_of_moe_layers_only_is_accepted(self):
+        a = deepseek_shaped()
+        routing = synth_trace(
+            3, n_layers=a.moe_layers, n_experts=a.n_experts, top_k=a.top_k, seed=1
+        )
+        r = simulate(
+            a, gtx1650(), quant=Quant.q4_experts(), tokens=3, warmup=0, routing=routing
+        )
+        # The dense block taps no expert: no hits, no misses, no expert bytes.
+        self.assertEqual(r.layers[0].hits + r.layers[0].misses, 0)
+        self.assertEqual(r.manifest["layers"][0]["disk_bytes_per_token"], 0)
+        # Its FFN is still read every token, as resident bytes.
+        self.assertGreater(r.layers[0].read_bytes, 0)
+        # The MoE blocks do use the cache.
+        self.assertGreater(r.layers[1].hits + r.layers[1].misses, 0)
+
+    def test_synthetic_routing_also_covers_moe_layers_only(self):
+        # No trace given: the modelled Zipf routing must match the trace shape or
+        # the simulation would index past the end of it.
+        a = deepseek_shaped()
+        r = simulate(a, gtx1650(), quant=Quant.q4_experts(), tokens=2, warmup=0, seed=1)
+        self.assertEqual(r.steps, 2)
+        self.assertEqual(r.manifest["architecture"]["moe_layers"], 5)
+
+    def test_a_trace_with_the_wrong_layer_count_is_rejected(self):
+        from vipera.trace import TraceError, validate
+
+        a = deepseek_shaped()
+        routing = synth_trace(
+            2, n_layers=a.n_layers, n_experts=a.n_experts, top_k=a.top_k, seed=1
+        )
+        with self.assertRaises(TraceError):
+            validate(routing, n_layers=a.moe_layers, n_experts=a.n_experts)
+
+
 class TestModelBytes(unittest.TestCase):
     def test_expert_size_scales_with_quant(self):
         a = glm()
         fp8 = model_bytes(a, Quant.fp8())
         q4 = model_bytes(a, Quant.q4_experts())
         self.assertAlmostEqual(fp8.expert_each, q4.expert_each * 2, delta=2)
+
+    def test_a_profile_without_a_dense_block_is_unchanged(self):
+        # Every pre-existing profile has leading_dense_layers = 0, so the pool is
+        # still every layer's experts.
+        a = glm()
+        mb = model_bytes(a, Quant.fp8())
+        self.assertEqual(mb.moe_layers, a.n_layers)
+        self.assertEqual(mb.expert_pool, mb.expert_each * a.n_layers * a.n_experts)
 
     def test_resident_excludes_routed_experts(self):
         a = glm()

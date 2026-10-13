@@ -1,4 +1,5 @@
 import os
+import tempfile
 import unittest
 
 from vipera.arch import Architecture
@@ -6,6 +7,20 @@ from vipera.arch import Architecture
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 GLM = os.path.join(REPO_ROOT, "arch", "glm-5.3-flash.toml")
 LLAMA = os.path.join(REPO_ROOT, "arch", "llama3-70b.toml")
+DEEPSEEK = os.path.join(REPO_ROOT, "arch", "deepseek-v2-lite.toml")
+
+
+def profile(**overrides) -> str:
+    """Write a minimal profile to a temp file; caller unlinks it."""
+    body = dict(
+        name="t", n_layers=4, hidden=16, vocab=16, n_experts=4, top_k=1,
+        moe_inter=8, full_layers=4,
+    )
+    body.update(overrides)
+    text = "\n".join(f"{k} = {v!r}" for k, v in body.items()) + "\n"
+    with tempfile.NamedTemporaryFile("w", suffix=".toml", delete=False) as f:
+        f.write(text)
+    return f.name
 
 
 def toy() -> Architecture:
@@ -109,6 +124,88 @@ class TestDenseProfile(unittest.TestCase):
         # 8 KV heads of 128 dims -> 2*8*128 = 2048 bytes/token/layer at fp16
         self.assertEqual(a.full.kv_bytes_per_token(2.0), 2 * 8 * 128 * 2)
         self.assertGreater(a.kv_bytes(4096), a.kv_bytes(1024))
+
+
+class TestLeadingDenseBlocks(unittest.TestCase):
+    """A dense leading block: no router, no experts, one always-read FFN."""
+
+    def arch(self) -> Architecture:
+        return Architecture(
+            name="dl", n_layers=6, hidden=32, vocab=64, n_experts=4, top_k=1,
+            moe_inter=16, n_shared_experts=1, shared_inter=16,
+            kda_layers=0, mla_layers=0, full_layers=6,
+            leading_dense_layers=2, dense_inter=96,
+        )
+
+    def test_moe_layers_is_the_trace_dimension(self):
+        a = self.arch()
+        self.assertEqual(a.n_layers, 6)
+        self.assertEqual(a.moe_layers, 4)
+
+    def test_dense_blocks_carry_no_router_or_experts(self):
+        a = self.arch()
+        s = a.params_summary()
+        self.assertEqual(s["routed_experts"], 4 * a.routed_expert_params())
+        self.assertEqual(s["shared_experts"], 4 * a.shared_expert_params())
+        self.assertEqual(s["router"], 4 * a.router_params())
+        self.assertEqual(s["dense_ffn"], 2 * 3 * 32 * 96)
+
+    def test_dense_ffn_is_active_every_token(self):
+        # The dense FFN is read in full; only top_k of each layer's experts are.
+        a = self.arch()
+        s = a.params_summary()
+        self.assertEqual(
+            a.active_params(),
+            s["routed_experts"] * a.top_k // a.n_experts
+            + s["shared_experts"] + s["dense_ffn"] + s["attention_full"]
+            + s["router"] + s["residual_mhc"] + s["embeddings"],
+        )
+
+    def test_no_dense_block_is_exactly_the_old_arithmetic(self):
+        a = self.arch()
+        plain = Architecture(
+            name=a.name, n_layers=a.n_layers, hidden=a.hidden, vocab=a.vocab,
+            n_experts=a.n_experts, top_k=a.top_k, moe_inter=a.moe_inter,
+            n_shared_experts=a.n_shared_experts, shared_inter=a.shared_inter,
+            kda_layers=0, mla_layers=0, full_layers=a.full_layers,
+        )
+        self.assertEqual(plain.moe_layers, plain.n_layers)
+        self.assertEqual(
+            plain.params_summary()["routed_experts"],
+            plain.n_layers * plain.routed_expert_params(),
+        )
+        self.assertNotIn("dense_ffn", plain.params_summary())
+
+    def test_dense_block_without_a_width_is_rejected(self):
+        path = profile(leading_dense_layers=1)
+        self.addCleanup(os.unlink, path)
+        with self.assertRaises(ValueError) as cm:
+            Architecture.from_toml(path)
+        self.assertIn("dense_inter", str(cm.exception))
+
+    def test_dense_block_beyond_the_model_is_rejected(self):
+        path = profile(leading_dense_layers=5, dense_inter=32)
+        self.addCleanup(os.unlink, path)
+        with self.assertRaises(ValueError):
+            Architecture.from_toml(path)
+
+    def test_an_acceptable_dense_block_loads(self):
+        path = profile(leading_dense_layers=1, dense_inter=32)
+        self.addCleanup(os.unlink, path)
+        a = Architecture.from_toml(path)
+        self.assertEqual(a.moe_layers, 3)
+        self.assertEqual(a.dense_inter, 32)
+
+    def test_shipped_deepseek_profile_expresses_its_dense_block(self):
+        a = Architecture.from_toml(DEEPSEEK)
+        self.assertEqual(a.n_layers, 27)
+        self.assertEqual(a.leading_dense_layers, 1)
+        self.assertEqual(a.moe_layers, 26)
+        # 26 MoE blocks of 64 experts is what the trace carries and what it meters
+        self.assertEqual(a.params_summary()["routed_experts"], 26 * a.routed_expert_params())
+        cal = a.calibrate(a.stated_total, a.stated_active)
+        self.assertLess(abs(cal["total_error"]), 0.02)
+        self.assertLess(abs(cal["active_error"]), 0.03)
 
 
 if __name__ == "__main__":

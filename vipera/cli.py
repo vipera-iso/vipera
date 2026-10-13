@@ -102,6 +102,9 @@ def cmd_arch(args: argparse.Namespace) -> int:
     kinds = arch.layer_kinds()
     print(f"architecture  {arch.name}")
     print(f"layers        {arch.n_layers}  ({kinds.count('kda')} KDA + {kinds.count('mla')} MLA)")
+    if arch.leading_dense_layers:
+        print(f"                {arch.leading_dense_layers} leading dense block(s); "
+              f"{arch.moe_layers} MoE, so a routing trace has {arch.moe_layers} layers/token")
     print(f"experts       {arch.n_experts}  top-{arch.top_k}")
     print(f"hidden        {arch.hidden}   moe_inter {arch.moe_inter}")
     print()
@@ -144,7 +147,9 @@ def cmd_schedule(args: argparse.Namespace) -> int:
     if args.trace:
         limit = None if tokens is None else tokens + 2
         routing = load_trace(args.trace, limit=limit)
-        validate_trace(routing, n_layers=arch.n_layers, n_experts=arch.n_experts,
+        # A trace has one entry per MoE block, not per block: the dense leading
+        # blocks have no router for the fork patch to record.
+        validate_trace(routing, n_layers=arch.moe_layers, n_experts=arch.n_experts,
                        top_k=arch.top_k)
     result = simulate(
         arch, target,
@@ -209,7 +214,7 @@ def cmd_schedule(args: argparse.Namespace) -> int:
 def cmd_trace(args: argparse.Namespace) -> int:
     arch = Architecture.from_toml(args.arch)
     routing = load_trace(args.trace)
-    validate_trace(routing, n_layers=arch.n_layers, n_experts=arch.n_experts, top_k=arch.top_k)
+    validate_trace(routing, n_layers=arch.moe_layers, n_experts=arch.n_experts, top_k=arch.top_k)
 
     # Cache size: derived from the *same* arithmetic `schedule` uses when a
     # target is given, so the ceiling here is at the size the simulation will
@@ -254,7 +259,7 @@ def cmd_prune(args: argparse.Namespace) -> int:
     """How much of the routing mass survives a given expert sparsity?"""
     arch = Architecture.from_toml(args.arch)
     routing = load_trace(args.trace)
-    validate_trace(routing, n_layers=arch.n_layers, n_experts=arch.n_experts,
+    validate_trace(routing, n_layers=arch.moe_layers, n_experts=arch.n_experts,
                    top_k=arch.top_k)
     plan = plan_from_trace(routing, n_experts=arch.n_experts,
                            target_mass=args.target_mass)
@@ -293,7 +298,7 @@ def cmd_prune_gated(args: argparse.Namespace) -> int:
     """P4: prune experts only where the gate passes, roll back the layers that don't."""
     arch = Architecture.from_toml(args.arch)
     routing = load_trace(args.trace)
-    validate_trace(routing, n_layers=arch.n_layers, n_experts=arch.n_experts,
+    validate_trace(routing, n_layers=arch.moe_layers, n_experts=arch.n_experts,
                    top_k=arch.top_k)
 
     drift = None

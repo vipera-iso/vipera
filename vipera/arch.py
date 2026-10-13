@@ -107,6 +107,13 @@ class Architecture:
     mhc_streams: int = 4
     mtp_layers: int = 1
     vision_params: int = 1_000_000_000
+    # Leading blocks whose FFN is dense. They route nothing, so a routing trace
+    # has `n_layers - leading_dense_layers` entries per token: the fork patch
+    # records `ffn_moe_topk`, which exists only where there is a router. DeepSeek
+    # and GLM both declare `first_k_dense_replace = 1`. `dense_inter` is that
+    # block's FFN width and must be set whenever the count is non-zero.
+    leading_dense_layers: int = 0
+    dense_inter: int = 0
     # Published headline numbers, only used to report the calibration residual.
     stated_total: int = 0
     stated_active: int = 0
@@ -118,6 +125,15 @@ class Architecture:
     def dense(self) -> bool:
         """A dense model has no routed experts: one FFN per layer, always read."""
         return self.n_experts <= 1
+
+    @property
+    def moe_layers(self) -> int:
+        """Blocks that route experts — the layer dimension a routing trace has."""
+        return self.n_layers - self.leading_dense_layers
+
+    def dense_ffn_params(self) -> int:
+        """gate + up + down for the leading dense blocks; no router, no experts."""
+        return self.leading_dense_layers * 3 * self.hidden * self.dense_inter
 
     # -- layer structure ---------------------------------------------------
 
@@ -190,14 +206,20 @@ class Architecture:
         n_mla = kinds.count("mla")
         n_kda = kinds.count("kda")
         n_full = kinds.count("full")
-        routed = self.n_layers * self.routed_expert_params()
+        # Experts, shared experts and routers exist only on the MoE blocks; the
+        # dense leading blocks carry one always-read FFN instead. With
+        # `leading_dense_layers = 0` (every profile before this) the counts reduce
+        # to the old `n_layers * ...` exactly, so no existing number moves.
+        routed = self.moe_layers * self.routed_expert_params()
+        dense = {"dense_ffn": self.dense_ffn_params()} if self.leading_dense_layers else {}
         return {
             "routed_experts": routed,
-            "shared_experts": self.n_layers * self.shared_expert_params(),
+            "shared_experts": self.moe_layers * self.shared_expert_params(),
+            **dense,
             "attention_kda": n_kda * self.kda.params_per_layer(self.hidden),
             "attention_mla": n_mla * self.mla.params_per_layer(self.hidden),
             "attention_full": n_full * self.full.params_per_layer(self.hidden),
-            "router": self.n_layers * self.router_params(),
+            "router": self.moe_layers * self.router_params(),
             "residual_mhc": self.n_layers * self.mhc_params(),
             "embeddings": self.vocab * self.hidden,
             "mtp": self.mtp_params(),
@@ -225,6 +247,7 @@ class Architecture:
         return (
             routed_active
             + s["shared_experts"]
+            + s.get("dense_ffn", 0)
             + s["attention_kda"]
             + s["attention_mla"]
             + s["attention_full"]
@@ -265,9 +288,25 @@ class Architecture:
         mla_d = d.get("mla", {})
         kda_d = d.get("kda", {})
         full_d = d.get("full", {})
+        leading_dense = int(d.get("leading_dense_layers", 0))
+        dense_inter = int(d.get("dense_inter", 0))
+        n_layers = int(d["n_layers"])
+        # Both mistakes are silent in the model (a dense block modelled as routed
+        # inflates the expert pool; a trace then fails to validate), so reject them
+        # where the profile is read.
+        if not 0 <= leading_dense <= n_layers:
+            raise ValueError(
+                f"leading_dense_layers({leading_dense}) must be between 0 and "
+                f"n_layers({n_layers})"
+            )
+        if leading_dense and dense_inter <= 0:
+            raise ValueError(
+                f"leading_dense_layers({leading_dense}) needs dense_inter > 0 "
+                "(the dense block's FFN width), or its weights are uncounted"
+            )
         return cls(
             name=d.get("name", "unnamed"),
-            n_layers=int(d["n_layers"]),
+            n_layers=n_layers,
             hidden=int(d["hidden"]),
             vocab=int(d["vocab"]),
             n_experts=int(d["n_experts"]),
@@ -281,6 +320,8 @@ class Architecture:
             mhc_streams=int(d.get("mhc_streams", 4)),
             mtp_layers=int(d.get("mtp_layers", 1)),
             vision_params=int(d.get("vision_params", 0)),
+            leading_dense_layers=leading_dense,
+            dense_inter=dense_inter,
             stated_total=int(d.get("stated_total", 0)),
             stated_active=int(d.get("stated_active", 0)),
             mla=MLA(
