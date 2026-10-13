@@ -2,11 +2,11 @@
   "ok": true,
   "exit_code": 0,
   "command": [
-    "/home/user/dev/llama.cpp/build/bin/llama-perplexity",
+    "<llama.cpp>/build/bin/llama-perplexity",
     "-m",
     "/tmp/vipera-capture/olmoe-q4km.gguf",
     "-f",
-    "/home/user/dev/llama.cpp/wikitext-2-raw/wiki.test.raw",
+    "<llama.cpp>/wikitext-2-raw/wiki.test.raw",
     "-c",
     "512",
     "--chunks",
