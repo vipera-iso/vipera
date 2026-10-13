@@ -481,6 +481,18 @@ def format_compare(report: dict, *, manifest_source: str,
     lines.append(f"manifest cmd  {' '.join(man['command'])}")
     lines.append("")
     header = f"{'metric':<16}{'baseline':>14}{'manifest':>14}{'delta':>14}"
+
+    failed = [(n, r) for n, r in (("baseline", base), ("manifest", man))
+              if not r.get("ok", True)]
+    if failed:
+        lines.append("!! COMPARISON INVALID — no speedup can be trusted:")
+        for name, r in failed:
+            reason = r.get("error") or f"exit code {r.get('exit_code')}"
+            lines.append(f"   {name} did not complete: {reason}")
+        lines.append("   (an OOM kill looks like this too — check that nothing else was")
+        lines.append("    benchmarking concurrently; this box has 15 GiB and no swap)")
+        lines.append("")
+
     lines.append(header)
     lines.append("-" * len(header))
 
@@ -509,7 +521,12 @@ def format_compare(report: dict, *, manifest_source: str,
                  f"{(f'{m_disk / MIB:.0f} MiB' if m_disk is not None else 'n/a'):>14}"
                  f"{(f'{d_disk:+.0f} MiB' if d_disk is not None else ''):>14}")
 
-    if "generation_speedup" in delta:
+    if failed:
+        # Deliberately suppress the headline number: an `n/a` cell is easy to
+        # skim past, a missing verdict is not.
+        lines.append("")
+        lines.append("manifest / baseline generation speedup: NOT COMPUTED (run failed)")
+    elif "generation_speedup" in delta:
         lines.append("")
         lines.append(f"manifest / baseline generation speedup: {delta['generation_speedup']:.2f}x")
     for name, r in (("baseline", base), ("manifest", man)):

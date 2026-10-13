@@ -273,6 +273,42 @@ class TestRunCLI(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertIn("2.00x", out)
 
+    def test_compare_banner_when_one_side_dies(self):
+        # A binary that dies only on the manifest side (the prefetch env is set
+        # there and nowhere else) is the shape of a real failure: the baseline
+        # numbers still print, so a table full of plausible cells can hide the
+        # fact that no comparison happened. The banner has to say so outright,
+        # and the speedup line must not be computed.
+        binary = os.path.join(self.tmp.name, "die-on-manifest-cli")
+        with open(binary, "w") as f:
+            f.write("#!/bin/sh\n")
+            f.write('if [ -n "$LLAMA_MOE_PREFETCH" ]; then exit 137; fi\n')
+            f.write('echo "[ Prompt: 1.0 t/s | Generation: 5.0 t/s ]"\n')
+        os.chmod(binary, os.stat(binary).st_mode | stat.S_IXUSR)
+        trace = os.path.join(self.tmp.name, "trace.jsonl")
+        save_trace(trace, synth_trace(20, n_layers=2, n_experts=4, top_k=2, seed=0))
+        outdir = os.path.join(self.tmp.name, "pf")
+        code, out, _ = self._run([
+            "run", self.path, "--target", HW, "--binary", binary, "--compare",
+            "--trace", trace, "--prefetch-out", outdir,
+        ])
+        self.assertEqual(code, 1)
+        self.assertIn("COMPARISON INVALID", out)
+        self.assertIn("manifest did not complete", out)
+        # the headline number is suppressed, not merely footnoted
+        self.assertIn("NOT COMPUTED", out)
+        self.assertNotIn("speedup: 0.00x", out)
+
+    def test_compare_no_banner_when_both_succeed(self):
+        # The banner must stay silent on a good run, or it stops meaning anything.
+        binary = _fake_llama_cli(self.tmp.name)
+        code, out, _ = self._run([
+            "run", self.path, "--target", HW, "--binary", binary, "--compare",
+        ])
+        self.assertEqual(code, 0)
+        self.assertNotIn("COMPARISON INVALID", out)
+        self.assertIn("generation speedup: 1.00x", out)
+
     def test_a_failing_binary_changes_the_exit_code(self):
         binary = os.path.join(self.tmp.name, "bad-cli")
         with open(binary, "w") as f:
