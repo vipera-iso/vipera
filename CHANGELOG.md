@@ -13,6 +13,22 @@ this project intends to follow [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- **`vipera run` — the runtime half** — reads a residency manifest, maps it onto
+  llama.cpp flags (`--n-cpu-moe`, `--moe-cache-mib`, `-ngl`, `-ctk`/`-ctv`),
+  launches the binary and measures throughput, peak RSS and disk read bytes. It
+  refuses to silently approximate what llama.cpp cannot do: a GPU-less build and
+  a disk-spilling plan are both reported instead of faked.
+- **`vipera run --compare`** — runs plain llama.cpp defaults and the
+  manifest-driven command back to back and reports the difference, so the
+  "beats the default" claim is measured against the real baseline.
+- **Expert prefetch wired into the runner** — `vipera run --trace` learns the
+  prefetch table from a routing trace and arms the MoE prefetch patch
+  (`LLAMA_MOE_PREFETCH`) in one step. The patch is driven through its env vars and
+  is not forked; a binary without it is detected and reported. The table logic
+  moved to `vipera/prefetch.py`, with `bench/prefetch_table.py` kept as its CLI.
+- **Vulkan build path** — `vipera run` can target a `GGML_VULKAN` llama.cpp build
+  so the manifest's VRAM placement is actually exercised on a machine with no
+  CUDA toolkit.
 - **GGUF analyzer and residency planner** — reads a model's header and tensor
   descriptors (never the tensor data) and splits bytes into always-resident
   versus routable-expert buckets.

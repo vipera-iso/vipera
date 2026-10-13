@@ -4,6 +4,7 @@
     python -m vipera plan     <model.gguf> --target hw/gtx1650.toml [--out DIR]
     python -m vipera arch     arch/glm-5.3-flash.toml
     python -m vipera schedule arch/glm-5.3-flash.toml --target hw/gtx1650.toml [--out DIR]
+    python -m vipera run      <model.gguf> --target hw/gtx1650.toml [--manifest M] [--dry-run]
 """
 
 from __future__ import annotations
@@ -12,6 +13,7 @@ import argparse
 import json
 import os
 import sys
+import tempfile
 import tomllib
 
 from . import __version__
@@ -32,6 +34,21 @@ from .prune import (
     gated_prune,
     mass_curve,
     plan_from_trace,
+)
+from .prefetch import build_table as build_prefetch_table, write_table as write_prefetch_table
+from .run import (
+    PREFETCH_ENV,
+    build_command,
+    compare as compare_runs,
+    default_binary,
+    detect_gpu_backend,
+    format_compare,
+    format_report,
+    load_manifest,
+    plan_flags,
+    resolve_binary,
+    run as run_model,
+    supports_prefetch,
 )
 from .scoring import local_llm_16gb_score
 from .trace import (
@@ -396,6 +413,126 @@ def cmd_score(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_run(args: argparse.Namespace) -> int:
+    """Run the model for real, using a residency manifest to pick the flags.
+
+    This is the half of vipera that executes instead of modelling: the manifest
+    that `plan`/`schedule` produce is read back and translated into a llama.cpp
+    command line, which is then actually run and measured.
+    """
+    gguf = read_gguf(args.model)
+    inv = analyze(gguf)
+
+    if args.manifest:
+        manifest = load_manifest(args.manifest)
+        manifest_source = args.manifest
+    else:
+        if not args.target:
+            print("error: `run` needs --target or --manifest", file=sys.stderr)
+            return 2
+        target = Target.from_toml(args.target)
+        result = plan(inv, target)
+        manifest = result.manifest
+        manifest_source = f"computed from {os.path.basename(args.model)} + {target.name}"
+        for w in result.warnings:
+            print(f"warning: {w}", file=sys.stderr)
+
+    binary = resolve_binary(args.binary or default_binary())
+    gpu = detect_gpu_backend(binary)
+    flags = plan_flags(manifest, gpu=gpu, n_layers=inv.n_layers)
+
+    prefetch_env, prefetch_summary = _prefetch_env(args)
+    if prefetch_env and not supports_prefetch(binary):
+        # The fork patch is what reads LLAMA_MOE_PREFETCH; an unpatched llama.cpp
+        # ignores the variable and prefetches nothing, so say so rather than let
+        # the run look like a prefetch that did not help.
+        print(f"warning: {os.path.basename(binary)} has no MoE prefetch support; "
+              f"{PREFETCH_ENV} will be ignored", file=sys.stderr)
+
+    cmd = build_command(
+        binary, args.model, flags,
+        context=args.context, n_predict=args.n_predict, prompt=args.prompt,
+        threads=args.threads, extra=args.llama_args or None,
+        prefetch=bool(prefetch_env),
+    )
+    if args.dry_run:
+        dry = {"ok": True, "exit_code": 0, "elapsed_s": 0.0, "command": cmd}
+        print(format_report(dry, flags=flags, manifest_source=manifest_source))
+        if prefetch_summary:
+            print(f"prefetch      {prefetch_summary}")
+            for k, v in prefetch_env.items():
+                print(f"  {k}={v}")
+        return 0
+
+    if args.compare:
+        report = compare_runs(
+            binary, args.model, flags,
+            context=args.context, n_predict=args.n_predict, prompt=args.prompt,
+            threads=args.threads, extra=args.llama_args or None, timeout=args.timeout,
+            extra_env=prefetch_env or None,
+        )
+        print(format_compare(report, manifest_source=manifest_source,
+                             prefetch=prefetch_summary))
+        ok = report["manifest"]["ok"] and report["baseline"]["ok"]
+    else:
+        report = run_model(
+            binary, args.model, flags,
+            context=args.context, n_predict=args.n_predict, prompt=args.prompt,
+            threads=args.threads, extra=args.llama_args or None, timeout=args.timeout,
+            extra_env=prefetch_env or None,
+        )
+        print(format_report(report, flags=flags, manifest_source=manifest_source))
+        if prefetch_summary:
+            print(f"prefetch      {prefetch_summary}")
+        ok = report["ok"]
+
+    if args.json_path:
+        os.makedirs(os.path.dirname(os.path.abspath(args.json_path)), exist_ok=True)
+        with open(args.json_path, "w") as f:
+            json.dump(report, f, indent=2)
+            f.write("\n")
+        print(f"report written to {args.json_path}")
+    return 0 if ok else 1
+
+
+def _prefetch_env(args: argparse.Namespace) -> tuple[dict[str, str], str | None]:
+    """Build the env that arms the MoE prefetch patch, from a trace or a table.
+
+    The prefetch patch is not part of upstream llama.cpp, so nothing here edits or
+    rebuilds it: vipera learns the table, writes it, and hands the path over in
+    `LLAMA_MOE_PREFETCH`, which is exactly how `bench/prefetch_table.py` documents
+    the workflow. The runner just removes the manual step.
+    """
+    table_path = args.prefetch_table
+    summary: str | None = None
+    if args.trace:
+        routing = load_trace(args.trace)
+        table = build_prefetch_table(
+            routing, target_mass=args.prefetch_mass, top=args.prefetch_top,
+        )
+        if not table_path:
+            out_dir = args.prefetch_out or tempfile.mkdtemp(prefix="vipera-prefetch-")
+            os.makedirs(out_dir, exist_ok=True)
+            table_path = os.path.join(out_dir, "prefetch.txt")
+        stats = write_prefetch_table(
+            table_path, table, source=args.trace, tokens=len(routing),
+            target_mass=args.prefetch_mass,
+        )
+        summary = (f"{table_path} ({stats['layers']} layers, {stats['experts']} experts, "
+                   f"max {stats['max_per_layer']}/layer)")
+    elif table_path:
+        summary = table_path
+
+    env: dict[str, str] = {}
+    if table_path:
+        env[PREFETCH_ENV] = table_path
+        if args.prefetch_depth is not None:
+            env["LLAMA_MOE_PREFETCH_DEPTH"] = str(args.prefetch_depth)
+        if args.prefetch_top:
+            env["LLAMA_MOE_PREFETCH_TOP"] = str(args.prefetch_top)
+    return env, summary
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="vipera", description=__doc__)
     p.add_argument("--version", action="version", version=f"vipera {__version__}")
@@ -490,12 +627,52 @@ def build_parser() -> argparse.ArgumentParser:
     sw.add_argument("--target", required=True, help="hardware profile (TOML)")
     sw.add_argument("--context", type=int, default=2048)
     sw.set_defaults(func=cmd_sweep)
+
+    rn = sub.add_parser("run",
+                        help="run a model through llama.cpp using a vipera residency manifest")
+    rn.add_argument("model")
+    rn.add_argument("--target", help="hardware profile (TOML); required unless --manifest is given")
+    rn.add_argument("--manifest", help="reuse an existing *.vipera.json instead of planning")
+    rn.add_argument("--binary", help="llama-cli executable (default: ~/dev/llama.cpp/build/bin/llama-cli)")
+    rn.add_argument("--context", type=int, default=2048)
+    rn.add_argument("--n-predict", type=int, default=32)
+    rn.add_argument("--prompt", default="The capital of France is")
+    rn.add_argument("--threads", type=int, default=None)
+    rn.add_argument("--timeout", type=float, default=None, help="kill the run after this many seconds")
+    rn.add_argument("--dry-run", action="store_true",
+                    help="print the mapped command without running it")
+    rn.add_argument("--compare", action="store_true",
+                    help="also run plain llama.cpp defaults and report the difference")
+    rn.add_argument("--trace", help="routing trace (.jsonl) to learn a prefetch table from")
+    rn.add_argument("--prefetch-table", help="use an existing prefetch table instead of learning one")
+    rn.add_argument("--prefetch-out", help="directory to write the learned prefetch table into")
+    rn.add_argument("--prefetch-mass", type=float, default=0.95,
+                    help="routing mass the prefetch table must cover (default 0.95)")
+    rn.add_argument("--prefetch-depth", type=int, default=None,
+                    help="layers ahead to prefetch (patch default 1)")
+    rn.add_argument("--prefetch-top", type=int, default=0,
+                    help="cap candidates per layer (0 = the whole keep-set)")
+    rn.add_argument("--json", dest="json_path", help="write the run report here")
+    rn.set_defaults(func=cmd_run, llama_args=[])
     return p
 
 
 def main(argv: list[str] | None = None) -> int:
+    argv = list(sys.argv[1:] if argv is None else argv)
+    # `--` hands everything after it straight to llama-cli, and only `run` takes
+    # pass-through flags — elsewhere a stray `--` is a usage error, not silence.
+    llama_args: list[str] = []
+    if "--" in argv:
+        i = argv.index("--")
+        llama_args = argv[i + 1:]
+        argv = argv[:i]
     parser = build_parser()
     args = parser.parse_args(argv)
+    if getattr(args, "cmd", None) == "run":
+        args.llama_args = llama_args
+    elif llama_args:
+        print("error: `--` pass-through flags are only supported by `vipera run`", file=sys.stderr)
+        return 2
     try:
         return args.func(args)
     except (GGUFError, TraceError) as e:

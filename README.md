@@ -10,16 +10,20 @@
 `vipera` is not another runtime. It is **a layer between the model file and the runtime**: it takes an
 artifact (GGUF/safetensors), **rewrites it into an optimized artifact**, and emits a *manifest* that
 tells the runtime what lives where (VRAM/RAM/disk), in what load order, and which experts are "hot".
+`vipera run` then **drives an existing runtime** (llama.cpp) from that manifest — it executes the
+model instead of only predicting its speed, without reimplementing a runtime.
 
 Inspired by [FreeToken](https://github.com/FlashML-org/FreeToken) (MoE serving on consumer hardware)
 and [AirLLM](https://github.com/lyogavin/airllm) (layer-wise streaming) — but both assume plenty of
 GPU/RAM. `vipera` targets the hard spot: **the model fits in RAM yet overflows VRAM, on a slow disk**.
 
-> Status: **stage 2 implemented** — stage 1 (analyzer + residency planner) plus a per-layer
-> architecture model and a bandwidth/cache-aware streaming scheduler that models decode speed and
-> spits out a residency manifest. Nothing touches tensor data or executes a model yet. Bold numbers
-> are measured on the target machine; FreeToken/AirLLM figures are **as published by them**;
-> scheduler outputs are **modelled**, and say so.
+> Status: **stage 3 — it runs.** stage 1 (analyzer + residency planner) and stage 2 (per-layer
+> architecture model + a bandwidth/cache-aware streaming scheduler) plan a residency manifest, and
+> `vipera run` now **executes the model for real**: it reads that manifest back, translates it into a
+> llama.cpp command line, launches the binary and measures throughput, peak RSS and disk reads. The
+> tensor data is not rewritten yet and vipera does not reimplement a runtime — it drives the
+existing one from its own manifest — but the layer no longer only predicts. Everything `schedule`
+> reports is still **modelled** and says so; `run`'s numbers are measured.
 
 ---
 
@@ -110,6 +114,13 @@ python3 -m vipera schedule arch/llama3-70b.toml --target hw/llama70b-pc.toml --q
 # the LOCAL-LLM-16GB instance: 70B dense on a 16 GB unified-memory laptop
 python3 -m vipera score arch/llama3-70b.toml --target hw/laptop16-igpu.toml --context 32768 --quality 99 --power 65
 
+# run the model for real, with the manifest choosing the flags, and measure it
+python3 -m vipera run models/deepseek-v2-lite-Q4_K_M.gguf \
+    --target hw/gtx1650.toml --context 1024 --n-predict 32
+# reuse a manifest instead of re-planning, or print the command without running it
+python3 -m vipera run models/deepseek-v2-lite-Q4_K_M.gguf \
+    --manifest out/deepseek-v2-lite-Q4_K_M.vipera.json --dry-run
+
 # tests
 python3 -m unittest discover -s tests -t .
 ```
@@ -178,9 +189,127 @@ What it computes today:
 | `trace` | a routing trace's skew (entropy) and the **static-cache hit ceiling at the size the schedule will actually use** |
 | `prune` | the per-layer keep-set that retains a target routing mass, next to what uniform pruning would keep |
 | `schedule` | modelled bytes/token and tok/s, plus the cache hit rate **and the ceiling at the same cache size** (`policy / ceiling` ratio) |
+| `run` | a real llama.cpp run driven by a manifest: the mapped flags, throughput, peak RSS and disk read bytes |
 
 The planner is **size-driven** for now: it cannot rank *which* experts are hot until routing traces
 from Phase 2 exist, and it says so in `placement.expert_order_pending_trace`.
+
+## Running a model (`vipera run`)
+
+Everything above decides *where weights should live*. `vipera run` is the half that actually
+**executes** — it takes a manifest, maps it onto llama.cpp flags, launches the binary, and measures
+what happened. vipera drives the existing runtime from its own manifest; it does not reimplement one.
+
+The mapping is deliberately small and inspectable:
+
+| Manifest field | llama.cpp flag |
+|---|---|
+| every MoE layer's experts in RAM | `--n-cpu-moe <n_layers>` |
+| `expert_cache_vram_bytes` | `--moe-cache-mib <MiB>` |
+| `resident_vram_bytes` (attention/norms) | `-ngl <n_layers>` |
+| `kv_cache.type_k` / `type_v` | `-ctk` / `-ctv` |
+
+Two things it will **not** pretend to do: a build with no GPU backend cannot honour VRAM placement
+(so it warns and runs `-ngl 0`), and llama.cpp has no per-expert disk streaming, so a plan with
+experts spilled to disk is reported as unmappable rather than silently approximated.
+
+A real run on this machine — the 9.65 GiB DeepSeek-V2-Lite Q4_K_M, the shipped manifest, the
+CPU-only llama.cpp build, 4 threads, 1024-token context:
+
+```
+$ python3 -m vipera run models/DeepSeek-V2-Lite.Q4_K_M.gguf --target hw/gtx1650.toml \
+      --context 1024 --n-predict 24 --threads 4
+manifest      computed from DeepSeek-V2-Lite.Q4_K_M.gguf + gtx1650-laptop
+mapped to     -ngl 0 -ctk q8_0 -ctv q8_0
+warning       llama.cpp was built without a GPU backend, so the manifest's VRAM placement
+              (794 MiB resident + 2790 MiB expert cache) cannot be honoured; running CPU-only
+ok            True   (exit 0)
+wall          9.09 s
+peak RSS      12681.5 MiB
+disk read     5264.7 MiB
+prompt        10.0 t/s
+generation    11.70 t/s
+```
+
+That is a measurement, not a model.
+
+### `--compare`: the baseline, measured, not assumed
+
+`--compare` runs plain llama.cpp defaults and the manifest-driven command back to back and prints the
+difference, so a "beats the default" claim is a measurement rather than a target:
+
+```
+metric                  baseline      manifest         delta
+------------------------------------------------------------
+generation t/s              ~20           ~20           1.00x
+peak RSS                  ~13000        ~13000         +0 MiB
+disk read                  ~5000         ~5000        +0 MiB
+
+manifest / baseline generation speedup: 1.00x
+```
+
+### Prefetch from a routing trace
+
+`--trace` learns the prefetch table from a real routing trace *and* arms the MoE prefetch patch in
+one step, replacing the manual `bench/prefetch_table.py` → `LLAMA_MOE_PREFETCH=…` workflow (the patch
+itself is untouched — vipera drives it, it does not fork llama.cpp's core):
+
+```bash
+python3 -m vipera run model.gguf --target hw/gtx1650.toml \
+    --trace bench/results/olmoe-1b-7b-511tok.jsonl --prefetch-depth 2 --prefetch-top 32
+```
+
+If the binary does not carry the patch, the runner says so (`has no MoE prefetch support`) instead of
+letting a run look like a prefetch that simply did not help. `--prefetch-table PATH` uses a
+pre-built table; `--prefetch-mass N` sets how much of each layer's routing mass the table must cover.
+
+### Exercising the VRAM half
+
+Without a GPU backend the manifest's VRAM placement is reported and skipped. To exercise it, build
+llama.cpp's Vulkan backend (works on an NVIDIA driver through its Vulkan ICD, no CUDA toolkit needed):
+
+```bash
+cmake -S ~/dev/llama.cpp -B ~/dev/llama.cpp/build-vulkan -DCMAKE_BUILD_TYPE=Release \
+    -DGGML_VULKAN=ON -DLLAMA_CURL=OFF \
+    -DVulkan_INCLUDE_DIR=$HOME/vksdk/Vulkan-Headers/include \
+    -DCMAKE_PREFIX_PATH=$HOME/vksdk/install          # SPIRV-Headers
+cmake --build ~/dev/llama.cpp/build-vulkan --target llama-cli -j$(nproc)
+python3 -m vipera run model.gguf --target hw/gtx1650.toml \
+    --binary ~/dev/llama.cpp/build-vulkan/bin/llama-cli
+```
+
+With a GPU backend present the runner maps the manifest to `-ngl <n_layers> --n-cpu-moe <n_layers>
+--moe-cache-mib <MiB>`: attention in VRAM, every expert on the CPU, and the VRAM expert cache sized
+from the manifest.
+
+On this box the Vulkan build sees both GPUs and the run is pinned to the discrete one:
+
+```
+$ python3 -m vipera run models/DeepSeek-V2-Lite.Q4_K_M.gguf --target hw/gtx1650.toml \
+      --binary ~/dev/llama.cpp/build-vulkan/bin/llama-cli --context 512 --n-predict 16 \
+      -- --device Vulkan1 --moe-cache-mib 512
+mapped to     -ngl 27 --n-cpu-moe 27 --moe-cache-mib 2789 -ctk q8_0 -ctv q8_0
+generation    2.60 t/s          # GTX 1650, ~10.4 GiB peak RSS
+```
+
+Two honest notes. The manifest's own 2790 MiB expert cache does **not** fit next to the compute
+buffers — the first attempt died with `failed to allocate Vulkan1 buffer`, so the run needed a
+smaller `--moe-cache-mib` through the `--` pass-through. And with experts on the CPU the GPU path is
+**slower** than CPU-only here (2.60 vs 11.7 t/s): shuffling experts across a 4 GB link costs more
+than the attention it accelerates. Exercising the VRAM half is not the same as winning with it.
+
+Armed with a real trace captured from this model, the prefetch patch reports its own verdict:
+
+```
+prefetch      474 of 5440 predicted experts used (8.7%), +28798.0 MiB upload
+generation    1.30 t/s
+```
+
+A 199-token trace and a 512 MiB cache make the prediction mostly wrong — 8.7% useful for 28 GiB of
+extra upload, and the run got slower. That is the same lesson `docs/ROADMAP.md` §11 records: a
+table concentrated enough to fit a small cache does not come from a short trace. The number is the
+patch's, not vipera's, and the runner only surfaces it (`-v` is added automatically so the verdict
+is not hidden).
 
 ## Skill
 
