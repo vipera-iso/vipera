@@ -148,11 +148,24 @@ resident VRAM, expert cache VRAM, expert RAM, spill to disk — degrades to warn
 the one flag that survives, `-ctk/-ctv q8_0`, is worth ~0 at ctx 512 (16.41 vs 16.51 tok/s,
 measured above), so its contribution cannot sum to 22%.
 
-**Also found:** `--compare --context 2048` is not a valid measurement for this model in 15 GiB
-RAM. The baseline's f16 KV cache needs ~22.5 GB and the process is **SIGKILL'd by the OOM
-killer**, so the baseline reports `n/a` and no speedup is computed. Both `mlock` and `mmap`
-variants died this way. Any past `--compare` run at ctx ≥ 1024 should be re-checked for this
-failure mode — it reports `n/a` rather than an error, so it is easy to miss.
+**Corrected 2026-10-13 (my own error, worth recording):** an earlier pair of `--compare` runs
+at `--context 2048` came back **SIGKILL'd**, and I wrote that up as a property of ctx 2048 — that
+the f16 baseline needs ~22.5 GB and dies. **That attribution was wrong.** Re-run sequentially,
+the same ctx 2048 completes three times out of three, exit 0: 1.04×, 0.81×, 1.12×. The cause was
+**running two benchmarks concurrently** on a 15 GiB box with no swap: each side of `--compare`
+loads the 9880 MiB model, so two comparisons in parallel ask for ~20 GiB and the OOM killer
+takes one. Two things follow, and both are about method rather than this model:
+
+- **Never run these benchmarks in parallel on this machine.** That is a standing constraint, and
+  it invalidates any measurement taken while something else was benchmarking — including,
+  possibly, some of the earlier ones. The STEP 1 numbers were taken sequentially, but the
+  concurrency mistake here is exactly the kind that is invisible after the fact.
+- **An OOM kill surfaces as `n/a` with exit 0**, so a killed baseline looks identical to a
+  missing measurement unless the `error:` line is read. `--compare` should print a banner and
+  refuse to emit a speedup when either side did not exit 0; it currently prints a table whose
+  empty cells carry the whole verdict. (Still to do — see below.)
+- The 0.81–1.12× spread at ctx 2048 is `mmap` thrash variance, **not** a ctx effect: the same
+  three settings at ctx 512 under `-lm mlock` held 0.96–1.00×.
 
 **What this decides:**
 

@@ -513,10 +513,14 @@ Honest notes:
   - The manifest's value is confined to placement across VRAM/RAM/disk, and on a CPU-only build
     with the model resident in RAM that placement has nothing to act on. Its case has to be made
     on a model that spills, or at long context — see `plantodo.md`.
-- `--compare` at ctx 2048 is **not a valid comparison for this model on 15 GiB RAM**: the
-  baseline's f16 KV cache needs ~22.5 GB and the process is SIGKILL'd by the OOM killer, so
-  `generation t/s` reports `n/a` for the baseline and no speedup is computed. Use ctx ≤ 512, or
-  a quantized KV on *both* sides.
+- **Three sequential `--compare` runs at ctx 2048 are valid** (exit 0; 1.04×, 0.81×, 1.12×).
+  An earlier pair at that ctx was SIGKILL'd, and the cause was **running two benchmarks
+  concurrently** on a 15 GiB machine with no swap — each side of `--compare` loads the model, so
+  two comparisons at once ask for ~20 GiB. The lesson is not about ctx: an OOM kill surfaces as
+  `n/a` with **exit 0**, so a killed run is indistinguishable from a missing number unless the
+  error line is read. **Never run these benchmarks in parallel here.**
+- The 0.81–1.12× spread at ctx 2048 is `mmap` thrash variance, not a ctx effect: the same
+  settings at ctx 512 under `-lm mlock` held 0.96–1.00×.
 
 ---
 

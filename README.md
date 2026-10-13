@@ -311,9 +311,14 @@ Where the manifest has a real case is a model that **spills** past RAM, or a lon
 KV placement matters. Those are the measurements that decide whether vipera's positioning holds;
 see `plantodo.md`.
 
-> Note: `--compare` at `--context 2048` is not usable for a 15.7B model in 15 GiB RAM — the
-> baseline's f16 KV cache needs ~22.5 GB and is killed by the OOM killer, so the baseline reports
-> `n/a` and no speedup is computed. Stay at ctx ≤ 512, or quantize KV on both sides.
+> **Caution at ctx ≥ 1024: sequential runs are fine, concurrent ones are not.** Three
+> sequential `--compare` runs at `--context 2048` all exited 0 (1.04×, 0.81×, 1.12×). An earlier
+> pair was SIGKILL'd, and the cause was running two benchmarks **concurrently** on a 15 GiB box
+> with no swap — each side of `--compare` loads the model, so two comparisons at once ask for
+> ~20 GiB. An OOM kill surfaces as `n/a` rather than an error, which is what makes it easy to
+> mistake for a property of the model. **Do not run benchmarks in parallel on this machine.**
+> Note also that ctx 2048 spread 0.81–1.12× across three runs: that is the `mmap` thrash variance,
+> not a ctx effect — the same three settings at ctx 512 under `-lm mlock` held 0.96–1.00×.
 
 ### Prefetch from a routing trace
 
