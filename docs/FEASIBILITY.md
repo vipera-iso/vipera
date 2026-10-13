@@ -310,8 +310,8 @@ weights and the KV cannot both live in 16 GB regardless of quantization.
    broken. There is no quality-preserving path.
 
 **Verdict: fails by ~90–100× on throughput and violates the 16 GB RAM limit.**
-By the problem's own medal table, even **Bạc** (70B on 32 GB) does not run here;
-**Vàng** (70B on 16 GB) requires hardware this problem does not provide. As with
+By the problem's own medal table, even **Silver** (70B on 32 GB) does not run here;
+**Gold** (70B on 16 GB) requires hardware this problem does not provide. As with
 §10, the wall is memory bandwidth and capacity, not the scheduling algorithm.
 
 ### Limits

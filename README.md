@@ -424,6 +424,9 @@ in this repo, from `bench/results/hwprobe-run{1,2}.json`.
   co-execution, quantization, KV cache, speculative decoding, model compression).
 - [`docs/DESIGN.md`](docs/DESIGN.md) — architecture, FreeToken/AirLLM comparison, 1-month roadmap,
   tech stack, KPIs, risks, **7-day plan**.
+- [`algorithms-digest.md`](algorithms-digest.md) — **every algorithm on one page**: the target
+  machine and model, the pipeline map, algorithms A–H, the file-layer transforms T1–T6, the
+  CLI/manifest/trace interfaces, and a status table with the evidence behind each entry.
 
 ## Stage 2 — the layer scheduler
 

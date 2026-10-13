@@ -67,36 +67,36 @@ mode `docs/PROPOSALS.md` §7 warns about.
 
 **Picked sub-problem: S1 (highest priority that is unblocked).**
 
-### BƯỚC 1 — Research
+### STEP 1 — Research
 The gap was already established in `RESEARCH.md`/`PROPOSALS.md`: routing is
 modelled, not measured, so every cache claim is suspect. No new search was needed
 beyond confirming the standard cache rule (≈2× active experts) [RESEARCH.md S3].
 
-### BƯỚC 3 — Spec
+### STEP 3 — Spec
 * **Goal:** consume real routing traces; report the statistics that decide whether a cache can help.
 * **Input/Output:** JSONL `{"t": i, "layers": [[e,…], …]}` → `routing[token][layer][slot]`.
 * **Algorithm:** line-parse + validate (layer count, top_k, id range); histogram per layer; normalised entropy `H = −Σp·log₂p / log₂E`; static-cache ceiling = Σ(top-F experts)/Σ(all) per layer.
 * **Complexity:** O(T·L·K) time, O(E·L) memory.
 * **Edge cases:** empty file, malformed JSON, missing `layers`, expert id out of range, wrong `top_k`.
 
-### BƯỚC 4–5 — Code + test
+### STEP 4–5 — Code + test
 * `vipera/trace.py` — `load_trace`, `validate`, `stats`, `synth_trace`, `save_trace`.
 * CLI: `vipera trace <file> --arch <arch.toml> [--json]`; `vipera schedule … --trace <file>`.
 * `tests/test_trace.py` — 13 tests: round-trip, limit, 5 validation failures, entropy, ceiling, skew ordering, JSON-serialisability.
 * **Result: 95 tests, OK.**
 
-### BƯỚC 6 — Review (hostile)
+### STEP 6 — Review (hostile)
 * `stats()` is O(T·L·E) *memory-free* but rebuilds a histogram per layer per call — fine for planning, not for a hot loop.
 * The "static cache ceiling" is an **oracle** (it uses the full trace's frequency); it is an upper bound, **not** an achievable online result. Labelled as such in the docstring/api.
 * `load_trace(limit=…)` silently truncates — acceptable for smoke runs, but callers must know; the CLI passes `tokens+2`.
 * No streaming/mmap for very large traces — a 100k-token trace is fine, a 10M-token one is not (known limitation).
 * `synth_trace` is Zipf by construction, so tests that use it validate the *code*, not the *world*.
 
-### BƯỚC 7 — Integrate
+### STEP 7 — Integrate
 `schedule --trace` validates the trace against the architecture before simulating,
 so a mismatched trace fails loudly (exit 2) instead of silently producing nonsense.
 
-### BƯỚC 8 — Reflect (measured, trace-driven)
+### STEP 8 — Reflect (measured, trace-driven)
 
 Reproduce exactly:
 ```
@@ -185,7 +185,7 @@ defects that make any S2 number untrustworthy.
    did not say so. With a trace it now consumes the **whole** trace unless
    `--tokens` is set explicitly.
 
-### BƯỚC 3 — Spec
+### STEP 3 — Spec
 * **Goal:** a policy that reaches ≥0.9× the *matched* static ceiling — including
   after the routing distribution moves, where plain LFU cannot recover.
 * **Algorithm (`hot`):** LFU keyed on `(layer, expert)` —
@@ -199,7 +199,7 @@ defects that make any S2 number untrustworthy.
   single source of the residency/cache arithmetic, shared by `simulate` and by
   `vipera trace --target`; `global_cache_ceiling()` gives the size-matched bound.
 
-### BƯỚC 4–5 — Code + test
+### STEP 4–5 — Code + test
 * `vipera/schedule.py` — `ExpertCache` (`lru`/`lfu`/`hot`), `Plan`,
   `plan_residency`, `eval_tail` window, manifest `expert_cache.{slots,
   per_layer_fraction,static_cache_ceiling,ceiling_ratio,eval_window}`.
@@ -208,7 +208,7 @@ defects that make any S2 number untrustworthy.
   matched cache size from the same plan the schedule uses).
 * `tests/test_cache_policy.py` (17 new) + 2 CLI tests → **114 tests, OK**.
 
-### BƯỚC 8 — Reflect (measured, reproducible)
+### STEP 8 — Reflect (measured, reproducible)
 Generate the traces:
 ```
 python3 -c "from vipera.trace import synth_trace, synth_shift_trace, save_trace; \
