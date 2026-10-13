@@ -170,8 +170,10 @@ takes one. Two things follow, and both are about method rather than this model:
 **What this decides:**
 
 1. The manifest's case must be made where it has something to place — a model that **spills**
-   past RAM (Qwen3-30B-A3B, 18.6 GB against ~11 GiB usable), or a long context where KV placement
-   matters. Not on a RAM-resident MoE.
+   past RAM, or a long context where KV placement matters. Not on a RAM-resident MoE. **Tested
+   and not achieved on this machine** — see "The spill test" below: the model named for it
+   (Qwen3-30B-A3B, 17.3 GiB against MemAvailable 12.4 GiB) does not load at all, and the one
+   margin case that does run (the 9.65 GiB model, paged 1.4×) measured 0.99×.
 2. `-t 4 -lm mlock` is worth **1.79×** (12.80 documented → 22.90 measured) while the manifest is
    worth **0.99×**. The 1.79× needs no llama.cpp patch and no file-layer transform, and it is not
    yet represented in any vipera output. **Vipera should recommend it and currently does not.**
@@ -181,6 +183,71 @@ takes one. Two things follow, and both are about method rather than this model:
 4. **Prefetch dies on this footing too.** Its entire purpose is to raise the expert hit rate and
    thereby avoid disk reads; disk is ≤0.2% of decode, and cutting reads by 26% moved throughput
    by −4%.
+
+### The spill test, run — and it does not close the way it was expected to
+
+Path A was: narrow the claim to "models that overflow RAM", then measure `--compare` on
+Qwen3-30B-A3B (the only case where placement has something to act on). **Both halves of that
+were attempted; the first half is answered and the second is not performable on this machine.**
+
+**Correction to a figure I had been quoting:** usable RAM is **MemAvailable = 12.4 GiB**
+(`12974684 kB`, `[measured]` via `/proc/meminfo`), not the "~11 GiB" used throughout earlier
+notes. The conclusion does not change but the arithmetic does, and the corrected number is what
+makes the next point visible.
+
+**The structural answer came before any timing.** `vipera plan` on the 17.3 GiB Q4_K_M GGUF
+predicts a spill of **3867 MiB (23% of the expert pool)** — so this *is* the regime the claim was
+being narrowed to. Yet the dry-run maps it to exactly:
+
+```
+$ python3 -m vipera run models/Qwen3-30B-A3B-Q4_K_M.gguf \
+      --manifest out/Qwen3-30B-A3B-Q4_K_M.vipera.json --dry-run --context 512 --n-predict 32 --threads 4
+mapped to     -ngl 0 -ctk q8_0 -ctv q8_0
+warning       llama.cpp was built without a GPU backend, so the manifest's VRAM placement
+              (951 MiB resident + 2633 MiB expert cache) cannot be honoured; running CPU-only with -ngl 0
+warning       3867 MiB of experts are planned to spill to disk, and llama.cpp has no per-expert
+              disk streaming — it will fall back to mmap paging, ...
+```
+
+**Identical to the RAM-resident model's flags.** Confirmed in `vipera/run.py:plan_flags()`: the
+non-GPU branch sets `ngl = 0` and the `spill > 0` branch appends a *warning* and **no flags**. So
+on a CPU-only build the manifest reduces to KV quantization regardless of spill, and its only
+lever against a 3867 MiB spill is the ~770 MB that `q8_0` KV saves at ctx 8192
+(`[modelled]`, from 48 layers × 8 GQA KV heads × 128 dim ≈ 192 KiB/token f16).
+
+**The timing measurement is not performable here, and the reason is a hard wall rather than a
+tuning problem.** `[measured]`, 2026-10-13:
+
+| attempt | result |
+|---|---|
+| `--compare --context 512 --n-predict 32 --threads 4` | **both sides SIGKILL'd**; peak RSS 10529 / 12664 MiB; disk read 29748 / 30445 MiB |
+| `llama-cli -c 256 -n 8 -t 4` (minimum viable settings) | **EXIT=137 during model load** — before inference starts |
+
+The model is 17.3 GiB against MemAvailable 12.4 GiB; with `overcommit_memory=0` and a
+`CommitLimit` of 7.7 GiB it cannot get the pages it needs even under `mmap`. This box cannot run
+this model in any configuration, so "does the manifest win on a spilling model" cannot be
+answered by running one.
+
+**But the spill regime is not empty — it is already occupied, by the model in hand.** The 9.65 GiB
+DeepSeek model against 12.4 GiB available sits *at* the margin rather than comfortably inside it,
+and the evidence is in the STEP 1 numbers: `mmap` moved **13757 MiB** from NVMe for a file of
+**9880 MiB**, i.e. the file was paged ~1.4× because there was not room to keep it. That is a mild
+spill, and it is exactly where `-lm mlock` bought +121% cold / +11% steady. **On that margin case
+the manifest measured 0.99×.** So the answer to "does placement pay when there is something to
+place" is *measured 0.99× at the one margin this machine offers*, plus a structural proof that
+going further past the margin changes no flags — only whether the process survives at all.
+
+Two consequences worth carrying forward:
+
+- **The narrowed claim does not survive contact with the hardware either.** "vipera targets
+  models that overflow RAM" cannot be demonstrated on this machine, because the models that
+  overflow it by a useful amount *do not load*. The usable window between "fits, mildly pages"
+  and "does not start" is roughly 9.65 GiB → 12.4 GiB, and it contains no model that separates
+  the manifest from `-ctk q8_0 -ctv q8_0`.
+- **Path B (long context / KV placement) is now the only untested avenue**, and it needs code
+  rather than a download: the manifest's sole CPU-only lever *is* KV quantization, and it has
+  measured 0.99× at ctx 512 and a mean of 0.99× across three ctx 2048 runs. Whatever KV placement
+  would add, it is not what `-ctk q8_0 -ctv q8_0` already does.
 
 **Deliverables 2–5 of the brief, answered:**
 

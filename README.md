@@ -410,15 +410,24 @@ CUDA 13.4 still supports Turing (it dropped only pre-Turing), which is what the 
 link flags matter: the wheels ship no static `libcublas`, and the CUDA symbols are versioned
 (`cudaMemcpyAsync@libcudart.so.13`), so the executable link needs the toolkit on its search path.
 
-Four builds of the same model, same machine, ctx 512, 24 tokens, 8 threads, experts on the CPU
-because the 9.65 GiB model does not fit 4 GB of VRAM:
+Four builds of the same model, same machine, experts on the CPU because the 9.65 GiB model does
+not fit 4 GB of VRAM.
+
+> **This table is superseded, and its stated conditions were wrong.** It claimed "ctx 512,
+> 24 tokens, 8 threads", but the CPU-only row's `11.70 t/s` is byte-identical to the run printed
+> in full above, which was **ctx 1024, 24 tokens, 4 threads**. The number was carried over without
+> its conditions, so at least one row's label is a guess. Worse, all four rows were taken at
+> 8 threads on a thrashing page cache — the regime now known to be 1.79× off the correct
+> invocation (`-t 4 -lm mlock`), so the absolute values are not comparable to anything measured
+> since. Kept for the *ranking*, which the new measurements agree with: **GPU offload of the
+> experts costs more than it returns on this machine.**
 
 | build | generation | note |
 |---|---|---|
-| CPU-only | **11.70 t/s** | |
-| Vulkan | 2.60 t/s | GTX 1650 via the driver's Vulkan ICD |
-| CUDA | 7.00 t/s | needs `--moe-cache-mib 1024`; the manifest's 2789 MiB does not fit |
-| CUDA + prefetch | 2.00 t/s | patch's verdict: 11.2% useful, +44 GiB of extra upload |
+| CPU-only | 11.70 t/s `[superseded]` | re-measured at `-t 4 -lm mlock`: **22.90 t/s** |
+| Vulkan | 2.60 t/s `[superseded]` | GTX 1650 via the driver's Vulkan ICD |
+| CUDA | 7.00 t/s `[superseded]` | needed `--moe-cache-mib 1024`; the manifest's 2789 MiB did not fit |
+| CUDA + prefetch | 2.00 t/s `[superseded]` | patch's verdict: 11.2% useful, +44 GiB of extra upload |
 
 CUDA is ~2.7× Vulkan here and still loses to CPU-only. That is the honest shape of this machine:
 with every expert on the CPU the GPU accelerates only attention and pays PCIe for each expert it
