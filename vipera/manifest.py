@@ -86,7 +86,7 @@ class Plan:
         return self.fits
 
 
-def plan(inv: Inventory, target: Target, sharpness: float = 1.0) -> Plan:
+def plan(inv: Inventory, target: Target) -> Plan:
     warnings: list[str] = []
 
     always = inv.always_resident_bytes
@@ -162,8 +162,11 @@ def plan(inv: Inventory, target: Target, sharpness: float = 1.0) -> Plan:
             "expert_ram_bytes": expert_ram,
             "expert_spill_disk_bytes": spill,
             "expert_cache_fraction": round(cache_fraction, 4),
-            # No traces yet: the hot set cannot be ranked, so the split is uniform.
-            "expert_order": "uniform" if sharpness == 1.0 else "by_frequency",
+            # Always uniform: `plan` never sees a trace, and placement carries tier
+            # totals only. Both markers below are documentation for a reader, not a
+            # signal the tool acts on: per-expert order belongs to the T2 manifest
+            # contract in docs/OPTIMIZER.md, which v1 does not implement.
+            "expert_order": "uniform",
             "expert_order_pending_trace": True,
         },
         "kv_cache": {"type_k": "q8_0", "type_v": "q8_0"},
