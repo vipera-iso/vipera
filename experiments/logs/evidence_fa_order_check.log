@@ -1,0 +1,17 @@
+# Order-swap check for the FlashAttention result.
+# The measured matrix runs each cell once, in sequence, so a cell measured later could be
+# favoured by state the warm-up does not remove (page cache of the model file, thermals).
+# This interleaves the two configurations A/B/A/B so an order effect would show up as the
+# two arms converging rather than staying separated.
+# command per line: llama-bench -m models/DeepSeek-V2-Lite.Q4_K_M.gguf -p 0 -n 32 -r 1 -t 4 -o json -lm mlock {-fa off|-fa on -ctk f16 -ctv f16}
+
+"avg_ts": 22.275835
+"avg_ts": 21.949079
+round 1 fa=off "avg_ts": 22.422397
+round 1 fa=on "avg_ts": 23.323682
+round 2 fa=off "avg_ts": 22.431758
+round 2 fa=on "avg_ts": 23.456686
+round 3 fa=off "avg_ts": 22.293645
+round 3 fa=on "avg_ts": 23.430269
+round 4 fa=off "avg_ts": 22.177974
+round 4 fa=on "avg_ts": 23.243326

@@ -1,0 +1,12 @@
+# Patterns here are relative to experiments/. The 10 measured speculative logs are ~1 MB
+# each: llama-cli's -v flag makes it print the internal server's full request JSON, so those
+# two cells alone are 8.7 MB of runtime spam against a 630 KiB repository. They are ignored
+# for size, not for content — regenerate any of them with the commands in REPORT.md §6, and
+# every number they produced is stored in results/variant_speculative.json.
+logs/*.log
+!logs/speculative_*_qwen3-30b-a3b_run1.log
+!logs/verify_*.log
+!logs/baseline_*.log
+!logs/flashattention_*.log
+!logs/kv-cache-quant_*.log
+!logs/evidence_*.log

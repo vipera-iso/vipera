@@ -1,0 +1,40 @@
+# speculative:speculative qwen3-4b (llama-cli)
+# argv: /home/user/dev/llama.cpp/build/bin/llama-cli -m /home/user/dev/vipera/models/Qwen3-4B-Q4_K_M.gguf -p The quick brown fox jumps over the lazy dog. -n 32 -t 4 -lm mlock -c 512 -s 42 --temp 0 --ignore-eos -st -fa off -ctk f16 -ctv f16 -md /home/user/dev/vipera/models/Qwen3-0.6B-Q4_K_M.gguf --spec-draft-n-max 3
+# wall_s: 5.5
+
+
+
+Loading model... |-\|/-\|/-\|/-\|/-\|/-\|/-\|/ 
+
+▄▄ ▄▄
+██ ██
+██ ██  ▀▀█▄ ███▄███▄  ▀▀█▄    ▄████ ████▄ ████▄
+██ ██ ▄█▀██ ██ ██ ██ ▄█▀██    ██    ██ ██ ██ ██
+██ ██ ▀█▄██ ██ ██ ██ ▀█▄██ ██ ▀████ ████▀ ████▀
+                                    ██    ██
+                                    ▀▀    ▀▀
+
+build      : b1-f2cc728
+model      : /home/user/dev/vipera/models/Qwen3-4B-Q4_K_M.gguf
+ftype      : Q4_K - Medium
+modalities : text
+
+available commands:
+  /exit or Ctrl+C     stop or exit
+  /regen              regenerate the last response
+  /clear              clear the chat history
+  /read <file>        add a text file
+  /glob <pattern>     add text files using globbing pattern
+
+
+
+> The quick brown fox jumps over the lazy dog.
+
+[Start thinking]
+
+Okay, the user provided the sentence "The quick brown fox jumps over the lazy dog." and asked me to respond. Let me think about how to
+
+[ Prompt: 48.6 t/s | Generation: 14.7 t/s ]
+
+
+Exiting...

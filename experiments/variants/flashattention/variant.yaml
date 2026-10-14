@@ -1,0 +1,19 @@
+# experiments/variants/flashattention/variant.yaml
+#
+# Lever: IO-aware attention (-fa). The idea (FlashAttention 2205.14135 / FA-3 2407.08608)
+# is to never materialise the NxN attention matrix in memory, trading HBM traffic for a
+# tiled, fused, recomputing kernel. The measured question for vipera is narrow: on a
+# CPU-only build outside any GPU, does that kernel choice move decode tok/s at all when
+# the KV cache is 512 tokens long?
+#
+# Not a reimplementation: this is llama.cpp's own -fa switch, so the variant tests the
+# hardware/build question, not the paper's algorithm. Nothing here validates FA's
+# algorithmic claims — REPORT.md says so.
+
+name: flashattention
+runner: llama-bench
+flags: ["-fa", "on", "-ctk", "f16", "-ctv", "f16"]
+applicable_models: [deepseek-v2-lite, qwen3-4b]
+doc: >
+  FlashAttention on, KV cache left in f16 so the only difference from the control is -fa.
+  Relevant papers in the local pack: 2205.14135 (FlashAttention), 2407.08608 (FlashAttention-3).

@@ -1,0 +1,328 @@
+{
+  "variant": "flashattention",
+  "runner": "llama-bench",
+  "flags": [
+    "-fa",
+    "on",
+    "-ctk",
+    "f16",
+    "-ctv",
+    "f16"
+  ],
+  "question": "The llm-optimization literature pack proposes three families of optimizations for local inference: IO-aware attention (FlashAttention), quantized KV cache, and speculative decoding. plantodo.md STEP 1 measured decode at 22.90 tok/s against a modelled ALU ceiling of ~23 tok/s, i.e. compute-bound with disk at <=0.2%. Which of the three moves decode tok/s on THIS machine, when each is turned on alone against a common control?\n",
+  "generated_at": "2026-10-14T02:37:52+00:00",
+  "measurement": {
+    "runs": 5,
+    "warmup_runs": 1,
+    "threads": 4,
+    "n_gen": 32,
+    "ctx_size": 512,
+    "seed": 42,
+    "prompt": "The quick brown fox jumps over the lazy dog.",
+    "timeout_s": 1800,
+    "load_mode": {
+      "deepseek-v2-lite": "mlock",
+      "qwen3-4b": "mlock"
+    }
+  },
+  "arms": {
+    "default": {
+      "models": {
+        "deepseek-v2-lite": {
+          "model_path": "models/DeepSeek-V2-Lite.Q4_K_M.gguf",
+          "model_bytes": 10364416736,
+          "load_mode": "mlock",
+          "runner": "llama-bench",
+          "flags": [
+            "-fa",
+            "on",
+            "-ctk",
+            "f16",
+            "-ctv",
+            "f16"
+          ],
+          "draft": null,
+          "command": "/home/user/dev/llama.cpp/build/bin/llama-bench -m /home/user/dev/vipera/models/DeepSeek-V2-Lite.Q4_K_M.gguf -p 0 -n 32 -r 1 -t 4 -o json -lm mlock -fa on -ctk f16 -ctv f16",
+          "runs": [
+            {
+              "status": "ok",
+              "exit_code": 0,
+              "wall_s": 11.5,
+              "peak_rss_mib": 10008,
+              "majflt": 3881380,
+              "nvme_mib_read": 9888.2,
+              "log": "experiments/logs/flashattention_deepseek-v2-lite_run1.log",
+              "run": 1,
+              "tok_s": 23.49,
+              "tok_s_std": 0.0,
+              "per_rep_tok_s": [
+                23.49
+              ],
+              "ms_per_token": 42.57,
+              "n_threads": 4,
+              "flash_attn": 1,
+              "type_k": "f16",
+              "type_v": "f16",
+              "n_gpu_layers": -1,
+              "model_size_mib": 9880.5
+            },
+            {
+              "status": "ok",
+              "exit_code": 0,
+              "wall_s": 11.3,
+              "peak_rss_mib": 10008,
+              "majflt": 3881292,
+              "nvme_mib_read": 9275.8,
+              "log": "experiments/logs/flashattention_deepseek-v2-lite_run2.log",
+              "run": 2,
+              "tok_s": 23.49,
+              "tok_s_std": 0.0,
+              "per_rep_tok_s": [
+                23.49
+              ],
+              "ms_per_token": 42.57,
+              "n_threads": 4,
+              "flash_attn": 1,
+              "type_k": "f16",
+              "type_v": "f16",
+              "n_gpu_layers": -1,
+              "model_size_mib": 9880.5
+            },
+            {
+              "status": "ok",
+              "exit_code": 0,
+              "wall_s": 11.3,
+              "peak_rss_mib": 10008,
+              "majflt": 3881307,
+              "nvme_mib_read": 9277.7,
+              "log": "experiments/logs/flashattention_deepseek-v2-lite_run3.log",
+              "run": 3,
+              "tok_s": 23.52,
+              "tok_s_std": 0.0,
+              "per_rep_tok_s": [
+                23.52
+              ],
+              "ms_per_token": 42.52,
+              "n_threads": 4,
+              "flash_attn": 1,
+              "type_k": "f16",
+              "type_v": "f16",
+              "n_gpu_layers": -1,
+              "model_size_mib": 9880.5
+            },
+            {
+              "status": "ok",
+              "exit_code": 0,
+              "wall_s": 11.4,
+              "peak_rss_mib": 10008,
+              "majflt": 3881366,
+              "nvme_mib_read": 9370.3,
+              "log": "experiments/logs/flashattention_deepseek-v2-lite_run4.log",
+              "run": 4,
+              "tok_s": 23.45,
+              "tok_s_std": 0.0,
+              "per_rep_tok_s": [
+                23.45
+              ],
+              "ms_per_token": 42.65,
+              "n_threads": 4,
+              "flash_attn": 1,
+              "type_k": "f16",
+              "type_v": "f16",
+              "n_gpu_layers": -1,
+              "model_size_mib": 9880.5
+            },
+            {
+              "status": "ok",
+              "exit_code": 0,
+              "wall_s": 11.3,
+              "peak_rss_mib": 10008,
+              "majflt": 3881381,
+              "nvme_mib_read": 9292.5,
+              "log": "experiments/logs/flashattention_deepseek-v2-lite_run5.log",
+              "run": 5,
+              "tok_s": 23.62,
+              "tok_s_std": 0.0,
+              "per_rep_tok_s": [
+                23.62
+              ],
+              "ms_per_token": 42.33,
+              "n_threads": 4,
+              "flash_attn": 1,
+              "type_k": "f16",
+              "type_v": "f16",
+              "n_gpu_layers": -1,
+              "model_size_mib": 9880.5
+            }
+          ],
+          "warmup": [
+            {
+              "status": "ok",
+              "tok_s": 23.39,
+              "wall_s": 11.5,
+              "peak_rss_mib": 10003,
+              "nvme_mib_read": 9803.4,
+              "log": "experiments/logs/flashattention_deepseek-v2-lite_warmup1.log"
+            }
+          ],
+          "ok": 5,
+          "failed": 0,
+          "n_runs": 5,
+          "median_tok_s": 23.49,
+          "mean_tok_s": 23.51,
+          "std_tok_s": 0.06,
+          "min_tok_s": 23.45,
+          "max_tok_s": 23.62,
+          "cv_pct": 0.3
+        },
+        "qwen3-4b": {
+          "model_path": "models/Qwen3-4B-Q4_K_M.gguf",
+          "model_bytes": 2497281312,
+          "load_mode": "mlock",
+          "runner": "llama-bench",
+          "flags": [
+            "-fa",
+            "on",
+            "-ctk",
+            "f16",
+            "-ctv",
+            "f16"
+          ],
+          "draft": null,
+          "command": "/home/user/dev/llama.cpp/build/bin/llama-bench -m /home/user/dev/vipera/models/Qwen3-4B-Q4_K_M.gguf -p 0 -n 32 -r 1 -t 4 -o json -lm mlock -fa on -ctk f16 -ctv f16",
+          "runs": [
+            {
+              "status": "ok",
+              "exit_code": 0,
+              "wall_s": 3.6,
+              "peak_rss_mib": 2489,
+              "majflt": 639766,
+              "nvme_mib_read": 0.3,
+              "log": "experiments/logs/flashattention_qwen3-4b_run1.log",
+              "run": 1,
+              "tok_s": 15.36,
+              "tok_s_std": 0.0,
+              "per_rep_tok_s": [
+                15.36
+              ],
+              "ms_per_token": 65.1,
+              "n_threads": 4,
+              "flash_attn": 1,
+              "type_k": "f16",
+              "type_v": "f16",
+              "n_gpu_layers": -1,
+              "model_size_mib": 2375.9
+            },
+            {
+              "status": "ok",
+              "exit_code": 0,
+              "wall_s": 3.5,
+              "peak_rss_mib": 2489,
+              "majflt": 639812,
+              "nvme_mib_read": 0.2,
+              "log": "experiments/logs/flashattention_qwen3-4b_run2.log",
+              "run": 2,
+              "tok_s": 15.59,
+              "tok_s_std": 0.0,
+              "per_rep_tok_s": [
+                15.59
+              ],
+              "ms_per_token": 64.12,
+              "n_threads": 4,
+              "flash_attn": 1,
+              "type_k": "f16",
+              "type_v": "f16",
+              "n_gpu_layers": -1,
+              "model_size_mib": 2375.9
+            },
+            {
+              "status": "ok",
+              "exit_code": 0,
+              "wall_s": 3.5,
+              "peak_rss_mib": 2489,
+              "majflt": 639802,
+              "nvme_mib_read": 0.0,
+              "log": "experiments/logs/flashattention_qwen3-4b_run3.log",
+              "run": 3,
+              "tok_s": 15.6,
+              "tok_s_std": 0.0,
+              "per_rep_tok_s": [
+                15.6
+              ],
+              "ms_per_token": 64.08,
+              "n_threads": 4,
+              "flash_attn": 1,
+              "type_k": "f16",
+              "type_v": "f16",
+              "n_gpu_layers": -1,
+              "model_size_mib": 2375.9
+            },
+            {
+              "status": "ok",
+              "exit_code": 0,
+              "wall_s": 3.6,
+              "peak_rss_mib": 2489,
+              "majflt": 639737,
+              "nvme_mib_read": 0.1,
+              "log": "experiments/logs/flashattention_qwen3-4b_run4.log",
+              "run": 4,
+              "tok_s": 15.56,
+              "tok_s_std": 0.0,
+              "per_rep_tok_s": [
+                15.56
+              ],
+              "ms_per_token": 64.27,
+              "n_threads": 4,
+              "flash_attn": 1,
+              "type_k": "f16",
+              "type_v": "f16",
+              "n_gpu_layers": -1,
+              "model_size_mib": 2375.9
+            },
+            {
+              "status": "ok",
+              "exit_code": 0,
+              "wall_s": 3.6,
+              "peak_rss_mib": 2489,
+              "majflt": 639824,
+              "nvme_mib_read": 6.9,
+              "log": "experiments/logs/flashattention_qwen3-4b_run5.log",
+              "run": 5,
+              "tok_s": 15.51,
+              "tok_s_std": 0.0,
+              "per_rep_tok_s": [
+                15.51
+              ],
+              "ms_per_token": 64.47,
+              "n_threads": 4,
+              "flash_attn": 1,
+              "type_k": "f16",
+              "type_v": "f16",
+              "n_gpu_layers": -1,
+              "model_size_mib": 2375.9
+            }
+          ],
+          "warmup": [
+            {
+              "status": "ok",
+              "tok_s": 15.61,
+              "wall_s": 4.6,
+              "peak_rss_mib": 2489,
+              "nvme_mib_read": 2382.7,
+              "log": "experiments/logs/flashattention_qwen3-4b_warmup1.log"
+            }
+          ],
+          "ok": 5,
+          "failed": 0,
+          "n_runs": 5,
+          "median_tok_s": 15.56,
+          "mean_tok_s": 15.52,
+          "std_tok_s": 0.1,
+          "min_tok_s": 15.36,
+          "max_tok_s": 15.6,
+          "cv_pct": 0.6
+        }
+      }
+    }
+  }
+}

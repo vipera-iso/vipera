@@ -1,0 +1,32 @@
+{
+  "variant": "speculative",
+  "model": "qwen3-4b",
+  "generated_at": "2026-10-14T02:14:35+00:00",
+  "check": "greedy output identical with and without the draft model",
+  "lever_engaged": false,
+  "verdict": "NOT CONCLUSIVE - the speculative path never engaged on this build, so both arms ran the same decoder; identical text is expected",
+  "identical": true,
+  "n_chars": 182,
+  "arms": [
+    {
+      "arm": "control_no_draft",
+      "status": "ok",
+      "tok_s": 13.5,
+      "predicted_n": null,
+      "acceptance_rate_pct": null,
+      "slot_speculative": null,
+      "text": "The quick brown fox jumps over the lazy dog.\n\n\n\nOkay, the user provided the sentence \"The quick brown fox jumps over the lazy dog.\" and asked me to respond. Let me think about how to",
+      "log": "experiments/logs/verify_speculative_control_qwen3-4b.log"
+    },
+    {
+      "arm": "speculative",
+      "status": "ok",
+      "tok_s": 14.7,
+      "predicted_n": null,
+      "acceptance_rate_pct": null,
+      "slot_speculative": null,
+      "text": "The quick brown fox jumps over the lazy dog.\n\n\n\nOkay, the user provided the sentence \"The quick brown fox jumps over the lazy dog.\" and asked me to respond. Let me think about how to",
+      "log": "experiments/logs/verify_speculative_speculative_qwen3-4b.log"
+    }
+  ]
+}
