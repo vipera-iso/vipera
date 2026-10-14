@@ -221,6 +221,33 @@ disables every CPU-specific extra buffer (AMX, KleidiAI), so on a machine that h
 direction could reverse — which is why vipera emits it for the spill case, where it is the
 difference between running and not running, and does not apply it by default.
 
+**A third arm, and the plan it cancelled.** Skipping the repack of *only* the 3D expert tensors
+(`bench/llama-cpu-repack-moe.patch`, `GGML_CPU_REPACK_MOE=0`) leaves every 2D weight repacked and
+puts the expert slabs back in the file. Anonymous RSS lands at **585 MiB** — the non-expert weights
+and nothing else — which confirms the account of the memory above, and the model runs:
+
+| arm | outcome | peak anon RSS | peak file RSS | tok/s |
+|---|---|---|---|---|
+| default | OOM-killed 2/2 | 11445 MiB | 8289 MiB | — |
+| `-nr` | ran 2/2 | 112 MiB | 11350 MiB | 5.85 (5.5–6.2) |
+| gate (`GGML_CPU_REPACK_MOE=0`) | ran 2/2 | 585 MiB | 11074 MiB | 5.55 (5.0–6.1) |
+
+It is a cleaner mechanism and **not a faster one**: 5.55 against 5.85 with overlapping ranges, so
+repacking the 2D weights buys nothing measurable here. `-nr` therefore stays the recommendation,
+because it needs no rebuild.
+
+**And it cancelled the obvious next project.** With `-nr`, the run reads **0.0 MiB per token** from
+storage after load completes (`bench/moe_spill.py`, the `disk_mib_per_token` column): the working set
+fits in the resident file pages, so the kernel charges the disk for nothing. There is no disk
+traffic for an explicit host-side expert cache to win back, which means the cache — vipera's own
+LFU/hot policies, trace-derived frequency tables, an explicit slot store — would have been a large
+build for no gain. That is now known rather than assumed, and it cost one column in a harness.
+
+The remaining gap is **5.6 tok/s against a modelled ALU ceiling of ~16.7** for 3.3 B active
+parameters, and it is **not disk**: it is CPU time, and the candidates are `mmap` minor-fault
+overhead on the expert pages and the non-repacked Q4_K matmul the expert path falls back to.
+Neither has been separated yet, so no attribution is claimed.
+
 **But the spill regime is already occupied.** The 9.65 GiB model sits *on* the margin of 12.4 GiB
 rather than comfortably inside it — `mmap` moved 13757 MiB for a 9880 MiB file (§Round 2), i.e.
 mildly spilling, and it is exactly where `-lm mlock` bought its +121%. **The manifest measured
