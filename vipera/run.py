@@ -66,6 +66,13 @@ class RunFlags:
     moe_cache_mib: int | None = None
     cache_type_k: str | None = None
     cache_type_v: str | None = None
+    # `-lm` load mode chosen by `vipera.launch` (mmap / mlock / dio). None means
+    # "leave llama.cpp at its own default", which is what the comparison baseline does.
+    load_mode: str | None = None
+    # Streaming generation (StreamingLLM): keep `n_keep` attention sinks and, when
+    # `context_shift`, slide a window so generation continues past n_ctx.
+    n_keep: int | None = None
+    context_shift: bool = False
     warnings: list[str] = field(default_factory=list)
 
 
@@ -214,6 +221,12 @@ def build_command(
         cmd += ["-ctk", flags.cache_type_k]
     if flags.cache_type_v:
         cmd += ["-ctv", flags.cache_type_v]
+    if flags.load_mode:
+        cmd += ["-lm", flags.load_mode]
+    if flags.n_keep is not None:
+        cmd += ["--keep", str(flags.n_keep)]
+    if flags.context_shift:
+        cmd += ["--context-shift"]
     if threads is not None:
         cmd += ["-t", str(threads)]
     if prefetch and "-v" not in (extra or []) and "--verbose" not in (extra or []):
@@ -392,6 +405,12 @@ def format_report(report: dict, *, flags: RunFlags, manifest_source: str) -> str
         mapping.append(f"--moe-cache-mib {flags.moe_cache_mib}")
     if flags.cache_type_k or flags.cache_type_v:
         mapping.append(f"-ctk {flags.cache_type_k or '?'} -ctv {flags.cache_type_v or '?'}")
+    if flags.load_mode:
+        mapping.append(f"-lm {flags.load_mode}")
+    if flags.n_keep is not None:
+        mapping.append(f"--keep {flags.n_keep}")
+    if flags.context_shift:
+        mapping.append("--context-shift")
     lines.append(f"mapped to     {' '.join(mapping) if mapping else '(nothing)'}")
     for w in flags.warnings:
         lines.append(f"warning       {w}")

@@ -5,8 +5,10 @@ import tempfile
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
 
-from tests._fixture import make_gguf, make_unknown_quant_gguf
+from tests._fixture import (make_dense_gguf, make_gguf, make_gguf_with_expert_data,
+                            make_unknown_quant_gguf)
 from vipera.cli import main
+from vipera.gguf import read_gguf
 from vipera.schedule import Quant, plan_residency
 from vipera.arch import Architecture
 from vipera.manifest import Target
@@ -106,6 +108,71 @@ class TestCLI(unittest.TestCase):
             code = main(["sweep", OLMOE, "--target", HW])
         self.assertEqual(code, 0)
         self.assertIn("all values MODELLED", out.getvalue())
+
+    def test_rewrite_prunes_experts_from_a_trace(self):
+        # the write side of `prune`: the plan becomes a file whose expert
+        # dimension actually shrank, which is what every format paper needed.
+        source = os.path.join(self.tmp.name, "source.gguf")
+        make_gguf_with_expert_data(source, block_count=2, n_experts=4)
+        trace = os.path.join(self.tmp.name, "rtrace.jsonl")
+        save_trace(trace, synth_trace(5, n_layers=2, n_experts=4, top_k=2, seed=0))
+        dest = os.path.join(self.tmp.name, "pruned.gguf")
+
+        out = io.StringIO()
+        with redirect_stdout(out):
+            code = main(["rewrite", source, "--out", dest, "--from-trace", trace,
+                         "--prune-to", "2", "--json"])
+        self.assertEqual(code, 0)
+        data = json.loads(out.getvalue())
+        self.assertEqual(data["experts_before"], 8)
+        self.assertEqual(data["experts_after"], 4)
+        self.assertLess(data["bytes_after"], data["bytes_before"])
+        before = read_gguf(source).tensor("blk.1.ffn_gate_exps.weight").shape
+        after = read_gguf(dest).tensor("blk.1.ffn_gate_exps.weight").shape
+        self.assertEqual(after, before[:2] + (2,), "expert dimension must shrink to 2")
+
+    def test_rewrite_needs_a_source_of_expert_order(self):
+        source = os.path.join(self.tmp.name, "source.gguf")
+        make_gguf_with_expert_data(source, block_count=2, n_experts=4)
+        err = io.StringIO()
+        with redirect_stderr(err):
+            code = main(["rewrite", source, "--out", os.path.join(self.tmp.name, "o.gguf")])
+        self.assertEqual(code, 2)
+        self.assertIn("--from-trace or --random", err.getvalue())
+
+    def test_rewrite_random_reorders_without_changing_the_size(self):
+        source = os.path.join(self.tmp.name, "source.gguf")
+        make_gguf_with_expert_data(source, block_count=2, n_experts=4)
+        dest = os.path.join(self.tmp.name, "shuffled.gguf")
+        out = io.StringIO()
+        with redirect_stdout(out):
+            code = main(["rewrite", source, "--out", dest, "--random", "7", "--json"])
+        self.assertEqual(code, 0)
+        data = json.loads(out.getvalue())
+        self.assertEqual(data["experts_before"], data["experts_after"])
+        self.assertEqual(data["bytes_before"], data["bytes_after"])
+
+    def test_rewrite_refuses_a_model_without_routed_experts(self):
+        dense = os.path.join(self.tmp.name, "dense.gguf")
+        make_dense_gguf(dense, block_count=2)
+        err = io.StringIO()
+        with redirect_stderr(err):
+            code = main(["rewrite", dense, "--out", os.path.join(self.tmp.name, "o.gguf"),
+                         "--random", "1"])
+        self.assertEqual(code, 2)
+        self.assertIn("no routed-expert tensor", err.getvalue())
+
+    def test_rewrite_refuses_a_trace_covering_layers_without_experts(self):
+        source = os.path.join(self.tmp.name, "source.gguf")
+        make_gguf_with_expert_data(source, block_count=2, n_experts=4)
+        trace = os.path.join(self.tmp.name, "wide.jsonl")
+        save_trace(trace, synth_trace(4, n_layers=4, n_experts=4, top_k=2, seed=0))
+        err = io.StringIO()
+        with redirect_stderr(err):
+            code = main(["rewrite", source, "--out", os.path.join(self.tmp.name, "o.gguf"),
+                         "--from-trace", trace])
+        self.assertEqual(code, 2)
+        self.assertIn("no routed experts", err.getvalue())
 
     def test_score_fails_the_local_llm_16gb_instance(self):
         out = io.StringIO()

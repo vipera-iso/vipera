@@ -1,0 +1,8 @@
+ok            True
+exit          0
+elapsed       229.53 s
+corpus        wiki.test.raw  (195 chunks, ctx 512)
+attention     sink + sliding  (keep 4, window 508, policy surprise-local)
+scored        49921 tokens, 131 context shifts
+PPL           26.0370 +/- 0.36369
+report written to bench/results/ppl-policy-A-surprise-local-m64.json

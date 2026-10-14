@@ -619,3 +619,129 @@ Each entry = one **MoE block** (the leading dense block has no router).
    page cache.
 6. `sweep` and `prune` do **not** demonstrate quality — they only count routing mass; any quality claim
    needs perplexity/benchmark measurements (not done yet).
+
+---
+
+## 17. The two literature packs, cross-checked against this repo
+
+`docs/reference/literature/` (19 papers) and `docs/reference/literature/llm-optimization/`
+(24 papers) each carry a synthesis that grades every algorithm on whether *vipera can implement
+it*. This section is the half those documents do not do: for each of the **43 papers** it names the
+**actual code surface** the algorithm would attach to — read out of the repository, not inferred
+from the grade — or says plainly that no such surface exists yet.
+
+Grades are the letters the two syntheses already use: **A** fits the existing surface now · **B** the
+planner skeleton fits but a missing input (Hessian / F-norm / KL / a trained head) blocks it · **C**
+blocked on the GGUF tensor writer (S9) · **D** needs activation sparsity the target model
+(DeepSeek-V2-Lite, SwiGLU, non-ReLU) does not have · **E** out of scope. **Every “repo surface” cell
+is a `file:line` into the tree at `1414346`, verified by `grep`/`code_search` on 2026-10-14.** The
+tests that pin those surfaces are green: `227 passed` (`./.venv/bin/python -m pytest`).
+
+The surface anchors referenced repeatedly below:
+
+| Surface | Where |
+|---|---|
+| Tensor classification | `vipera/analyze.py:18` `is_expert_tensor` |
+| Residency planner (greedy) | `vipera/manifest.py:89` `plan` |
+| Decode cost model | `vipera/schedule.py:608` `simulate` |
+| Expert cache (lru / lfu / hot) | `vipera/schedule.py:308` `ExpertCache` (`_admit:473`, `_age:431`, `_reallocate:441`) |
+| Routing trace + ceiling | `vipera/trace.py:70` `load_trace`, `:171` `global_cache_ceiling` |
+| Mass pruning + P4 gate | `vipera/prune.py:91` `plan_from_trace`, `:261` `gated_prune` |
+| Prefetch table → llama.cpp | `vipera/prefetch.py:37` `build_table`; `bench/llama-moe-prefetch.patch`; `vipera/run.py:107` `supports_prefetch` |
+| Manifest → runtime flags | `vipera/run.py:133` `plan_flags` |
+| Quant / KV / prune knobs | `vipera/cli.py:147` `_QUANTS`; `:567` `--kv-bits`; `:570` `--cache-policy`; `:574` `--trace` |
+| GGUF reader (header + descriptors only) | `vipera/gguf.py:309` `read_gguf` |
+| GGUF writer + expert reorder/prune | `vipera/gguf_write.py` `rewrite_experts`, `expert_order`; `vipera/cli.py` `rewrite` |
+| Long-context KV budget + sink policy | `vipera/longcontext.py` `plan_long_context`; `vipera run --stream` |
+| Launch policy (load mode + threads) | `vipera/launch.py` `choose_policy` |
+| Perplexity, incl. streaming | `bench/perplexity.py` `compare_stream`; `bench/llama-ppl-stream.patch` |
+| Activation-energy probe | `bench/sparsity.py` (imatrix → channel stats) |
+| Architecture model | `vipera/arch.py:94` `Architecture` |
+
+**One field is a label, not a signal.** `placement.expert_order` and
+`placement.expert_order_pending_trace` are written at `vipera/manifest.py:169-170`, and
+`expert_order` appears **nowhere else under `vipera/`** except its own module comment
+(`grep -rn expert_order`, ignoring the stale `.bridge` worktree) and two assertions in
+`tests/test_manifest.py:70-71`. `vipera/run.py:133 plan_flags` never reads it. So Neuralink’s
+“give the dead field a consumer” is a genuine gap, not a wire that already exists. It still has
+no consumer in `plan_flags`; the layout that consumes a trace today is written straight to the
+file by `vipera rewrite --from-trace` instead.
+
+**The writer gap this digest opened with is closed.** `vipera/gguf.py` reads descriptors only,
+and the note here used to end at “nothing in `vipera/` writes tensor data” — which is why every
+format-level paper (C) was blocked by *one* missing writer. `vipera/gguf_write.py` is that
+writer, and because it edits already-quantized expert slabs byte-wise, one module covers both
+the reorder (`2410.19274`) and the prune path rather than one writer per quant format. What it
+does **not** yet do is run on a real multi-gigabyte model: the byte-exactness is established on
+fixtures (`docs/REWRITE.md` §C), so treat the format-level grades below as *unblocked*, not
+*delivered*.
+
+### 17.1 Pack 19 — `docs/reference/literature/`
+
+| # | arXiv | Algorithm | Repo surface (verified) | Grade |
+|---|---|---|---|---|
+| 1 | 2312.11514 | LLM in a Flash — windowing + row-column bundling | byte-level cache only (`schedule.py:308`); no windowing, no ReLU-sparsity path | D |
+| 2 | 2310.16795 | QMoE — sub-1-bit format + decode kernel | `gguf.py:309 read_gguf` is read-only; no writer in `vipera/` | C |
+| 3 | 2410.19274 | Neuralink — co-activation → flash layout | target field exists but dead (`manifest.py:169-170`); no reader in `run.py`/`schedule.py` | A (gap) |
+| 4 | 2310.02410 | MoQE — experts tolerate 2–3 bit | modelled quant only: `schedule.py:38 Quant`, `cli.py:147 _QUANTS["q4-experts"]` | B |
+| 5 | 2310.19102 | Atom — W4A4 mixed group quant | needs a kernel + activation path; `vipera/` has neither | E |
+| 6 | 2505.05799 | MxMoE — ILP bit allocation under budget | planner skeleton could live in `schedule.py`; per-block sensitivity input absent | B |
+| 7 | 2603.19172 | DyMoE — depth-aware bit schedule + prefetch | prefetch half present (`prefetch.py:37`); bit schedule / importance gate absent | B/D |
+| 8 | 2509.02512 | MoPEQ — k-means by Hessian sensitivity | no weight access (vipera never opens tensor data) | B |
+| 9 | 2303.06865 | FlexGen — LP placement + zig-zag schedule | greedy, not LP: `manifest.py:89 plan`, `schedule.py:227 plan_residency` | A (planner) |
+| 10 | 2310.07240 | CacheGen — KV as an adaptive bitstream | KV is one uniform bit-width: `cli.py:567 --kv-bits`, manifest `kv_cache` | E |
+| 11 | 2406.02500 | Holistic MoE — Expert→Layer→Block drop | `cli.py:566 --keep-layers`, `prune.py:91`; the drop pieces exist, the recovery finetune does not | B |
+| 12 | 2410.06270 | MC — LP alloc + quant-loss signal | allocation surface = the planner; the ϵᵢⱼ loss needs forward passes | B |
+| 13 | 2606.17118 | MODE — expert-level ILP | same planner gap; modality / key-token sensitivity needs calibration | B |
+| 14 | 1911.03852 | HAWQ-V2 — bit alloc as rate–distortion | knapsack framing fits `schedule.py`; σᵢ needs weights | B |
+| 15 | 2412.14219 | Survey — the 3-tier map | reference only; maps onto `docs/RESEARCH.md`, `docs/ALGORITHMS.md` | E (ref) |
+| 16 | 2502.05370 | FineMoE — iteration-level patterns + semantic hints | trace already per-token (`trace.py:70`); cache/prefetch `schedule.py:308`, `prefetch.py:37` | A |
+| 17 | 2601.14277 | Which Quantization — Q4_K_S / Q5_0 frontier | default quant knob `cli.py:147`; evidence only, no code path | A (evidence) |
+| 18 | 2510.26692 | Kimi Linear — KDA attention | `arch.py:94 Architecture` models the shape; no attention runtime | E |
+| 19 | 2504.08378 | ActiveFlow — cross-layer preloading | `prefetch.py:37 build_table` is routing-based, not activation-based; no activation sparsity | D |
+
+### 17.2 Pack 24 — `docs/reference/literature/llm-optimization/`
+
+| # | arXiv | Algorithm | Repo surface (verified) | Grade |
+|---|---|---|---|---|
+| 1 | 2312.12456 | PowerInfer — neuron ILP + predictors + neuron-aware ops | expert-level only (`prune.py:91`); no neuron/activation code in `vipera/` | A (gap) |
+| 2 | 2406.11674 | Endor — bitmap sparse format (Alg. 1/2) | file layer vipera owns (T1 precedent) but reader-only: `gguf.py:309` | A (layer) |
+| 3 | 2306.14048 | H2O — greedy KV eviction from attention | vipera models KV bytes, never attention: `cli.py:567 --kv-bits` only | A |
+| 4 | 2309.17453 | StreamingLLM — sink tokens + rolling window | same: no KV runtime; `--kv-bits` shrinks, it does not evict | A |
+| 5 | 2306.00978 | AWQ — α grid-search scaling | no quantiser/writer; only modelled quant (`schedule.py:38`) | B |
+| 6 | 2301.00774 | SparseGPT — one-shot weight prune | prunes **experts by routing mass** (`prune.py:91`), not weights by Hessian | B |
+| 7 | 2411.01433 | HOBBIT — T1/T2 dual precision + LHU/FLD cache | cache policies are lru/lfu/hot (`schedule.py:308`); no dual precision | B |
+| 8 | 2410.17954 | ExpertFlow — routing predictor + token scheduler | `prefetch.py:37` is a mass keep-set, not a predictor; no batching/scheduler | B |
+| 9 | 2305.09781 | SpecInfer — token-tree speculative verify | `cli.py:568 --draft-tokens` is a model multiplier; no draft model is run | B |
+| 10 | 2401.15077 | EAGLE — feature-level draft head | same: `--draft-tokens`, no trained head | B |
+| 11 | 2210.17323 | GPTQ — PTQ + Cholesky reformulation | modelled bits only; no calibration/writer | B |
+| 12 | 2305.14314 | QLoRA — NF4 + double quantization | training out of scope; modelled quant only | B |
+| 13 | 2106.09685 | LoRA — low-rank adapters | no training code in the repo | B |
+| 14 | 2309.06180 | vLLM / PagedAttention — paged KV + block table | no KV allocator; `cli.py:567 --kv-bits` only | C |
+| 15 | 2403.02310 | Sarathi-Serve — chunked prefill, stall-free batching | single-sequence simulator (`schedule.py:608`); no scheduler | C |
+| 16 | 2312.07104 | SGLang / RadixAttention — prefix KV reuse | no multi-request server / prefix sharing | C |
+| 17 | 2311.18677 | Splitwise — phase split + placement | no cluster; nothing in `vipera/` | C |
+| 18 | 2401.09670 | DistServe — per-phase parallelism search | no cluster; nothing in `vipera/` | C |
+| 19 | 2211.10438 | SmoothQuant — per-channel smoothing (W8A8) | `_QUANTS` (`cli.py:147`) has no W8A8 / INT8 activation path | C |
+| 20 | 2205.14135 | FlashAttention — IO-aware tiling | lives in ggml/llama.cpp, which `vipera/run.py` drives as a binary | C |
+| 21 | 2407.08608 | FlashAttention-3 — warp-spec + FP8 | Hopper-only; vipera ships no kernel | D |
+| 22 | 2312.00752 | Mamba — selective SSM | `arch.py:94` models shapes only; cannot apply to a Transformer GGUF | D |
+| 23 | 1910.02054 | ZeRO — training DP partitioning | training is out of scope; no optimizer | C |
+| 24 | 2101.06840 | ZeRO-Offload — offload training state/compute | same: no training state to offload | C |
+
+### 17.3 What the code says that the grades do not
+
+Reading the tree sharpens three of the syntheses’ claims:
+
+1. **The one dead label is smaller than it looks.** Neuralink’s gap is *only* the runtime consumer:
+   the ordering itself is computable today from `trace.py:70 load_trace`, and `prefetch.py:37`
+   already proves the pipeline (trace → `prune.plan_from_trace` → a file) works. What is missing is
+   one line in `run.py:133` that reads it — everything else is built.
+2. **The C-grade papers share exactly one missing module.** Every “blocked on the S9 GGUF tensor
+   writer” row (QMoE, Endor, SparseGPT’s output, AWQ/GPTQ/SmoothQuant) hits the same wall: there is
+   no writer anywhere in `vipera/`. The reader (`gguf.py:309`) and the descriptor parser
+   (`gguf.py:273 validate_extents`) are done; the write half is the single unbuilt transform.
+3. **The cache papers (H2O, StreamingLLM, HOBBIT, FineMoE) are runtime patches, not vipera code.**
+   `ExpertCache` (`schedule.py:308`) is a **simulation** over a trace; it is never in the decode
+   path. So these items can be *modelled* here but only *realised* in a llama.cpp patch, which is
+   the same split `prefetch.py` + `bench/llama-moe-prefetch.patch` already demonstrates.

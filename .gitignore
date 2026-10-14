@@ -9,6 +9,14 @@ bench/results/*
 !bench/results/olmoe-ppl-baseline.json
 !bench/results/olmoe-1b-7b-prefetch-table.txt
 !bench/results/step1-attrib.json
+!bench/results/ppl-*.json
+!bench/results/ppl-*.log
+# The archive holds one artifact on purpose: the build whose two policies tied to five
+# digits, which is what exposed the accumulation bug (docs/REWRITE.md §E). A parent
+# directory has to be re-included before a file inside it can be.
+!bench/results/archive/
+!bench/results/archive/*.json
+!bench/results/archive/*.log
 *.gguf
 __pycache__/
 .venv/
@@ -21,3 +29,4 @@ graphify-out/
 
 # Personal working notes — kept out of the repository on purpose.
 viperasuport.md
+docs/reference/literature/

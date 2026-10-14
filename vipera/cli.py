@@ -5,6 +5,7 @@
     python -m vipera arch     arch/glm-5.3-flash.toml
     python -m vipera schedule arch/glm-5.3-flash.toml --target hw/gtx1650.toml [--out DIR]
     python -m vipera run      <model.gguf> --target hw/gtx1650.toml [--manifest M] [--dry-run]
+    python -m vipera rewrite  <model.gguf> --out NEW.gguf --from-trace trace.jsonl [--prune-to K]
 """
 
 from __future__ import annotations
@@ -12,6 +13,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import random
 import sys
 import tempfile
 import tomllib
@@ -20,7 +22,10 @@ from . import __version__
 from .analyze import analyze, to_dict
 from .arch import Architecture
 from .gguf import GGUFError, read_gguf
-from .manifest import Target, dumps, plan
+from .gguf_write import expert_order, rewrite_experts
+from .launch import choose_policy, describe
+from .longcontext import DEFAULT_SINKS, describe as describe_long_context, plan_long_context
+from .manifest import MIB, Target, dumps, plan
 from .schedule import (
     Optimizations,
     Quant,
@@ -413,6 +418,108 @@ def cmd_score(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_kv(args: argparse.Namespace) -> int:
+    """Report the KV context budget and the sink+window policy that fits it."""
+    arch = Architecture.from_toml(args.arch)
+    target = Target.from_toml(args.target)
+    if args.model:
+        model_bytes = os.path.getsize(args.model)
+    elif args.model_mib:
+        model_bytes = args.model_mib * MIB
+    else:
+        print("error: `kv` needs --model or --model-mib", file=sys.stderr)
+        return 2
+    # The target's `ram_headroom_bytes` already reserves the OS/runtime share, so
+    # pass the totals and let the planner subtract that reserve once — passing
+    # `usable_ram` here would subtract it twice and report no KV budget at all.
+    policy = plan_long_context(
+        arch=arch, model_bytes=model_bytes,
+        ram_bytes=target.ram_bytes, headroom_bytes=target.ram_headroom_bytes,
+        requested_context=args.context, kv_bits=args.kv_bits, sinks=args.sinks,
+    )
+    if args.json:
+        print(json.dumps({
+            "requested_context": policy.requested_context,
+            "window": policy.window,
+            "sinks": policy.sinks,
+            "context_shift": policy.context_shift,
+            "cap": policy.cap,
+            "kv_bytes": policy.kv_bytes,
+            "flags": policy.to_flags(kv_bits=args.kv_bits),
+            "reason": policy.reason,
+            "warnings": policy.warnings,
+        }, indent=2))
+        return 0
+    print(f"architecture  {arch.name}")
+    print(f"model         {model_bytes / MIB:.0f} MiB")
+    print(f"context cap   {policy.cap} tokens (largest KV that fits beside the model)")
+    print(describe_long_context(policy, kv_bits=args.kv_bits))
+    for w in policy.warnings:
+        print(f"warning       {w}")
+    return 0
+
+
+def cmd_rewrite(args: argparse.Namespace) -> int:
+    """Write a new GGUF with the routed experts reordered and/or pruned.
+
+    The order comes from a routing trace: `--from-trace` ranks each layer's experts
+    by how often the trace uses them (the co-activation layout of arXiv:2410.19274),
+    and `--prune-to K` keeps only the top K. Without a trace, `--random` writes a
+    deliberately scrambled layout, which is the control arm for measuring what the
+    layout is worth.
+    """
+    source = read_gguf(args.model)
+    expert_tensors = [t for t in source.tensors
+                      if len(t.shape) >= 3 and "_exps" in t.name and "_shexp" not in t.name]
+    if not expert_tensors:
+        print(f"error: {args.model} has no routed-expert tensor to rewrite", file=sys.stderr)
+        return 2
+    n_experts = int(expert_tensors[0].shape[2])
+    # only layers that actually carry routed experts: asking for a layer without
+    # them is an error the writer refuses, not something to paper over here
+    layers = sorted({_block_of(t.name) for t in expert_tensors if _block_of(t.name) is not None})
+
+    if args.from_trace:
+        routing = load_trace(args.from_trace)
+        order = expert_order(routing, n_experts=n_experts, prune_to=args.prune_to)
+        unknown = sorted(set(order) - set(layers))
+        if unknown:
+            print(f"error: trace covers layers {unknown}, which have no routed experts",
+                  file=sys.stderr)
+            return 2
+    elif args.random is not None:
+        rng = random.Random(args.random)
+        order = {}
+        for layer in layers:
+            ids = list(range(n_experts))
+            rng.shuffle(ids)
+            order[layer] = ids[:args.prune_to] if args.prune_to else ids
+    else:
+        print("error: `rewrite` needs --from-trace or --random", file=sys.stderr)
+        return 2
+
+    report = rewrite_experts(args.model, args.out, order)
+    if args.json:
+        print(json.dumps(report.as_dict(), indent=2))
+        return 0
+    print(f"source        {report.src}")
+    print(f"dest          {report.dest}  ({report.bytes_after} bytes)")
+    print(f"tensors       {report.tensors} ({report.edited_tensors} rewritten)")
+    print(f"experts       {report.experts_before} -> {report.experts_after}")
+    print(f"bytes         {report.bytes_before} -> {report.bytes_after} "
+          f"({report.bytes_after - report.bytes_before:+d})")
+    for layer, count in sorted(report.per_layer.items()):
+        print(f"  blk.{layer:<4d}   {count} experts")
+    return 0
+
+
+def _block_of(name: str) -> int | None:
+    parts = name.split(".")
+    if len(parts) > 1 and parts[0] == "blk" and parts[1].isdigit():
+        return int(parts[1])
+    return None
+
+
 def cmd_run(args: argparse.Namespace) -> int:
     """Run the model for real, using a residency manifest to pick the flags.
 
@@ -441,6 +548,23 @@ def cmd_run(args: argparse.Namespace) -> int:
     gpu = detect_gpu_backend(binary)
     flags = plan_flags(manifest, gpu=gpu, n_layers=inv.n_layers)
 
+    # The launch policy is the measured lever that the manifest does not cover:
+    # how the process loads the weights (default `mmap` re-faults evicted pages).
+    policy = choose_policy(model_bytes=os.path.getsize(args.model))
+    if args.load_mode != "auto":
+        flags.load_mode = args.load_mode
+        launch_line = f"launch policy  -lm {args.load_mode} -t {args.threads or policy.threads} (forced by --load-mode)"
+    else:
+        flags.load_mode = policy.load_mode
+        for w in policy.warnings:
+            print(f"warning: {w}", file=sys.stderr)
+        launch_line = describe(policy)
+    if args.stream:
+        flags.n_keep = args.sinks
+        flags.context_shift = True
+        launch_line += f"; stream --keep {args.sinks} --context-shift (StreamingLLM)"
+    threads = args.threads if args.threads is not None else policy.threads
+
     prefetch_env, prefetch_summary = _prefetch_env(args)
     if prefetch_env and not supports_prefetch(binary):
         # The fork patch is what reads LLAMA_MOE_PREFETCH; an unpatched llama.cpp
@@ -452,11 +576,12 @@ def cmd_run(args: argparse.Namespace) -> int:
     cmd = build_command(
         binary, args.model, flags,
         context=args.context, n_predict=args.n_predict, prompt=args.prompt,
-        threads=args.threads, extra=args.llama_args or None,
+        threads=threads, extra=args.llama_args or None,
         prefetch=bool(prefetch_env),
     )
     if args.dry_run:
         dry = {"ok": True, "exit_code": 0, "elapsed_s": 0.0, "command": cmd}
+        print(launch_line)
         print(format_report(dry, flags=flags, manifest_source=manifest_source))
         if prefetch_summary:
             print(f"prefetch      {prefetch_summary}")
@@ -468,9 +593,10 @@ def cmd_run(args: argparse.Namespace) -> int:
         report = compare_runs(
             binary, args.model, flags,
             context=args.context, n_predict=args.n_predict, prompt=args.prompt,
-            threads=args.threads, extra=args.llama_args or None, timeout=args.timeout,
+            threads=threads, extra=args.llama_args or None, timeout=args.timeout,
             extra_env=prefetch_env or None,
         )
+        print(launch_line)
         print(format_compare(report, manifest_source=manifest_source,
                              prefetch=prefetch_summary))
         ok = report["manifest"]["ok"] and report["baseline"]["ok"]
@@ -478,9 +604,10 @@ def cmd_run(args: argparse.Namespace) -> int:
         report = run_model(
             binary, args.model, flags,
             context=args.context, n_predict=args.n_predict, prompt=args.prompt,
-            threads=args.threads, extra=args.llama_args or None, timeout=args.timeout,
+            threads=threads, extra=args.llama_args or None, timeout=args.timeout,
             extra_env=prefetch_env or None,
         )
+        print(launch_line)
         print(format_report(report, flags=flags, manifest_source=manifest_source))
         if prefetch_summary:
             print(f"prefetch      {prefetch_summary}")
@@ -638,6 +765,14 @@ def build_parser() -> argparse.ArgumentParser:
     rn.add_argument("--n-predict", type=int, default=32)
     rn.add_argument("--prompt", default="The capital of France is")
     rn.add_argument("--threads", type=int, default=None)
+    rn.add_argument("--load-mode", choices=["auto", "mmap", "mlock", "dio"], default="auto",
+                    help="force the llama.cpp -lm load mode; 'auto' picks it from "
+                         "available RAM and the model size")
+    rn.add_argument("--stream", action="store_true",
+                    help="keep attention sinks and slide the window (StreamingLLM): "
+                         "generate past the context instead of stopping at it")
+    rn.add_argument("--sinks", type=int, default=DEFAULT_SINKS,
+                    help=f"attention sinks kept by --stream (default {DEFAULT_SINKS})")
     rn.add_argument("--timeout", type=float, default=None, help="kill the run after this many seconds")
     rn.add_argument("--dry-run", action="store_true",
                     help="print the mapped command without running it")
@@ -654,6 +789,30 @@ def build_parser() -> argparse.ArgumentParser:
                     help="cap candidates per layer (0 = the whole keep-set)")
     rn.add_argument("--json", dest="json_path", help="write the run report here")
     rn.set_defaults(func=cmd_run, llama_args=[])
+
+    kvc = sub.add_parser("kv",
+                         help="plan the KV context budget and a StreamingLLM sink+window policy")
+    kvc.add_argument("arch", help="architecture profile (TOML)")
+    kvc.add_argument("--target", required=True, help="hardware profile (TOML)")
+    kvc.add_argument("--model", help="model file whose size sets the budget")
+    kvc.add_argument("--model-mib", type=int, help="model size in MiB (instead of --model)")
+    kvc.add_argument("--context", type=int, default=32768, help="requested context (default 32768)")
+    kvc.add_argument("--kv-bits", type=int, default=16, choices=[16, 8, 4])
+    kvc.add_argument("--sinks", type=int, default=DEFAULT_SINKS)
+    kvc.add_argument("--json", action="store_true")
+    kvc.set_defaults(func=cmd_kv)
+
+    rw = sub.add_parser("rewrite",
+                        help="write a GGUF with routed experts reordered and/or pruned")
+    rw.add_argument("model", help="source GGUF")
+    rw.add_argument("--out", required=True, help="destination GGUF")
+    rw.add_argument("--from-trace", help="routing trace (JSONL); experts are ordered by use")
+    rw.add_argument("--prune-to", type=int,
+                    help="keep only the top K experts per layer")
+    rw.add_argument("--random", type=int, metavar="SEED",
+                    help="write a shuffled layout instead (control arm)")
+    rw.add_argument("--json", action="store_true")
+    rw.set_defaults(func=cmd_rewrite)
     return p
 
 

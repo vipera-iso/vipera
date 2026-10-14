@@ -81,6 +81,51 @@ def make_gguf(path: str, *, block_count: int = 2, n_experts: int = 4) -> None:
         f.write(buf)
 
 
+def make_imatrix_gguf(path: str, *, tensors: dict[str, list[float]], shape: tuple[int, int] | None = None) -> None:
+    """An imatrix-shaped GGUF: F32 tensors only, with a real data section.
+
+    `tensors` maps a tensor name to its flat little-endian F32 payload; `shape` applies
+    to every tensor (the probe reads 2-D expert matrices), defaulting to 1-D.
+    """
+    names = list(tensors)
+    buf = bytearray()
+    buf += b"GGUF"
+    buf += struct.pack("<I", 3)
+    buf += struct.pack("<Q", len(names))
+    buf += struct.pack("<Q", 2)
+    _kv_str(buf, "general.architecture", "llama")
+    _kv_str(buf, "general.name", "synthetic-imatrix")
+    offset = 0
+    for name in names:
+        dims = shape if shape is not None else (len(tensors[name]),)
+        _tensor(buf, name, dims, offset=offset)
+        offset += len(tensors[name]) * 4
+    buf += b"\x00" * ((-len(buf)) % 32)
+    for name in names:
+        buf += struct.pack(f"<{len(tensors[name])}f", *tensors[name])
+    with open(path, "wb") as f:
+        f.write(buf)
+
+
+def make_dense_gguf(path: str, *, block_count: int = 2) -> None:
+    """A dense (non-MoE) model: no routed-expert tensor anywhere, so the expert
+    rewrite path has nothing to act on."""
+    buf = bytearray()
+    buf += b"GGUF"
+    buf += struct.pack("<I", 3)
+    buf += struct.pack("<Q", 1 + 3 * block_count)  # tensor_count
+    buf += struct.pack("<Q", 2)
+    _kv_str(buf, "general.architecture", "llama")
+    _kv_u32(buf, "llama.block_count", block_count)
+    _tensor(buf, "token_embd.weight", (256, 8))
+    for i in range(block_count):
+        _tensor(buf, f"blk.{i}.attn_q.weight", (256, 8))
+        _tensor(buf, f"blk.{i}.ffn_gate.weight", (256, 64))
+        _tensor(buf, f"blk.{i}.ffn_down.weight", (64, 256))
+    with open(path, "wb") as f:
+        f.write(buf)
+
+
 def make_unknown_quant_gguf(path: str, ggml_type: int = 999) -> None:
     """A structurally valid header whose single tensor uses a quant type vipera cannot size.
 
@@ -184,6 +229,76 @@ def make_gguf_with_bogus_counts(path: str, *, kv_count: int = 0,
     _header(buf, kv_count=kv_count, tensor_count=tensor_count)
     with open(path, "wb") as f:
         f.write(buf)
+
+
+def make_gguf_with_expert_data(path: str, *, block_count: int = 2, n_experts: int = 4,
+                               alignment: int = 32, n_embd: int = 64, n_ff: int = 64) -> dict:
+    """A GGUF *with* a data section, where every tensor is filled with a recognizable pattern.
+
+    Dense tensors are filled with a per-tensor byte, and each expert slab of a routed
+    expert tensor with a byte that encodes (layer, expert), so a reorder or a prune can
+    be checked byte for byte rather than by size alone. Returns the byte value used for
+    each (layer, expert) pair.
+    """
+    tensors = [("token_embd.weight", (n_embd, 8))]
+    for i in range(block_count):
+        tensors += [
+            (f"blk.{i}.attn_q.weight", (n_embd, 8)),
+            (f"blk.{i}.ffn_gate_inp.weight", (n_embd, 8)),
+            (f"blk.{i}.ffn_gate_shexp.weight", (n_embd, n_ff)),
+            (f"blk.{i}.ffn_gate_exps.weight", (n_embd, n_ff, n_experts)),
+        ]
+
+    patterns: dict[tuple[int, int], int] = {}
+    offsets: list[int] = []
+    offset = 0
+    for name, shape in tensors:
+        offset = (offset + alignment - 1) // alignment * alignment
+        offsets.append(offset)
+        n = 1
+        for d in shape:
+            n *= d
+        offset += n * 4  # F32
+
+    buf = bytearray()
+    buf += b"GGUF"
+    buf += struct.pack("<I", 3)
+    buf += struct.pack("<Q", len(tensors))
+    buf += struct.pack("<Q", 3)
+    _kv_str(buf, "general.architecture", "llama")
+    _kv_u32(buf, "llama.block_count", block_count)
+    _kv_u32(buf, "general.alignment", alignment)
+    for (name, shape), off in zip(tensors, offsets):
+        _tensor(buf, name, shape, offset=off)
+
+    data = bytearray()
+    for (name, shape), off in zip(tensors, offsets):
+        pad = off - len(data)
+        data += b"\x00" * pad
+        n = 1
+        for d in shape:
+            n *= d
+        if "_exps" in name:
+            layer = _layer_index(name)
+            slab = n // shape[2] * 4
+            for e in range(shape[2]):
+                value = (0x10 * (layer + 1) + e) & 0xFF
+                patterns[(layer, e)] = value
+                data += bytes([value]) * slab
+        else:
+            data += bytes([0xC0 + _layer_index(name)]) * (n * 4)
+
+    pad = (-len(buf)) % alignment
+    buf += b"\x00" * pad
+    buf += data
+    with open(path, "wb") as f:
+        f.write(buf)
+    return patterns
+
+
+def _layer_index(name: str) -> int:
+    parts = name.split(".")
+    return int(parts[1]) if len(parts) > 2 and parts[0] == "blk" else 0
 
 
 def expected_bytes(*, block_count: int = 2, n_experts: int = 4) -> dict:

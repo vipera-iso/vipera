@@ -11,8 +11,9 @@
 artifact (GGUF/safetensors), analyzes it, and emits a *manifest* that says what lives where
 (VRAM/RAM/disk), in what load order, and which experts are "hot". `vipera run` then **drives an
 existing runtime** (llama.cpp) from that manifest — it executes the model instead of only predicting
-its speed, without reimplementing a runtime. (The tensor data itself is **not** rewritten yet; see
-Status below.)
+its speed, without reimplementing a runtime. (The tensor data *can* now be rewritten — `vipera
+rewrite` reorders or prunes expert slabs in place — but no rewrite is semantics-preserving yet,
+because the router has to move with them; see Status below and `docs/REWRITE.md` §C.)
 
 Inspired by [FreeToken](https://github.com/FlashML-org/FreeToken) (MoE serving on consumer hardware)
 and [AirLLM](https://github.com/lyogavin/airllm) (layer-wise streaming) — but both assume plenty of
@@ -34,12 +35,15 @@ The earlier formulation — *"optimize at the file layer, not just at runtime"* 
 this machine cannot reach, and the measurements do not support it as a general claim. It is
 withdrawn rather than softened.
 
-> Status: **stage 3 — it runs.** stage 1 (analyzer + residency planner) and stage 2 (per-layer
+> Status: **stage 4 — it runs and it writes.** stage 1 (analyzer + residency planner) and stage 2 (per-layer)
 > architecture model + a bandwidth/cache-aware streaming scheduler) plan a residency manifest, and
 > `vipera run` now **executes the model for real**: it reads that manifest back, translates it into a
 > llama.cpp command line, launches the binary and measures throughput, peak RSS and disk reads. The
-> tensor data is not rewritten yet and vipera does not reimplement a runtime — it drives the
-existing one from its own manifest — but the layer no longer only predicts. Everything `schedule`
+> tensor data can now be rewritten as well: `vipera rewrite` moves expert slabs inside a real
+10.36 GB GGUF with a measured lossless round trip (377/377 tensors), and the reorder is measurable
+(PPL 4.54 → 671.79), which is the evidence that the router must be permuted with the slabs before a
+layout is worth anything (`docs/REWRITE.md` §C). vipera still does not reimplement a runtime — it
+drives the existing one from its own manifest — but the layer no longer only predicts. Everything `schedule`
 > reports is still **modelled** and says so; `run`'s numbers are measured.
 
 > **Every benchmark figure in this README predates the re-measurement above.** Several were taken
@@ -139,7 +143,7 @@ GPU backends are **optional**. CPU-only runs, and on the target machine it is th
 three because the model does not fit in 4 GB of VRAM — the Vulkan and root-free CUDA recipes, and
 the measured numbers, are under [Exercising the VRAM half](#exercising-the-vram-half).
 
-The suite runs under both `unittest` (standard library, what CI uses) and `pytest` — 225 tests
+The suite runs under both `unittest` (standard library, what CI uses) and `pytest` — 304 tests
 either way, with `pytest` needing no plugin or config.
 
 ## Quick start
@@ -250,6 +254,8 @@ What it computes today:
 | `prune` | the per-layer keep-set that retains a target routing mass, next to what uniform pruning would keep |
 | `schedule` | modelled bytes/token and tok/s, plus the cache hit rate **and the ceiling at the same cache size** (`policy / ceiling` ratio) |
 | `run` | a real llama.cpp run driven by a manifest: the mapped flags, throughput, peak RSS and disk read bytes |
+| `kv` | the largest context this model + machine can hold, and the `--keep`/`--context-shift` flags that slide past it |
+| `rewrite` | a new GGUF with expert slabs reordered (or pruned) in place, with the byte delta — the file layer, writing |
 
 The planner is **size-driven** for now: it cannot rank *which* experts are hot until routing traces
 from Phase 2 exist, and it says so in `placement.expert_order_pending_trace`.
@@ -506,6 +512,9 @@ in this repo, from `bench/results/hwprobe-run{1,2}.json`.
   tied to reproduciable vipera numbers.
 - [`docs/FEASIBILITY.md`](docs/FEASIBILITY.md) — **can GLM-5.3-Flash (321B/18B) run here?** The
   modelled verdict, per-quant, and the ceilings that make it infeasible.
+- [`docs/REWRITE.md`](docs/REWRITE.md) — **where an advantage can actually come from**: five
+  stages (launch policy, long context, the GGUF writer, activation sparsity, surprise retention)
+  with the number each one moved — including the two that were built, measured and *rejected*.
 - [`docs/OPTIMIZER.md`](docs/OPTIMIZER.md) — **the model-file optimization layer** (vipera's core
   positioning).
 - [`docs/ALGORITHMS.md`](docs/ALGORITHMS.md) — algorithm analysis (streaming, MoE offloading,

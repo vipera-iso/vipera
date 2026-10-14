@@ -269,6 +269,9 @@ class GGUF:
     file_size: int
     # Byte offset where tensor data starts (descriptors padded to the alignment).
     data_offset: int = 0
+    # Byte offset where the metadata block ends (tensor descriptors start here).
+    # `gguf_write` copies the metadata block verbatim, so it needs this boundary.
+    kv_end: int = 0
 
     def validate_extents(self) -> None:
         """Check every tensor's data lies inside the file.
@@ -336,6 +339,8 @@ def read_gguf(path: str) -> GGUF:
             vtype = _read_u32(f, file_size)
             metadata[key] = _read_value(f, vtype, file_size)
 
+        kv_end = f.tell()
+
         tensors: list[TensorInfo] = []
         for _ in range(tensor_count):
             name = _read_string(f, file_size)
@@ -364,6 +369,6 @@ def read_gguf(path: str) -> GGUF:
             raise UnknownQuantType(t.ggml_type, t.name)
 
     gguf = GGUF(version=version, metadata=metadata, tensors=tensors,
-                file_size=file_size, data_offset=data_offset)
+                file_size=file_size, data_offset=data_offset, kv_end=kv_end)
     gguf.validate_extents()
     return gguf
