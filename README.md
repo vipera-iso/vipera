@@ -256,6 +256,7 @@ What it computes today:
 | `run` | a real llama.cpp run driven by a manifest: the mapped flags, throughput, peak RSS and disk read bytes |
 | `kv` | the largest context this model + machine can hold, and the `--keep`/`--context-shift` flags that slide past it |
 | `rewrite` | a new GGUF with expert slabs reordered (or pruned) in place, with the byte delta — the file layer, writing |
+| `algo` | the literature pack as executable code: `algo list` names the four algorithms with their source and evidence status, `algo run` executes one and prints its result |
 
 The planner is **size-driven** for now: it cannot rank *which* experts are hot until routing traces
 from Phase 2 exist, and it says so in `placement.expert_order_pending_trace`.
@@ -519,6 +520,10 @@ in this repo, from `bench/results/hwprobe-run{1,2}.json`.
   positioning).
 - [`docs/ALGORITHMS.md`](docs/ALGORITHMS.md) — algorithm analysis (streaming, MoE offloading,
   co-execution, quantization, KV cache, speculative decoding, model compression).
+- [`docs/ALGORITHM-SYSTEM.md`](docs/ALGORITHM-SYSTEM.md) — **the executable half of the
+  literature pack**: the four registered algorithms, the harness that measures them on real
+  Q4_K weights and a real trace, and the ledger of which proposed levers were taken and
+  which were rejected — each with the number that decided it.
 - [`docs/DESIGN.md`](docs/DESIGN.md) — architecture, FreeToken/AirLLM comparison, 1-month roadmap,
   tech stack, KPIs, risks, **7-day plan**.
 - [`algorithms-digest.md`](algorithms-digest.md) — **every algorithm on one page**: the target

@@ -13,6 +13,18 @@ this project intends to follow [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- **`vipera algo` — the literature pack as executable code** — four algorithms
+  (`kv-retention`, `quant-gptq`, `select-submodular`, `spec-draft-length`), each a
+  paper mapped to a function that runs without a model, a GPU or a network, plus a
+  registry naming the source and the evidence status of every entry. Measured against
+  real artifacts by `bench/algo_measure.py`: the Q4_K dequantiser is verified by
+  re-encoding every value it produced (**100.0000%** on 12288 real weights, worst
+  error `0.00e+00`, with no `llama-quantize` present to compare against), GPTQ moves
+  the Hessian norm **2.09×** on those weights at a **1.54×** cost in Frobenius, and
+  the 511-token OLMoE trace turns out to define a *modular* objective, so the (1−1/e)
+  submodular bound is **vacuous** there and greedy ties the exact optimum on **16/16**
+  layers. The ledger of every taken and rejected lever, with the number that decided
+  each, is `docs/ALGORITHM-SYSTEM.md`.
 - **`vipera run` — the runtime half** — reads a residency manifest, maps it onto
   llama.cpp flags (`--n-cpu-moe`, `--moe-cache-mib`, `-ngl`, `-ctk`/`-ctv`),
   launches the binary and measures throughput, peak RSS and disk read bytes. It
@@ -83,6 +95,12 @@ this project intends to follow [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- **`vipera algo run` silently dropped most of its own report.** The flat printer
+  skipped every nested value, so `select-submodular --trace` printed a bare header
+  with no numbers at all and `spec-draft-length` lost three of its five keys; only
+  `quant-gptq`, whose result happens to be flat, rendered completely — which is why
+  the defect went unnoticed. The printer is recursive now, and two tests assert that
+  every key an algorithm returns appears in the human report.
 - **The suite now runs under `pytest`.** `bench/bench.py` named its row labeller
   `test_label` (`bench.py:56`); importing it into `tests/test_bench.py` put a
   `test_*` function with a required argument at module scope, which pytest tried to

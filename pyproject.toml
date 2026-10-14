@@ -15,4 +15,4 @@ dependencies = []            # stdlib only — vipera must run where nothing ins
 vipera = "vipera.cli:main"
 
 [tool.setuptools]
-packages = ["vipera"]
+packages = ["vipera", "vipera.algorithms"]

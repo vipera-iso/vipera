@@ -9,6 +9,7 @@ bench/results/*
 !bench/results/olmoe-ppl-baseline.json
 !bench/results/olmoe-1b-7b-prefetch-table.txt
 !bench/results/step1-attrib.json
+!bench/results/algo-measure.json
 !bench/results/ppl-*.json
 !bench/results/ppl-*.log
 # The archive holds one artifact on purpose: the build whose two policies tied to five

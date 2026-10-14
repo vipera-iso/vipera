@@ -813,7 +813,117 @@ def build_parser() -> argparse.ArgumentParser:
                     help="write a shuffled layout instead (control arm)")
     rw.add_argument("--json", action="store_true")
     rw.set_defaults(func=cmd_rewrite)
+
+    al = sub.add_parser(
+        "algo", help="run one of the offline optimization algorithms (no model needed)")
+    al_sub = al.add_subparsers(dest="algo_cmd", required=True)
+    al_list = al_sub.add_parser("list", help="what is implemented, and where it came from")
+    al_list.add_argument("--json", action="store_true")
+    al_list.set_defaults(func=cmd_algo_list)
+    al_run = al_sub.add_parser("run", help="execute one algorithm and print its result")
+    al_run.add_argument("name", help="algorithm name from `vipera algo list`")
+    al_run.add_argument("--json", action="store_true")
+    al_run.add_argument("--trace", help="routing trace (JSONL) where the algorithm can use it")
+    al_run.set_defaults(func=cmd_algo_run)
     return p
+
+
+def cmd_algo_list(args: argparse.Namespace) -> int:
+    """Print the registry, so what is implemented is discoverable from the CLI."""
+    from .algorithms import list_algorithms
+
+    rows = [a.as_dict() for a in list_algorithms()]
+    if args.json:
+        print(json.dumps(rows, indent=2))
+        return 0
+    width = max(len(r["name"]) for r in rows)
+    for r in rows:
+        print(f"{r['name']:<{width}}  {r['kind']:<6}  [{r['status']}]")
+        print(f"{'':<{width}}  {r['summary']}")
+        print(f"{'':<{width}}  source: {r['source']}")
+    return 0
+
+
+def cmd_algo_run(args: argparse.Namespace) -> int:
+    """Run one registered algorithm.
+
+    Only the algorithms that can use one are handed the trace; a stray `--trace`
+    on an algorithm that ignores it is a usage mistake worth reporting rather
+    than silently accepting, because the caller would otherwise believe the
+    numbers were trace-driven.
+    """
+    from .algorithms import get, run as run_algorithm
+
+    try:
+        algorithm = get(args.name)
+    except KeyError as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 2
+
+    kwargs: dict = {}
+    if args.trace:
+        if algorithm.kind != "select":
+            print(
+                f"error: `{args.name}` does not consume a trace; --trace would be ignored",
+                file=sys.stderr,
+            )
+            return 2
+        kwargs["trace"] = args.trace
+
+    try:
+        report = run_algorithm(args.name, **kwargs)
+    except (TraceError, ValueError) as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 2
+
+    if args.json:
+        print(json.dumps(report, indent=2))
+        return 0
+    _print_algo_report(args.name, report)
+    return 0
+
+
+def _print_algo_report(name: str, report: dict) -> None:
+    """A one-screen human report; `--json` is the machine-readable form.
+
+    Recursive, because the reports nest and the earlier flat printer *skipped*
+    every nested value. `select-submodular` returns only dicts at the top level, so
+    the human path printed the header and nothing else, and `spec-draft-length`
+    silently lost three of its five keys. The printed numbers are supposed to be
+    the numbers the algorithm produced, so a key that cannot be rendered has to be
+    a visible failure rather than a shorter report.
+    """
+    print(f"algorithm     {name}")
+    _print_report_node(report, indent=0)
+
+
+def _print_report_node(node: dict, *, indent: int) -> None:
+    pad = "  " * indent
+    width = max(12, 28 - 2 * indent)
+    for key, value in node.items():
+        if isinstance(value, dict):
+            print(f"{pad}{key}:")
+            _print_report_node(value, indent=indent + 1)
+        elif isinstance(value, list) and value and isinstance(value[0], dict):
+            print(f"{pad}{key}:")
+            _print_report_table(value, indent=indent + 1)
+        elif isinstance(value, list):
+            # Scalars stay on one line: `overlaps` is a list of nine numbers and a
+            # column each would push the report off the screen for no gain.
+            body = ", ".join(
+                f"{v:.6g}" if isinstance(v, float) else str(v) for v in value
+            )
+            print(f"{pad}{key:<{width}}[{body}]")
+        else:
+            print(f"{pad}{key:<{width}}{value}")
+
+
+def _print_report_table(rows: list[dict], *, indent: int) -> None:
+    pad = "  " * indent
+    cols = list(rows[0].keys())
+    print(f"{pad}" + "  ".join(f"{c:>12}" for c in cols))
+    for row in rows:
+        print(f"{pad}" + "  ".join(f"{str(row.get(c, '')):>12}" for c in cols))
 
 
 def main(argv: list[str] | None = None) -> int:

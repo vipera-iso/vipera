@@ -1,0 +1,185 @@
+{
+  "harness": "bench/algo_measure.py",
+  "quant": {
+    "model": "models/Qwen3-0.6B-Q4_K_M.gguf",
+    "tensor": "blk.0.ffn_gate.weight",
+    "tensor_shape": [
+      1024,
+      3072
+    ],
+    "weights_sampled": "48x256",
+    "blocks_read": 48,
+    "bytes_read": 6912,
+    "verification": {
+      "values": 12288,
+      "failures": 0,
+      "pass_rate": 1.0,
+      "worst_round_trip_error": 0.0
+    },
+    "bits": 4,
+    "rtn_frobenius": 4.94270950673021e-05,
+    "gptq_frobenius": 7.6242872381917e-05,
+    "rtn_hessian": 0.012450286759090523,
+    "gptq_hessian": 0.005952317006156887,
+    "identity_control_identical": true,
+    "hessian_is_synthetic": true
+  },
+  "select": {
+    "trace": "bench/results/olmoe-1b-7b-511tok.jsonl",
+    "tokens": 511,
+    "layers": 16,
+    "experts": 64,
+    "top_k": 6,
+    "total_selections": 26622,
+    "objective": "modular (sum of per-expert selection counts)",
+    "submodular_bound_applies": false,
+    "layers_where_prefix_equals_greedy": "16/16",
+    "min_ratio_to_optimum": 1.0,
+    "per_layer": [
+      {
+        "layer": 0,
+        "k": 6,
+        "greedy_mass": 1445.0,
+        "lazy_matches_greedy": true,
+        "prefix_matches_greedy": true,
+        "exact_optimum_mass": 1445.0,
+        "ratio_to_optimum": 1.0
+      },
+      {
+        "layer": 1,
+        "k": 6,
+        "greedy_mass": 1379.0,
+        "lazy_matches_greedy": true,
+        "prefix_matches_greedy": true,
+        "exact_optimum_mass": 1379.0,
+        "ratio_to_optimum": 1.0
+      },
+      {
+        "layer": 2,
+        "k": 6,
+        "greedy_mass": 1582.0,
+        "lazy_matches_greedy": true,
+        "prefix_matches_greedy": true,
+        "exact_optimum_mass": 1582.0,
+        "ratio_to_optimum": 1.0
+      },
+      {
+        "layer": 3,
+        "k": 6,
+        "greedy_mass": 1551.0,
+        "lazy_matches_greedy": true,
+        "prefix_matches_greedy": true,
+        "exact_optimum_mass": 1551.0,
+        "ratio_to_optimum": 1.0
+      },
+      {
+        "layer": 4,
+        "k": 6,
+        "greedy_mass": 1840.0,
+        "lazy_matches_greedy": true,
+        "prefix_matches_greedy": true,
+        "exact_optimum_mass": 1840.0,
+        "ratio_to_optimum": 1.0
+      },
+      {
+        "layer": 5,
+        "k": 6,
+        "greedy_mass": 1824.0,
+        "lazy_matches_greedy": true,
+        "prefix_matches_greedy": true,
+        "exact_optimum_mass": 1824.0,
+        "ratio_to_optimum": 1.0
+      },
+      {
+        "layer": 6,
+        "k": 6,
+        "greedy_mass": 2039.0,
+        "lazy_matches_greedy": true,
+        "prefix_matches_greedy": true,
+        "exact_optimum_mass": 2039.0,
+        "ratio_to_optimum": 1.0
+      },
+      {
+        "layer": 7,
+        "k": 6,
+        "greedy_mass": 1617.0,
+        "lazy_matches_greedy": true,
+        "prefix_matches_greedy": true,
+        "exact_optimum_mass": 1617.0,
+        "ratio_to_optimum": 1.0
+      },
+      {
+        "layer": 8,
+        "k": 6,
+        "greedy_mass": 1755.0,
+        "lazy_matches_greedy": true,
+        "prefix_matches_greedy": true,
+        "exact_optimum_mass": 1755.0,
+        "ratio_to_optimum": 1.0
+      },
+      {
+        "layer": 9,
+        "k": 6,
+        "greedy_mass": 1676.0,
+        "lazy_matches_greedy": true,
+        "prefix_matches_greedy": true,
+        "exact_optimum_mass": 1676.0,
+        "ratio_to_optimum": 1.0
+      },
+      {
+        "layer": 10,
+        "k": 6,
+        "greedy_mass": 1463.0,
+        "lazy_matches_greedy": true,
+        "prefix_matches_greedy": true,
+        "exact_optimum_mass": 1463.0,
+        "ratio_to_optimum": 1.0
+      },
+      {
+        "layer": 11,
+        "k": 6,
+        "greedy_mass": 1718.0,
+        "lazy_matches_greedy": true,
+        "prefix_matches_greedy": true,
+        "exact_optimum_mass": 1718.0,
+        "ratio_to_optimum": 1.0
+      },
+      {
+        "layer": 12,
+        "k": 6,
+        "greedy_mass": 1448.0,
+        "lazy_matches_greedy": true,
+        "prefix_matches_greedy": true,
+        "exact_optimum_mass": 1448.0,
+        "ratio_to_optimum": 1.0
+      },
+      {
+        "layer": 13,
+        "k": 6,
+        "greedy_mass": 1713.0,
+        "lazy_matches_greedy": true,
+        "prefix_matches_greedy": true,
+        "exact_optimum_mass": 1713.0,
+        "ratio_to_optimum": 1.0
+      },
+      {
+        "layer": 14,
+        "k": 6,
+        "greedy_mass": 1595.0,
+        "lazy_matches_greedy": true,
+        "prefix_matches_greedy": true,
+        "exact_optimum_mass": 1595.0,
+        "ratio_to_optimum": 1.0
+      },
+      {
+        "layer": 15,
+        "k": 6,
+        "greedy_mass": 1977.0,
+        "lazy_matches_greedy": true,
+        "prefix_matches_greedy": true,
+        "exact_optimum_mass": 1977.0,
+        "ratio_to_optimum": 1.0
+      }
+    ]
+  }
+}
