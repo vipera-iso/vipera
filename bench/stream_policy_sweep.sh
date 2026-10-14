@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # Compare KV eviction policies at an identical KV budget (stage E, docs/REWRITE.md).
 #
-#   bash bench/stream_policy_sweep.sh              # both experiments, all three policies
-#   bash bench/stream_policy_sweep.sh A surprise   # just that cell (appends)
+#   bash bench/stream_policy_sweep.sh                     # both experiments, every arm
+#   bash bench/stream_policy_sweep.sh A                   # experiment A (5 arms)
+#   bash bench/stream_policy_sweep.sh A-surprise-local    # one cell: the hybrid's two margins
 #
 # Every arm scores the SAME tokens with the SAME number of tokens dropped; only the choice
 # of which tokens to drop differs, so a difference in PPL is attributable to the policy.
@@ -22,9 +23,20 @@ OUT=bench/results/ppl-policy-summary.txt
 mkdir -p bench/results
 
 WANT=("$@")
+# `want` matches one cell name exactly. The experiment guards need `want_prefix` instead: a
+# selector like `A-surprise-local` does NOT equal `A`, so an exact-match guard around the whole
+# experiment skipped every arm and exited 0 having done nothing — a silent no-op, which is the
+# one failure this repo is least willing to accept.
 want() {
   [ ${#WANT[@]} -eq 0 ] && return 0
   for w in "${WANT[@]}"; do [ "$w" = "$1" ] && return 0; done
+  return 1
+}
+want_prefix() {
+  [ ${#WANT[@]} -eq 0 ] && return 0
+  for w in "${WANT[@]}"; do
+    case "$w" in "$1"|"$1"-*) return 0;; esac
+  done
   return 1
 }
 
@@ -36,7 +48,7 @@ fi
 log() { echo "$*" >> "$OUT"; }
 
 # experiment A: window 768, keep 4
-if want A; then
+if want_prefix A; then
   for P in recency recency-gap surprise; do
     want "A-$P" || want "A" || continue
     log "=== A keep=4 ctx=512 stride=256 chunks=195 policy=$P ==="
@@ -61,7 +73,7 @@ if want A; then
 fi
 
 # experiment B: window 320, keep 4
-if want B; then
+if want_prefix B; then
   for P in recency recency-gap surprise; do
     want "B-$P" || want "B" || continue
     log "=== B keep=4 ctx=256 stride=128 chunks=391 policy=$P ==="
