@@ -179,6 +179,48 @@ The timing half is not performable. `[measured]`
 17.3 GiB against MemAvailable 12.4 GiB, with `overcommit_memory = 0` and a `CommitLimit` of
 7.7 GiB. Not a tuning problem; a wall.
 
+**That wall was mine, not the model's — corrected 2026-10-15.** The kill was not the expert pool
+overflowing RAM. It was `--repack`, on by default. llama.cpp's CPU backend copies **3D** weight
+tensors used by `GGML_OP_MUL_MAT_ID` — the MoE expert matmul — into a `CPU_REPACK` buffer, and
+that buffer is **anonymous** memory, not file-backed (`ggml-cpu.cpp`
+`ggml_backend_cpu_repack_buffer_type`; `repack.cpp` `extra_buffer_type::supports_op` accepts
+`MUL_MAT_ID` with `ggml_n_dims == 3`). Repacking is a CPU *speed* feature that silently converts
+a disk-streamable model into a must-fit-in-RAM one. `-nr` turns it off. `[measured]`
+
+`bench/moe_spill.py` runs the two arms back to back, 3 repetitions each, one flag apart:
+
+| arm | outcome | exit | peak anon RSS | peak file RSS | tok/s |
+|---|---|---|---|---|---|
+| default (repacking on) | **OOM-killed 3/3** | −9 | **11552 MiB** | 10392 MiB | — |
+| `-nr` | **ran 3/3** | 0 | **112 MiB** | 11327 MiB | **5.6** (5.0–6.2) |
+
+The RSS columns are the mechanism, not decoration: the default arm's ~11.5 GiB is *anonymous* and
+therefore unreclaimable, so it exhausts a machine with 11.5 GiB available; the `-nr` arm's
+~11.3 GiB is *file-backed* and therefore reclaimable, and the kernel pages the expert slabs in and
+out as they are needed. The anonymous figure was identical to the MiB across all three `-nr` runs,
+which is what makes it a property of the flag rather than of the run. No `dmesg` is available
+without root, so the kill is identified from the signal plus peak RSS sitting at the machine's
+limit.
+
+A second measurement, on models that **fit**: disabling repacking is not even a tradeoff here.
+`llama-bench`, `-t 4 -lm mlock`, 512 prompt / 32 generated. `[measured]`
+
+| model | `--repack` | pp512 | tg32 |
+|---|---|---|---|
+| DeepSeek-V2-Lite | 1 | 50.51 ± 0.29 | 22.95 ± 0.09 |
+| DeepSeek-V2-Lite | 0 | **72.31 ± 0.44** | 23.20 ± 0.03 |
+| Qwen3-4B | 1 | 69.05 ± 0.47 | 15.43 ± 0.25 |
+| Qwen3-4B | 0 | **94.63 ± 2.65** | 15.47 ± 0.12 |
+
+Prompt processing is **+37–43%** faster with repacking disabled and generation is unchanged, on
+both models. The DeepSeek row was re-run with the arms in the opposite order (72.31/50.51), because
+the first pair looked like an ordering artefact; the effect reproduces either way, with error bars
+tight enough that the gap is well outside the noise. **The flag's effect is measured; the reason a
+*repack* makes prompt processing slower is not established**, and it is not claimed. `-nr` also
+disables every CPU-specific extra buffer (AMX, KleidiAI), so on a machine that has those the
+direction could reverse — which is why vipera emits it for the spill case, where it is the
+difference between running and not running, and does not apply it by default.
+
 **But the spill regime is already occupied.** The 9.65 GiB model sits *on* the margin of 12.4 GiB
 rather than comfortably inside it — `mmap` moved 13757 MiB for a 9880 MiB file (§Round 2), i.e.
 mildly spilling, and it is exactly where `-lm mlock` bought its +121%. **The manifest measured
@@ -239,8 +281,10 @@ the file layer, so no quantization, cache, or placement choice moves it. `[model
 - **Nothing here generalises past the machine in §1.** The CPU-bound verdict is a statement about
   a 4C/8T laptop running a 2.4 B-active MoE that nearly fills RAM. A machine where the model fits
   comfortably in VRAM is a different problem with different degrees of freedom.
-- **The spill regime was not measured.** It was shown to be unreachable here (§Round 6), which is
-  a statement about this machine's RAM, not about whether placement pays when it is possible.
+- **The spill regime was reached, but only for the load flag.** The model now runs (§Round 6
+  correction), so "unreachable" was wrong. What is still unmeasured is whether the manifest's
+  *placement* pays once the model is running: with no per-expert disk streaming in llama.cpp, the
+  spill falls back to `mmap` paging, and the manifest's modelled hit rate does not describe it.
 - **`-lm mlock` was not tested on a spilling model**, because it cannot be — there is nothing to
   lock once the model exceeds RAM. Its +121% / +11% / +43% figures apply to the fits-in-RAM case.
 - **The CUDA/Vulkan rows are `mmap` only**, because `mlock` aborts the Vulkan build. Whether the

@@ -1,0 +1,129 @@
+{
+  "harness": "bench/moe_spill.py",
+  "model": "Qwen3-30B-A3B-Q4_K_M.gguf",
+  "model_gib": 17.28,
+  "args": "-p The quick brown fox -n 32 -t 4 -lm mmap -c 512 -s 42 --temp 0 --ignore-eos -st -fa off -ctk f16 -ctv f16",
+  "reps": 3,
+  "arms": [
+    {
+      "arm": "control",
+      "no_repack": false,
+      "exit_code": -9,
+      "outcome": "oom-killed",
+      "outcome_evidence": "SIGKILL at peak RSS ~ the machine's available RAM",
+      "wall_s": 21.38,
+      "tok_s_generation": null,
+      "tok_s_prompt": null,
+      "peak_rss_mib": 11626.1,
+      "peak_rss_anon_mib": 11613.8,
+      "peak_rss_file_mib": 9429.4,
+      "mem_samples": 415,
+      "log": "/tmp/moe_spill_control.log",
+      "repack_marker": "no CPU_REPACK line at this verbosity"
+    },
+    {
+      "arm": "no-repack",
+      "no_repack": true,
+      "exit_code": 0,
+      "outcome": "ran",
+      "outcome_evidence": "",
+      "wall_s": 22.24,
+      "tok_s_generation": 5.6,
+      "tok_s_prompt": 4.1,
+      "peak_rss_mib": 11513.9,
+      "peak_rss_anon_mib": 112.4,
+      "peak_rss_file_mib": 11403.2,
+      "mem_samples": 443,
+      "log": "/tmp/moe_spill_nr.log",
+      "repack_marker": "no CPU_REPACK line at this verbosity"
+    },
+    {
+      "arm": "control",
+      "no_repack": false,
+      "exit_code": -9,
+      "outcome": "oom-killed",
+      "outcome_evidence": "SIGKILL at peak RSS ~ the machine's available RAM",
+      "wall_s": 36.29,
+      "tok_s_generation": null,
+      "tok_s_prompt": null,
+      "peak_rss_mib": 11555.3,
+      "peak_rss_anon_mib": 11552.3,
+      "peak_rss_file_mib": 10735.5,
+      "mem_samples": 416,
+      "log": "/tmp/moe_spill_control.log",
+      "repack_marker": "no CPU_REPACK line at this verbosity"
+    },
+    {
+      "arm": "no-repack",
+      "no_repack": true,
+      "exit_code": 0,
+      "outcome": "ran",
+      "outcome_evidence": "",
+      "wall_s": 22.54,
+      "tok_s_generation": 5.0,
+      "tok_s_prompt": 4.7,
+      "peak_rss_mib": 11439.3,
+      "peak_rss_anon_mib": 112.4,
+      "peak_rss_file_mib": 11326.9,
+      "mem_samples": 449,
+      "log": "/tmp/moe_spill_nr.log",
+      "repack_marker": "no CPU_REPACK line at this verbosity"
+    },
+    {
+      "arm": "control",
+      "no_repack": false,
+      "exit_code": -9,
+      "outcome": "oom-killed",
+      "outcome_evidence": "SIGKILL at peak RSS ~ the machine's available RAM",
+      "wall_s": 29.52,
+      "tok_s_generation": null,
+      "tok_s_prompt": null,
+      "peak_rss_mib": 11539.4,
+      "peak_rss_anon_mib": 11536.4,
+      "peak_rss_file_mib": 10391.7,
+      "mem_samples": 424,
+      "log": "/tmp/moe_spill_control.log",
+      "repack_marker": "no CPU_REPACK line at this verbosity"
+    },
+    {
+      "arm": "no-repack",
+      "no_repack": true,
+      "exit_code": 0,
+      "outcome": "ran",
+      "outcome_evidence": "",
+      "wall_s": 22.29,
+      "tok_s_generation": 6.2,
+      "tok_s_prompt": 3.4,
+      "peak_rss_mib": 11334.6,
+      "peak_rss_anon_mib": 112.4,
+      "peak_rss_file_mib": 11224.0,
+      "mem_samples": 444,
+      "log": "/tmp/moe_spill_nr.log",
+      "repack_marker": "no CPU_REPACK line at this verbosity"
+    }
+  ],
+  "summary": {
+    "control": {
+      "runs": 3,
+      "ran": 0,
+      "oom_killed": 3,
+      "tok_s_median": null,
+      "tok_s_each": [],
+      "peak_anon_mib_median": 11552.3,
+      "peak_file_mib_median": 10391.7
+    },
+    "no-repack": {
+      "runs": 3,
+      "ran": 3,
+      "oom_killed": 0,
+      "tok_s_median": 5.6,
+      "tok_s_each": [
+        5.6,
+        5.0,
+        6.2
+      ],
+      "peak_anon_mib_median": 112.4,
+      "peak_file_mib_median": 11326.9
+    }
+  }
+}

@@ -138,6 +138,8 @@ neither taken nor rejected is just a PDF.
 
 | lever | number | label |
 |---|---|---|
+| `-nr` on a model that spills past RAM | OOM-killed 3/3 → **runs 3/3 at 5.6 tok/s**; anonymous RSS 11552 → **112 MiB** | `[measured]` |
+| `-nr` on a model that fits | **pp512 +37–43%**, tg32 unchanged, on two models | `[measured]`, one CPU and one build |
 | `-t <physical cores> -lm mlock` | 12.80 → **22.90 tok/s = 1.79×** | `[measured]` |
 | FlashAttention (`-fa on`) | **+4.6%** (22.46→23.49) · **+4.0%** (14.96→15.56), p=0.0079, 4/4 A/B pairs | `[measured]` |
 | StreamingLLM sink + sliding window, `--keep 32` | **4.1× more tokens** before stopping, price **+0.64% PPL** (inside the noise) | `[measured]` |
@@ -149,6 +151,7 @@ neither taken nor rejected is just a PDF.
 | lever | the number that killed it | label |
 |---|---|---|
 | the runtime manifest (vipera's own core) | **0.92–1.00×** on a clean baseline; the 1.22× is **retracted** | `[measured]` |
+| the manifest's *placement*, in the spill regime | it runs now, but only because of the load flag: with no per-expert disk streaming the spill is `mmap` paging, so the modelled hit rate describes nothing | `[measured]` outcome, `[modelled]` placement |
 | quantized KV cache | **1.000×**, p=0.68 — the two configurations are the same measurement to within the instrument | `[measured]` |
 | GPU offload (CUDA / Vulkan) | **0.43×** / **0.21×** of an unaided CPU | `[measured]` |
 | activation sparsity | **0.0%** dead channels in a shipped gated FFN — there is nothing to skip | `[measured]` |
@@ -162,10 +165,17 @@ neither taken nor rejected is just a PDF.
 
 Every rejection acts on **bytes or placement**: disk traffic, cache bytes, KV width,
 weight slab layout, device placement. Every acceptance that runs at the file layer is
-worth ≈0, and the two acceptances that moved the measured number (+1.79×, +4%) are
-**runtime flags**, not file transforms.
+worth ≈0, and every acceptance that moved a measured number (+1.79×, +4%, and the
+`-nr` rows) is a **runtime flag**, not a file transform.
 
-**vipera's own layer measured ~0%.** The `README` already says this under *"What
+`-nr` is the exception that proves the rule about *where* the value sits. It is the
+one lever here where vipera's plan is load-bearing: `plan` knows the model spills, and
+that knowledge triggers the flag that stops llama.cpp from OOM-killing itself. The
+mechanism is llama.cpp's, but the *discovery* is the plan's — an unaided `llama-cli`
+dies. That is a narrower claim than "optimize at the file layer", and it is the only
+one the measurements support.
+
+**vipera's own file layer still measured ~0%.** The `README` says this under *"What
 vipera claims now, and what it no longer claims"*; this ledger is the evidence table
 behind that sentence.
 

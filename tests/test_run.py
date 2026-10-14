@@ -13,6 +13,7 @@ from vipera.run import (
     build_command,
     detect_gpu_backend,
     format_compare,
+    format_report,
     parse_prefetch_stats,
     parse_throughput,
     plan_flags,
@@ -61,6 +62,40 @@ class TestPlanFlags(unittest.TestCase):
         manifest["placement"]["expert_spill_disk_bytes"] = 1024 * 1024 * 500
         flags = plan_flags(manifest, gpu=True)
         self.assertTrue(any("no per-expert disk streaming" in w for w in flags.warnings))
+
+    def test_disk_spill_disables_weight_repacking(self):
+        # Not a preference: llama.cpp's CPU backend repacks the MoE expert tensors
+        # into anonymous RAM, and a spilled pool is by definition too large for that.
+        # Measured on Qwen3-30B-A3B: 3/3 runs OOM-killed without `-nr`, 3/3 run with
+        # it (bench/results/moe-spill.json).
+        manifest = json.loads(json.dumps(MANIFEST))
+        manifest["placement"]["expert_spill_disk_bytes"] = 4 * 1024**3
+        flags = plan_flags(manifest, gpu=False)
+        self.assertTrue(flags.no_repack)
+        cmd = build_command("/bin/llama-cli", "m.gguf", flags,
+                            context=512, n_predict=8, prompt="hi", threads=4)
+        self.assertIn("-nr", cmd)
+
+    def test_a_model_that_fits_is_left_alone(self):
+        # `-nr` also measured faster prompt processing here, but that is one CPU and
+        # one build; it must not become a default that silently disables the kernels
+        # a different machine's CPU offers.
+        flags = plan_flags(MANIFEST, gpu=False)
+        self.assertFalse(flags.no_repack)
+        cmd = build_command("/bin/llama-cli", "m.gguf", flags,
+                            context=512, n_predict=8, prompt="hi", threads=4)
+        self.assertNotIn("-nr", cmd)
+
+    def test_the_mapped_to_summary_does_not_drop_nr(self):
+        # `format_report` builds its summary from a hand-maintained list of fields,
+        # which silently omitted `-nr` while the command line carried it.
+        manifest = json.loads(json.dumps(MANIFEST))
+        manifest["placement"]["expert_spill_disk_bytes"] = 4 * 1024**3
+        flags = plan_flags(manifest, gpu=False)
+        report = {"command": ["llama-cli", "-nr"], "ok": True, "exit_code": 0,
+                  "elapsed_s": 0.0}
+        text = format_report(report, flags=flags, manifest_source="m.json")
+        self.assertIn("-nr", text.split("command")[0])
 
     def test_live_layer_count_overrides_the_manifest(self):
         flags = plan_flags(MANIFEST, gpu=True, n_layers=99)

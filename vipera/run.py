@@ -73,6 +73,10 @@ class RunFlags:
     # `context_shift`, slide a window so generation continues past n_ctx.
     n_keep: int | None = None
     context_shift: bool = False
+    # `-nr` / `--no-repack`. llama.cpp's CPU backend copies 3D weight tensors used
+    # by the MoE expert matmul into an anonymous `CPU_REPACK` buffer, which turns a
+    # disk-streamable model into a must-fit-in-RAM one. See `plan_flags`.
+    no_repack: bool = False
     warnings: list[str] = field(default_factory=list)
 
 
@@ -173,10 +177,23 @@ def plan_flags(manifest: dict, *, gpu: bool, n_layers: int | None = None) -> Run
             )
 
     if spill > 0:
+        # `-nr` is not cosmetic here: it is the difference between loading and being
+        # OOM-killed. llama.cpp's CPU backend repacks 3D tensors used by
+        # GGML_OP_MUL_MAT_ID -- the MoE expert matmul -- into a `CPU_REPACK` buffer,
+        # which is *anonymous* memory rather than file-backed, so a 16 GiB expert
+        # pool must fit in RAM to load. Measured on Qwen3-30B-A3B (17.28 GiB against
+        # 12.4 GiB available): with repacking, 3/3 runs are OOM-killed during load at
+        # an anonymous RSS of 11552 MiB; with `-nr`, 3/3 run at 5.6 tok/s with an
+        # anonymous RSS of 112 MiB and 11327 MiB of *file-backed*, reclaimable pages.
+        # `bench/moe_spill.py` is the harness; `bench/results/moe-spill.json` the run.
+        flags.no_repack = True
         warnings.append(
-            f"{spill / MIB:.0f} MiB of experts are planned to spill to disk, and "
-            "llama.cpp has no per-expert disk streaming — it will fall back to mmap "
-            "paging, whose cost the manifest's modelled hit rate does not describe"
+            f"{spill / MIB:.0f} MiB of experts are planned to spill to disk. "
+            "-nr is set: without it llama.cpp repacks the expert tensors into "
+            "anonymous RAM and the model is OOM-killed during load instead of "
+            "streaming. llama.cpp still has no per-expert disk streaming, so the "
+            "spill falls back to mmap paging, whose cost the manifest's modelled "
+            "hit rate does not describe"
         )
 
     kv = manifest.get("kv_cache") or {}
@@ -227,6 +244,8 @@ def build_command(
         cmd += ["--keep", str(flags.n_keep)]
     if flags.context_shift:
         cmd += ["--context-shift"]
+    if flags.no_repack:
+        cmd.append("-nr")
     if threads is not None:
         cmd += ["-t", str(threads)]
     if prefetch and "-v" not in (extra or []) and "--verbose" not in (extra or []):
@@ -411,6 +430,8 @@ def format_report(report: dict, *, flags: RunFlags, manifest_source: str) -> str
         mapping.append(f"--keep {flags.n_keep}")
     if flags.context_shift:
         mapping.append("--context-shift")
+    if flags.no_repack:
+        mapping.append("-nr")
     lines.append(f"mapped to     {' '.join(mapping) if mapping else '(nothing)'}")
     for w in flags.warnings:
         lines.append(f"warning       {w}")

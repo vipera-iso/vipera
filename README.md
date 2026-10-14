@@ -25,11 +25,17 @@ the file it just evicted and that paging costs **26% of decode** `[measured]`.
 > **vipera is a measurement and planning layer.** On a model that fits in RAM, its runtime
 > advantage is **subsumed by flags llama.cpp already had**: measured on the target machine, the
 > manifest moves throughput by **0.92–1.00×**, while `-t <physical cores> -lm mlock` — which it
-> does not recommend and does not need it for — is worth **1.79×**. Its value in the spill and
-> long-context regimes is **unproven on this hardware**: the one model that spills past RAM here
-> cannot be loaded at all, and on a CPU-only build the manifest reduces to KV quantization because
+> does not recommend and does not need it for — is worth **1.79×**. In the **spill** regime it has
+> one real win, and it is a load flag rather than a placement: a model larger than RAM is
+> **OOM-killed during load** unless weight repacking is off, because llama.cpp's CPU backend copies
+> the MoE expert tensors into *anonymous* RAM. Qwen3-30B-A3B (17.28 GiB against 11.5 GiB available)
+> is killed **3/3** runs without `-nr` and runs **3/3 at 5.6 tok/s** with it `[measured]` — `plan`
+> detects the spill and emits `-nr`, and an unaided `llama-cli` does not. (The same flag also
+> measured **+37–43%** on prompt processing with generation unchanged, on two models here; that is
+> one CPU and one build, so it is not applied by default.) Its value in the long-context regime is
+> still unproven. On a CPU-only build the manifest otherwise reduces to KV quantization, because
 > there is no VRAM to place anything into and no per-expert placement for llama.cpp to execute.
-> `[measured]` See [`docs/FINDINGS.md`](docs/FINDINGS.md) for the six rounds behind this.
+> See [`docs/FINDINGS.md`](docs/FINDINGS.md) for the rounds behind this.
 
 The earlier formulation — *"optimize at the file layer, not just at runtime"* — described a regime
 this machine cannot reach, and the measurements do not support it as a general claim. It is
@@ -338,7 +344,8 @@ nothing to place. The clearest evidence: on the `mmap` run the manifest cut disk
 means for decode to touch only 0.4 MiB/token.
 
 Where the manifest has a real case is a model that **spills** past RAM, or a long context where
-KV placement matters. Those are the measurements that decide whether vipera's positioning holds;
+KV placement matters. The spill half is now measured, and it is a load flag rather than a
+placement: see the quote above and `bench/moe_spill.py`. The long-context half is still open;
 see `plantodo.md`.
 
 > **Caution at ctx ≥ 1024: sequential runs are fine, concurrent ones are not.** Three

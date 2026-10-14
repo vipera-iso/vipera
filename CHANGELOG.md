@@ -13,6 +13,10 @@ this project intends to follow [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- **`bench/moe_spill.py` — the spill regime, finally measured** — runs a model larger
+  than RAM with and without weight repacking, sampling anonymous versus file-backed
+  RSS so the mechanism is evidence rather than an inference, and recording every
+  repetition instead of a mean.
 - **`vipera algo` — the literature pack as executable code** — four algorithms
   (`kv-retention`, `quant-gptq`, `select-submodular`, `spec-draft-length`), each a
   paper mapped to a function that runs without a model, a GPU or a network, plus a
@@ -95,6 +99,22 @@ this project intends to follow [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- **A model larger than RAM now loads instead of being OOM-killed.** `plan`'s spill
+  branch appended a warning and **no flags**; it now also emits `-nr`, because
+  llama.cpp's CPU backend copies the MoE expert tensors into anonymous RAM
+  (`CPU_REPACK`) and a spilled expert pool cannot fit there. Measured on
+  Qwen3-30B-A3B (17.28 GiB against 11.5 GiB available): **OOM-killed 3/3 runs at 11552
+  MiB anonymous RSS** without `-nr`, **runs 3/3 at 5.6 tok/s** with 112 MiB anonymous
+  and 11327 MiB of reclaimable file-backed pages. On the two models that fit, the
+  same flag measured **+37–43% prompt processing with generation unchanged**, but it
+  also disables every CPU-specific kernel, so it is applied only where it is the
+  difference between running and not running. `docs/FINDINGS.md` §Round 6 is
+  corrected: "the spill regime is unreachable" was this project's own measurement
+  error, not a property of the machine.
+- **`run`'s `mapped to` summary omitted `-nr`.** `format_report` builds that line
+  from a hand-maintained list of fields, the same shape of defect as the `algo run`
+  printer below; the command line carried the flag while the summary did not. A test
+  now pins it.
 - **`vipera algo run` silently dropped most of its own report.** The flat printer
   skipped every nested value, so `select-submodular --trace` printed a bare header
   with no numbers at all and `spec-draft-length` lost three of its five keys; only
