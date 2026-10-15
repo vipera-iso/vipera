@@ -1,6 +1,7 @@
 import os
 import tempfile
 import unittest
+from unittest.mock import patch
 
 from vipera.launch import (
     LaunchPolicy,
@@ -57,10 +58,15 @@ class TestChoosePolicy(unittest.TestCase):
         self.assertEqual(p.threads, 4)
 
     def test_threads_fall_back_to_half_when_cores_unknown(self):
-        p = choose_policy(
-            model_bytes=1 * MIB, ram_bytes=1024 * MIB,
-            memlock_bytes=float("inf"), cores=None, logical_cores=8,
-        )
+        # cores=None asks choose_policy to read the live machine, so the
+        # fallback branch is only reached when that read comes back empty.
+        # Without the patch the assertion is about /proc/cpuinfo on the box
+        # running the suite: 2 cores on a CI runner, 4 on the target laptop.
+        with patch("vipera.launch.read_physical_cores", return_value=None):
+            p = choose_policy(
+                model_bytes=1 * MIB, ram_bytes=1024 * MIB,
+                memlock_bytes=float("inf"), logical_cores=8,
+            )
         self.assertEqual(p.threads, 4)
 
     def test_threads_never_exceed_logical(self):
