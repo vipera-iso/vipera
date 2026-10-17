@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Question or discussion
+    url: https://github.com/vipera-iso/vipera/discussions
+    about: Ask questions, share setups, and discuss ideas here.
+  - name: Security vulnerability
+    url: https://github.com/vipera-iso/vipera/security/advisories/new
+    about: Please report security issues privately, not as public issues.

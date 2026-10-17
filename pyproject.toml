@@ -1,0 +1,95 @@
+[build-system]
+requires = ["hatchling>=1.21"]
+build-backend = "hatchling.build"
+
+[project]
+name = "vipera"
+version = "1.0.0"
+description = "Modern local AI gateway — OpenAI-compatible, GGUF-native"
+readme = "README.md"
+license = { text = "MIT" }
+authors = [{ name = "Vipera contributors" }]
+requires-python = ">=3.11"
+keywords = [
+    "llm", "gguf", "llama.cpp", "openai", "openai-api",
+    "local-ai", "gateway", "inference", "moe", "streaming",
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: Internet :: WWW/HTTP :: HTTP Servers",
+    "Typing :: Typed",
+]
+dependencies = [
+    "typer>=0.12",
+    "rich>=13.7",
+    "psutil>=5.9",
+    "huggingface-hub>=0.23",
+    "fastapi>=0.110",
+    "uvicorn[standard]>=0.29",
+    "pydantic>=2.6",
+]
+
+[project.optional-dependencies]
+llama = ["llama-cpp-python>=0.2.79"]
+gguf  = ["gguf>=0.10"]
+dev   = [
+    "pytest>=8",
+    "pytest-cov>=5",
+    "httpx>=0.27",
+    "ruff>=0.6",
+    "mypy>=1.10",
+    "pre-commit>=3.7",
+]
+
+[project.urls]
+Homepage      = "https://github.com/vipera-iso/vipera"
+Documentation = "https://github.com/vipera-iso/vipera#readme"
+Repository    = "https://github.com/vipera-iso/vipera"
+Issues        = "https://github.com/vipera-iso/vipera/issues"
+Changelog     = "https://github.com/vipera-iso/vipera/blob/main/CHANGELOG.md"
+
+[project.scripts]
+vipera = "vipera.cli:app"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/vipera"]
+
+[tool.hatch.build.targets.sdist]
+include = [
+    "src/vipera",
+    "README.md",
+    "LICENSE",
+    "CHANGELOG.md",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "W", "F", "I", "B", "UP", "SIM", "RUF"]
+ignore = ["E501", "B008"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["B011"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q --strict-markers"
+markers = ["slow: tests that load a real model file"]
+
+[tool.mypy]
+python_version = "3.11"
+files = ["src/vipera"]
+ignore_missing_imports = true
+warn_unused_ignores = true
+warn_redundant_casts = true

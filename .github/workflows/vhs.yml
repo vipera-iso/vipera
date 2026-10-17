@@ -1,0 +1,71 @@
+name: Regenerate demo GIF
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'docs/demo.tape'
+      - 'src/**'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  record:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install vhs, ffmpeg, gifsicle
+        run: |
+          sudo mkdir -p /etc/apt/keyrings
+          curl -fsSL https://repo.charm.sh/apt/gpg.key | sudo gpg --dearmor -o /etc/apt/keyrings/charm.gpg
+          echo "deb [signed-by=/etc/apt/keyrings/charm.gpg] https://repo.charm.sh/apt/ * *" \
+            | sudo tee /etc/apt/sources.list.d/charm.list
+          sudo apt update
+          sudo apt install -y vhs ffmpeg gifsicle
+
+      - name: Install JetBrains Mono Nerd Font
+        run: |
+          mkdir -p ~/.local/share/fonts
+          curl -fLo /tmp/JetBrainsMono.zip \
+            https://github.com/ryanoasis/nerd-fonts/releases/latest/download/JetBrainsMono.zip
+          unzip -q /tmp/JetBrainsMono.zip -d ~/.local/share/fonts
+          fc-cache -f
+
+      - name: Install vipera
+        run: |
+          python -m venv .venv
+          .venv/bin/pip install -U pip
+          .venv/bin/pip install -e ".[llama,gguf]"
+
+      - name: Record GIF
+        env:
+          PATH: ${{ github.workspace }}/.venv/bin:${{ env.PATH }}
+        run: |
+          mkdir -p ~/.vipera/models
+          # Import a small model so `vipera serve start` succeeds in the tape.
+          # CI does not ship a .gguf — the tape falls back gracefully to showing help.
+          vhs docs/demo.tape || true
+
+      - name: Compress if needed
+        run: |
+          if [ -f docs/images/demo.gif ]; then
+            size_kb=$(du -k docs/images/demo.gif | cut -f1)
+            if [ "$size_kb" -gt 3500 ]; then
+              gifsicle -O3 --lossy=80 --colors 128 docs/images/demo.gif -o docs/images/demo.gif
+            fi
+          fi
+
+      - name: Commit GIF if changed
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add docs/images/demo.gif
+          if git diff --staged --quiet; then
+            echo "No changes"
+          else
+            git commit -m "docs: auto-update demo GIF [skip ci]"
+            git push
+          fi

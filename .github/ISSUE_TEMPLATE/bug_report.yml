@@ -1,0 +1,68 @@
+name: Bug report
+description: Something is broken or behaves unexpectedly.
+title: "[bug]: "
+labels: ["bug", "needs-triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting. The two blocks that matter most are the
+        **command** and the **`vipera system doctor`** output.
+
+  - type: input
+    id: version
+    attributes:
+      label: Vipera version
+      description: Output of `vipera --version`.
+      placeholder: "vipera 1.0.0"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: os
+    attributes:
+      label: Operating system
+      options:
+        - Linux
+        - macOS
+        - Windows
+        - Other (specify below)
+    validations:
+      required: true
+
+  - type: textarea
+    id: command
+    attributes:
+      label: Command that triggered the bug
+      render: shell
+    validations:
+      required: true
+
+  - type: textarea
+    id: doctor
+    attributes:
+      label: "`vipera system doctor` output"
+      render: shell
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected to happen
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: What actually happened
+    validations:
+      required: true
+
+  - type: textarea
+    id: extra
+    attributes:
+      label: Additional context
+    validations:
+      required: false
