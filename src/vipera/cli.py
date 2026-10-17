@@ -46,6 +46,9 @@ def show_help():
     guide.append("    • vipera model list               List installed models\n", style=C_TEXT)
     guide.append("    • vipera model import <path>      Import a local .gguf file\n", style=C_TEXT)
     guide.append("    • vipera model inspect <path>     Analyze GGUF layout & quants\n", style=C_TEXT)
+    guide.append("    • vipera model imatrix <path>     Build an importance matrix\n", style=C_TEXT)
+    guide.append("    • vipera model quantize <path>    Quantize with llama-quantize\n", style=C_TEXT)
+    guide.append("    • vipera model optimize <path>    Inspect → imatrix → quantize\n", style=C_TEXT)
     guide.append("    • vipera model rm <name>          Remove a model\n\n", style=C_TEXT)
 
     guide.append("  ▸ INFERENCE (vipera chat / bench ...)\n", style=C_ACCENT)

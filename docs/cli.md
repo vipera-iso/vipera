@@ -94,6 +94,69 @@ is a heuristic, not a quality measurement.
 Exit status is 1 when the file is missing or `gguf` is not installed; the
 message includes the install command.
 
+### `vipera model imatrix PATH --calibration-data FILE`
+
+Run `llama-imatrix` to compute an importance matrix from a plain-text
+calibration file.
+
+| Argument/Option | Default | Description |
+|---|---|---|
+| `PATH` | required | Source `.gguf` file. |
+| `-f`, `--calibration-data` | required | UTF-8 text used for calibration. |
+| `-o`, `--output` | `<model>.imatrix.gguf` | Output matrix path; refuses to overwrite. |
+| `--ctx` | `512` | Calibration context size. |
+| `-t`, `--threads` | llama.cpp default | CPU threads. |
+| `--bin-dir` | auto | Directory containing `llama-imatrix`. |
+| `--dry-run` | off | Print the command without running it. |
+
+`llama-imatrix` requires at least twice as many calibration tokens as `--ctx`,
+so a very small calibration file fails fast. Search order for the binary is
+`--bin-dir`, `$VIPERA_LLAMA_BIN`, `~/.vipera/bin`, common llama.cpp build
+paths, then `PATH`.
+
+### `vipera model quantize PATH [OPTIONS]`
+
+Run `llama-quantize` on a GGUF file.
+
+| Argument/Option | Default | Description |
+|---|---|---|
+| `PATH` | required | Source `.gguf` file. |
+| `-q`, `--target-quant` | `q4_k_m` | Target type (`q4_k_m`, `q5_k_m`, `q8_0`, …). |
+| `--imatrix` | none | Importance matrix from `model imatrix`. |
+| `-o`, `--output` | `<model>-vipera-<quant>.gguf` | Output path; refuses to overwrite. |
+| `--prune-layers` | none | Comma-separated layer indices to drop. |
+| `--prior-weight` | `1` | MoE expert prior; rejected if the build lacks the flag. |
+| `--allow-requantize` | off | Permit quantizing an already-quantized source. |
+| `--bin-dir` | auto | Directory containing `llama-quantize`. |
+| `--dry-run` | off | Print the command without running it. |
+
+llama.cpp disables requantization by default; without `--allow-requantize` the
+tool exits with an error. Vipera deletes a partial output file when the
+underlying command fails. Pruning warns because it can substantially reduce
+quality.
+
+### `vipera model optimize PATH [OPTIONS]`
+
+High-level pipeline: inspect → choose a quant → optionally build an imatrix →
+quantize. Requires `--target-size` (decimal GB) or `--target-quant`.
+
+| Option | Default | Description |
+|---|---|---|
+| `--target-size` | none | Target file size in decimal GB. |
+| `--target-quant` | none | Skip sizing and use this quant. |
+| `-f`, `--calibration-data` | none | Build an imatrix before quantizing. |
+| `-o`, `--output` | `<model>-vipera-<quant>.gguf` | Output path. |
+| `--prune-layers` | none | Passed through to `llama-quantize`. |
+| `--prior-weight` | `1` | MoE expert prior. |
+| `--bin-dir` | auto | Directory containing both tools. |
+| `--dry-run` | off | Print the full plan and both commands. |
+
+The chosen quant is the highest-quality entry in `Q8_0, Q6_K, Q5_K_M, Q4_K_M,
+Q3_K_M, Q2_K` whose estimated size fits the budget. The estimate scales the
+source file size by bits-per-weight ratios, so it is approximate for mixed-quant
+sources and models with large embeddings. `optimize` passes
+`--allow-requantize` because its source is often already quantized.
+
 ### `vipera model list`
 
 Print a table of registered models: alias, file size, quantization, layer count,

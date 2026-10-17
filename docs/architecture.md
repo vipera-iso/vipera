@@ -26,6 +26,7 @@ All code lives in `src/vipera`.
 | `registry.py` | JSON model index at `$VIPERA_HOME/registry.json`: add/list/get/remove. | `config` |
 | `config.py` | Paths, default config, load/save with type coercion. | stdlib |
 | `gguf_analyzer.py` | Read GGUF metadata and tensor index without loading weights: per-layer/category sizes, quantization mix, low-quant warnings. | `gguf` (optional extra) |
+| `optimizer.py` | Pure helpers for quantization: locate `llama-imatrix`/`llama-quantize`, build their command lines, pick a quant for a size target, name outputs. No subprocess execution. | stdlib |
 | `cli.py` | Typer root app, banner, default-model resolution, `help`. | all commands |
 | `commands/*.py` | One module per command group: `model`, `serve`, `chat`, `bench`, `system`. | engine, planner, registry, ui |
 | `ui.py` | Rich console, banner, panels, model picker, typewriter streaming. | `rich` |
@@ -107,6 +108,30 @@ The algorithm, in order:
 `profile` currently affects only the flash-attention decision. The planner does
 not emit MoE-specific flags (`--n-cpu-moe` or equivalents); MoE models are
 placed by the same per-layer arithmetic.
+
+## GGUF optimization
+
+Optimization is offline: it rewrites files, it does not participate in serving.
+The split is deliberate — `optimizer.py` is pure and testable (command
+construction, binary discovery, size math), while `commands/model_cmd.py` owns
+subprocess execution so it can stream output, handle Ctrl+C, and delete a
+partial output when the child fails.
+
+`model optimize` chains the steps:
+
+1. `gguf_analyzer` reads the source index to get size and dominant quant.
+2. `estimate_quant_for_target` converts the size budget to a target
+   bits-per-weight and picks the highest-quality K-quant at or below it.
+3. If calibration data is supplied, `llama-imatrix` writes a matrix next to the
+   source (or a numbered variant if that name exists).
+4. `llama-quantize` runs with `--imatrix` when present, `--allow-requantize`
+   because the source is often already quantized, and optional
+   `--prune-layers` / `--prior-weight`.
+
+`--prior-weight` is checked against the installed binary's `--help` output
+before being passed, so an older llama.cpp fails with a clear message instead
+of an unknown-argument error. `--dry-run` prints the plan and the exact commands
+without creating anything.
 
 ## Engine
 

@@ -1,6 +1,8 @@
 import contextlib
 import re
+import shlex
 import shutil
+import subprocess
 from pathlib import Path
 
 import typer
@@ -13,6 +15,18 @@ from rich.text import Text
 
 from vipera.config import MODELS_DIR, ensure_dirs, load_config, save_config
 from vipera.gguf_analyzer import GGUFAnalysisError, analyze_gguf_structure
+from vipera.optimizer import (
+    OptimizerError,
+    build_imatrix_command,
+    build_quantize_command,
+    default_output_path,
+    estimate_quant_for_target,
+    estimate_size_for_quant,
+    find_llama_tool,
+    normalize_quant,
+    tool_supports_flag,
+    unique_output_path,
+)
 from vipera.registry import add_model, get_model, list_models, remove_model
 from vipera.ui import (
     C_ACCENT,
@@ -325,6 +339,259 @@ def inspect_model(
                 _format_bytes(tensor["n_bytes"]),
             )
         console.print(tensor_table)
+
+
+def _require_file(value: str | Path, label: str) -> Path:
+    path = Path(value).expanduser()
+    if not path.is_file():
+        console.print(f"[{C_RED}] ✗ {label} not found: {path}[/]")
+        raise typer.Exit(1)
+    return path
+
+
+def _prepare_output(value: str | None, fallback: Path) -> Path:
+    if value:
+        path = Path(value).expanduser()
+        if path.exists():
+            console.print(f"[{C_RED}] ✗ output already exists: {path}[/]")
+            raise typer.Exit(1)
+        return path
+    return unique_output_path(fallback)
+
+
+def _run_tool(command: list[str], dry_run: bool, cleanup: Path | None = None) -> bool:
+    console.print(f"[{C_DIM}]$ {shlex.join(command)}[/]")
+    if dry_run:
+        return True
+    ok = True
+    try:
+        subprocess.run(command, check=True)
+    except FileNotFoundError as e:
+        console.print(f"[{C_RED}] ✗ {e}[/]")
+        ok = False
+    except subprocess.CalledProcessError as e:
+        console.print(f"[{C_RED}] ✗ command failed with exit code {e.returncode}[/]")
+        ok = False
+    except KeyboardInterrupt:
+        console.print(f"\n[{C_YELLOW}] ⚠ Interrupted.[/]")
+        ok = False
+    if not ok and cleanup is not None:
+        cleanup.unlink(missing_ok=True)
+    return ok
+
+
+@app.command("imatrix")
+def imatrix_cmd(
+    path: str = typer.Argument(..., help="Path to a .gguf file"),
+    calibration_data: str = typer.Option(
+        ..., "--calibration-data", "-f", help="Calibration text file"
+    ),
+    output: str = typer.Option(None, "--output", "-o", help="Output imatrix path"),
+    ctx: int = typer.Option(512, "--ctx", help="Calibration context size"),
+    threads: int = typer.Option(None, "--threads", "-t", help="CPU threads"),
+    bin_dir: str = typer.Option(None, "--bin-dir", help="Directory with llama.cpp tools"),
+    dry_run: bool = typer.Option(False, "--dry-run", help="Print the command only"),
+):
+    """Build an importance matrix with llama-imatrix."""
+    model = _require_file(path, "model")
+    calibration = _require_file(calibration_data, "calibration data")
+    if ctx <= 0:
+        console.print(f"[{C_RED}] ✗ --ctx must be greater than zero[/]")
+        raise typer.Exit(1)
+
+    try:
+        binary = find_llama_tool("imatrix", bin_dir)
+        default_out = model.with_suffix(".imatrix.gguf")
+        out = _prepare_output(output, default_out)
+        command = build_imatrix_command(binary, model, calibration, out, ctx, threads)
+    except OptimizerError as e:
+        console.print(f"[{C_RED}] ✗ {e}[/]")
+        raise typer.Exit(1) from e
+
+    if not _run_tool(command, dry_run, cleanup=out):
+        raise typer.Exit(1)
+    if not dry_run:
+        console.print(f"[{C_GREEN}] ✓ imatrix written:[/] {out}")
+
+
+@app.command("quantize")
+def quantize_cmd(
+    path: str = typer.Argument(..., help="Path to a .gguf file"),
+    target_quant: str = typer.Option(
+        "q4_k_m", "--target-quant", "-q", help="Target llama.cpp quantization type"
+    ),
+    imatrix: str = typer.Option(None, "--imatrix", help="Importance matrix file"),
+    output: str = typer.Option(None, "--output", "-o", help="Output .gguf path"),
+    prune_layers: str = typer.Option(
+        None, "--prune-layers", help="Comma-separated layer numbers to prune"
+    ),
+    prior_weight: int = typer.Option(
+        1, "--prior-weight", help="MoE prior weight (requires a supporting build)"
+    ),
+    allow_requantize: bool = typer.Option(
+        False, "--allow-requantize", help="Allow requantizing an already quantized model"
+    ),
+    bin_dir: str = typer.Option(None, "--bin-dir", help="Directory with llama.cpp tools"),
+    dry_run: bool = typer.Option(False, "--dry-run", help="Print the command only"),
+):
+    """Quantize a GGUF file with llama-quantize."""
+    model = _require_file(path, "model")
+    imatrix_path = _require_file(imatrix, "imatrix") if imatrix else None
+    if prior_weight < 1:
+        console.print(f"[{C_RED}] ✗ --prior-weight must be at least 1[/]")
+        raise typer.Exit(1)
+
+    try:
+        binary = find_llama_tool("quantize", bin_dir)
+        supports_prior = prior_weight != 1 and tool_supports_flag(binary, "--prior-weight")
+        out = _prepare_output(output, default_output_path(model, target_quant))
+        command = build_quantize_command(
+            binary,
+            model,
+            out,
+            target_quant,
+            imatrix=imatrix_path,
+            prune_layers=prune_layers,
+            prior_weight=prior_weight,
+            allow_requantize=allow_requantize,
+            supports_prior_weight=supports_prior,
+        )
+    except OptimizerError as e:
+        console.print(f"[{C_RED}] ✗ {e}[/]")
+        raise typer.Exit(1) from e
+
+    if prune_layers:
+        console.print(
+            f"[{C_YELLOW}] ⚠ Pruning layers can substantially reduce quality.[/]"
+        )
+    if not _run_tool(command, dry_run, cleanup=out):
+        raise typer.Exit(1)
+    if not dry_run:
+        console.print(
+            f"[{C_GREEN}] ✓ quantized model:[/] {out} "
+            f"({_format_bytes(out.stat().st_size)})"
+        )
+
+
+@app.command("optimize")
+def optimize_cmd(
+    path: str = typer.Argument(..., help="Path to a .gguf file"),
+    target_size: float = typer.Option(
+        None, "--target-size", help="Target model size in GB (decimal)"
+    ),
+    target_quant: str = typer.Option(None, "--target-quant", help="Override the chosen quant"),
+    calibration_data: str = typer.Option(
+        None, "--calibration-data", "-f", help="Optional calibration text file"
+    ),
+    output: str = typer.Option(None, "--output", "-o", help="Output .gguf path"),
+    prune_layers: str = typer.Option(None, "--prune-layers"),
+    prior_weight: int = typer.Option(1, "--prior-weight"),
+    bin_dir: str = typer.Option(None, "--bin-dir"),
+    dry_run: bool = typer.Option(False, "--dry-run"),
+):
+    """Analyze, optionally build an imatrix, then quantize toward a size target."""
+    model = _require_file(path, "model")
+    if target_size is None and target_quant is None:
+        console.print(f"[{C_RED}] ✗ provide --target-size or --target-quant[/]")
+        raise typer.Exit(1)
+    if target_size is not None and target_size <= 0:
+        console.print(f"[{C_RED}] ✗ --target-size must be greater than zero[/]")
+        raise typer.Exit(1)
+    if prior_weight < 1:
+        console.print(f"[{C_RED}] ✗ --prior-weight must be at least 1[/]")
+        raise typer.Exit(1)
+
+    try:
+        analysis = analyze_gguf_structure(str(model))
+        meta = analysis["metadata"]
+        current_size = int(meta["file_size_bytes"])
+        current_quant = str(meta.get("quant") or meta.get("dominant_quant") or "Q4_K_M")
+        if target_quant:
+            quant = normalize_quant(target_quant)
+            estimated = estimate_size_for_quant(current_size, current_quant, quant)
+        else:
+            choice = estimate_quant_for_target(
+                current_size, current_quant, int(target_size * 1_000_000_000)
+            )
+            quant = choice.quant
+            estimated = choice.estimated_bytes
+    except (GGUFAnalysisError, OptimizerError) as e:
+        console.print(f"[{C_RED}] ✗ {e}[/]")
+        raise typer.Exit(1) from e
+
+    try:
+        quantize_bin = find_llama_tool("quantize", bin_dir)
+        supports_prior = prior_weight != 1 and tool_supports_flag(
+            quantize_bin, "--prior-weight"
+        )
+    except OptimizerError as e:
+        console.print(f"[{C_RED}] ✗ {e}[/]")
+        raise typer.Exit(1) from e
+
+    stem = model.stem
+    out = _prepare_output(output, default_output_path(model, quant))
+    imatrix_out = model.with_name(f"{stem}.imatrix.gguf")
+    if imatrix_out.exists():
+        imatrix_out = unique_output_path(imatrix_out)
+
+    plan = Table(box=box.ROUNDED, title="OPTIMIZATION PLAN", title_justify="left")
+    plan.add_column("PROPERTY", style=C_DIM)
+    plan.add_column("VALUE", style=C_TEXT)
+    plan.add_row("model", str(model))
+    plan.add_row("current", f"{current_quant} · {_format_bytes(current_size)}")
+    plan.add_row("target quant", quant)
+    plan.add_row("estimated size", _format_bytes(estimated))
+    if target_size is not None:
+        plan.add_row("target size", f"{target_size:.2f} GB")
+    plan.add_row("output", str(out))
+    plan.add_row("imatrix", str(imatrix_out) if calibration_data else "not requested")
+    console.print(plan)
+
+    calibration = None
+    if calibration_data:
+        calibration = _require_file(calibration_data, "calibration data")
+        try:
+            imatrix_bin = find_llama_tool("imatrix", bin_dir)
+            imatrix_cmd = build_imatrix_command(
+                imatrix_bin, model, calibration, imatrix_out, ctx_size=512
+            )
+        except OptimizerError as e:
+            console.print(f"[{C_RED}] ✗ {e}[/]")
+            raise typer.Exit(1) from e
+        if not _run_tool(imatrix_cmd, dry_run, cleanup=imatrix_out):
+            raise typer.Exit(1)
+
+    try:
+        command = build_quantize_command(
+            quantize_bin,
+            model,
+            out,
+            quant,
+            imatrix=imatrix_out if calibration else None,
+            prune_layers=prune_layers,
+            prior_weight=prior_weight,
+            allow_requantize=True,
+            supports_prior_weight=supports_prior,
+        )
+    except OptimizerError as e:
+        console.print(f"[{C_RED}] ✗ {e}[/]")
+        raise typer.Exit(1) from e
+
+    if prune_layers:
+        console.print(
+            f"[{C_YELLOW}] ⚠ Pruning layers can substantially reduce quality.[/]"
+        )
+    console.print(
+        f"[{C_YELLOW}] ⚠ Optimizing an already-quantized model requantizes it; "
+        "quality can drop.[/]"
+    )
+    if not _run_tool(command, dry_run, cleanup=out):
+        raise typer.Exit(1)
+    if not dry_run:
+        console.print(
+            f"[{C_GREEN}] ✓ optimized model:[/] {out} "
+            f"({_format_bytes(out.stat().st_size)})"
+        )
 
 
 @app.command("list")

@@ -122,6 +122,9 @@ Vipera ships a single `vipera` entry point. Every command is discoverable with
 | `vipera model search` | Search HuggingFace for GGUF models, then download one. |
 | `vipera model import <path> [--name <alias>]` | Copy a local `.gguf` into the Vipera store. |
 | `vipera model inspect <path> [--tensors]` | Analyze GGUF metadata, tensor categories, and quantization mix. |
+| `vipera model imatrix <path> --calibration-data <file>` | Build an importance matrix for quantization. |
+| `vipera model quantize <path> [--target-quant <type>]` | Quantize a GGUF file with llama-quantize. |
+| `vipera model optimize <path> [--target-size <GB>]` | Inspect, build an optional imatrix, and quantize in one step. |
 | `vipera model list` | List every model registered locally. |
 | `vipera model rm <alias> [--yes]` | Remove a model and its file. |
 
@@ -287,7 +290,9 @@ edit the JSON — unknown keys are rejected, known keys are type-coerced.
 
 Override the home with `VIPERA_HOME=/path/to/dir`.
 
-## 🔬 GGUF inspection
+## 🔬 GGUF optimization
+
+### Inspect
 
 `vipera model inspect` reads the GGUF index only — weights are never loaded
 into memory — and prints the architecture, layer/context/embedding sizes, a
@@ -301,8 +306,44 @@ vipera model inspect ~/.vipera/models/model.gguf --tensors   # every tensor
 
 It warns when quality-sensitive tensors (`attn_v`, `ffn_down`, including their
 `_exps` variants) are quantized below Q4_K. That check is a heuristic, not a
-quality measurement. The command is read-only; imatrix and quantize pipelines
-are not implemented yet.
+quality measurement.
+
+### Importance matrix and quantization
+
+An importance matrix (imatrix) tells `llama-quantize` which weights matter for
+your data, so low-bit quants keep more of the quality. Generate one from a
+plain-text calibration file, then quantize with it:
+
+```bash
+vipera model imatrix model.gguf --calibration-data calibration.txt
+vipera model quantize model.gguf --imatrix model.imatrix.gguf --target-quant q4_k_m
+```
+
+`quantize` writes `<model>-vipera-<quant>.gguf` next to the source unless
+`--output` is given. Requantizing an already-quantized file needs
+`--allow-requantize`; expect a quality loss. For MoE models, `--prior-weight`
+raises the expert prior (try 128 for models with many rarely-used experts to
+avoid NaNs) when the installed `llama-quantize` supports the flag.
+
+### One-shot optimization
+
+`optimize` inspects the file, picks the highest-quality K-quant that fits the
+size budget, optionally builds an imatrix, and quantizes:
+
+```bash
+vipera model optimize model.gguf --target-size 4.5 --calibration-data calibration.txt
+vipera model optimize model.gguf --target-quant q4_k_m
+```
+
+The size estimate assumes a roughly uniform per-weight cost; actual output can
+differ, especially for models with large output embeddings or MoE experts.
+`--prune-layers` is passed through to `llama-quantize` and can substantially
+reduce quality.
+
+All three commands need `llama-imatrix` and `llama-quantize` from a llama.cpp
+build. Vipera finds them on `PATH`, in `$VIPERA_LLAMA_BIN`, in a few common
+build directories, or via `--bin-dir`. Every command accepts `--dry-run` to
+print the exact `llama.cpp` invocation without running it.
 
 ## 📊 Benchmarks
 
