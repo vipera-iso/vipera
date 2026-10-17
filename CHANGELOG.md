@@ -11,7 +11,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **GGUF inspection** — `vipera model inspect <path> [--tensors]` reads the GGUF
   index only and reports architecture, per-layer/category size distribution,
   quantization mix, and warnings for quality-sensitive tensors quantized below
-  Q4_K. Backed by `vipera.gguf_analyzer.analyze_gguf_structure()`.
+  Q4_K. Backed by `vipera.gguf_analyzer.analyze_gguf()`.
 - **GGUF optimization** — `vipera model imatrix`, `model quantize`, and
   `model optimize` wrap `llama-imatrix` / `llama-quantize` with imatrix support,
   MoE `--prior-weight`, layer pruning, target-size quant selection, binary

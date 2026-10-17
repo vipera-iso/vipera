@@ -160,7 +160,7 @@ def _as_text(value: Any) -> str | None:
     return str(value)
 
 
-def analyze_gguf_structure(path: str) -> dict[str, Any]:
+def analyze_gguf(path: str) -> dict[str, Any]:
     """Return metadata, tensor map, and size breakdown for a GGUF file.
 
     The return value is JSON-friendly except for integer layer keys, which are
@@ -278,3 +278,7 @@ def analyze_gguf_structure(path: str) -> dict[str, Any]:
         "quant_counts": dict(quant_counts),
         "warnings": warnings,
     }
+
+
+# Backwards-compatible alias kept for callers that used the original name.
+analyze_gguf_structure = analyze_gguf

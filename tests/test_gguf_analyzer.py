@@ -4,7 +4,11 @@ import types
 import pytest
 
 from vipera.commands import model_cmd
-from vipera.gguf_analyzer import GGUFAnalysisError, analyze_gguf_structure
+from vipera.gguf_analyzer import (
+    GGUFAnalysisError,
+    analyze_gguf,
+    analyze_gguf_structure,
+)
 
 
 class FakeField:
@@ -56,7 +60,7 @@ def test_analyze_metadata_and_layout(tmp_path, mocked_gguf):
     path = tmp_path / "model-q2_k.gguf"
     path.write_bytes(b"")
 
-    result = analyze_gguf_structure(str(path))
+    result = analyze_gguf(str(path))
 
     assert result["metadata"]["architecture"] == "llama"
     assert result["metadata"]["n_layers"] == 2
@@ -82,7 +86,7 @@ def test_analyze_warns_about_low_quant_critical_tensors(tmp_path, mocked_gguf):
     path = tmp_path / "model-q2_k.gguf"
     path.write_bytes(b"")
 
-    result = analyze_gguf_structure(str(path))
+    result = analyze_gguf(str(path))
 
     warned = {warning["tensor"] for warning in result["warnings"]}
     assert "blk.0.attn_v.weight" in warned
@@ -95,12 +99,16 @@ def test_analyze_requires_optional_gguf_package(tmp_path, monkeypatch):
     monkeypatch.setitem(sys.modules, "gguf", None)
 
     with pytest.raises(GGUFAnalysisError, match="gguf is not installed"):
-        analyze_gguf_structure(str(path))
+        analyze_gguf(str(path))
+
+
+def test_analyze_gguf_structure_is_an_alias():
+    assert analyze_gguf_structure is analyze_gguf
 
 
 def test_analyze_rejects_missing_file(tmp_path):
     with pytest.raises(GGUFAnalysisError, match="file not found"):
-        analyze_gguf_structure(str(tmp_path / "missing.gguf"))
+        analyze_gguf(str(tmp_path / "missing.gguf"))
 
 
 def test_inspect_cli_renders_summary(monkeypatch, capsys, tmp_path):
@@ -141,7 +149,7 @@ def test_inspect_cli_renders_summary(monkeypatch, capsys, tmp_path):
             }
         ],
     }
-    monkeypatch.setattr(model_cmd, "analyze_gguf_structure", lambda path: result)
+    monkeypatch.setattr(model_cmd, "analyze_gguf", lambda path: result)
 
     model_cmd.inspect_model(str(tmp_path / "model.gguf"), tensors=False)
     output = capsys.readouterr().out

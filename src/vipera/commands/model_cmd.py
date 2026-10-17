@@ -14,7 +14,7 @@ from rich.table import Table
 from rich.text import Text
 
 from vipera.config import MODELS_DIR, ensure_dirs, load_config, save_config
-from vipera.gguf_analyzer import GGUFAnalysisError, analyze_gguf_structure
+from vipera.gguf_analyzer import GGUFAnalysisError, analyze_gguf
 from vipera.optimizer import (
     OptimizerError,
     build_imatrix_command,
@@ -247,7 +247,7 @@ def inspect_model(
 ):
     """Analyze GGUF metadata and tensor layout without loading weights."""
     try:
-        result = analyze_gguf_structure(path)
+        result = analyze_gguf(path)
     except GGUFAnalysisError as e:
         console.print(f"[{C_RED}] ✗ {e}[/]")
         raise typer.Exit(1) from e
@@ -502,7 +502,7 @@ def optimize_cmd(
         raise typer.Exit(1)
 
     try:
-        analysis = analyze_gguf_structure(str(model))
+        analysis = analyze_gguf(str(model))
         meta = analysis["metadata"]
         current_size = int(meta["file_size_bytes"])
         current_quant = str(meta.get("quant") or meta.get("dominant_quant") or "Q4_K_M")
