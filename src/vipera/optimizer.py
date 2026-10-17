@@ -36,7 +36,6 @@ _QUANT_BPW = {
 
 _COMMON_BIN_DIRS = (
     Path.home() / ".vipera" / "bin",
-    Path.home() / "dev" / "llama.cpp" / "build" / "bin",
     Path.home() / "llama.cpp" / "build" / "bin",
     Path("/usr/local/bin"),
     Path("/opt/homebrew/bin"),
