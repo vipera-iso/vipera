@@ -4,6 +4,7 @@ import shutil
 from pathlib import Path
 
 import typer
+from rich import box
 from huggingface_hub import HfApi, hf_hub_download, list_repo_files
 from rich.panel import Panel
 from rich.prompt import IntPrompt, Prompt

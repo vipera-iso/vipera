@@ -10,13 +10,13 @@
 [![Status: Beta](https://img.shields.io/badge/status-beta-orange)]()
 [![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](CONTRIBUTING.md)
 
-[Quick start](#-quick-start) · [CLI](#-cli-reference] · [HTTP API](#-http-api) · [Docs](#-documentation) · [Contributing](CONTRIBUTING.md)
+[Quick start](#-quick-start) · [CLI](#-cli-reference) · [HTTP API](#-http-api) · [Docs](#-documentation) · [Contributing](CONTRIBUTING.md)
 
 </div>
 
 ---
 
-<!-- ![Vipera demo](docs/images/demo.gif) -->
+![Vipera demo](docs/images/demo.gif)
 
 ## What is Vipera?
 
@@ -31,6 +31,8 @@ pip install vipera
 vipera model search         # download a GGUF from HuggingFace
 vipera serve start          # → http://127.0.0.1:8686/v1/chat/completions
 ```
+
+![Vipera demo](docs/images/demo.gif)
 
 That endpoint speaks the OpenAI Chat Completions protocol with real SSE
 streaming, so every existing client — `openai-python`, LangChain, LlamaIndex,
@@ -209,25 +211,25 @@ one gateway serves one model.
 ```mermaid
 flowchart LR
     subgraph Client
-        C1[openai-python]
-        C2[curl]
-        C3[Any OpenAI SDK]
+        C1["openai-python"]
+        C2["curl"]
+        C3["OpenAI SDK"]
     end
 
     subgraph Vipera["Vipera Gateway"]
-        S[FastAPI server<br/>/v1/chat/completions<br/>/v1/models · /health]
-        E[Engine<br/>llama-cpp-python]
-        P[Planner<br/>VRAM · RAM · disk]
-        H[Hardware probe]
-        R[Registry<br/>~/.vipera/registry.json]
+        S["FastAPI server"]
+        E["Engine"]
+        P["Planner"]
+        H["Hardware probe"]
+        R["Registry"]
     end
 
-    M[(GGUF file<br/>~/.vipera/models/*.gguf)]
+    M[("GGUF file")]
 
-    C1 & C2 & C3 -->|HTTP / SSE| S
-    S -->|chat()| E
-    E -->|reads| M
-    P -->|flags| E
+    C1 & C2 & C3 -->|"HTTP / SSE"| S
+    S -->|"chat()"| E
+    E -->|"reads"| M
+    P -->|"flags"| E
     H --> P
     R --> P
 ```
