@@ -212,5 +212,8 @@ These are observable in the current code and worth knowing before filing a bug:
   values in `server.ChatRequest`, not to config.
 - The planner does not emit MoE-specific offload flags despite the README's
   description of the flag set.
+- Expert-slab reordering (I/O-locality optimization) is not implemented. It
+  needs an expert-usage trace, and this project defines no trace format yet, so
+  `model optimize` only handles quantization, imatrix, and layer pruning.
 - `VIPERA_HOME` is read once at import time; changing it after the package is
   imported has no effect (tests patch the module constants instead).
