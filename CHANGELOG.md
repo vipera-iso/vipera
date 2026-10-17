@@ -8,7 +8,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
-- Nothing yet.
+- **GGUF inspection** — `vipera model inspect <path> [--tensors]` reads the GGUF
+  index only and reports architecture, per-layer/category size distribution,
+  quantization mix, and warnings for quality-sensitive tensors quantized below
+  Q4_K. Backed by `vipera.gguf_analyzer.analyze_gguf_structure()`.
 
 ## [1.0.0] - 2026-10-17
 

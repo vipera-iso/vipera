@@ -3,7 +3,7 @@ requires = ["hatchling>=1.21"]
 build-backend = "hatchling.build"
 
 [project]
-name = "vipera"
+name = "vipera-ai"
 version = "1.0.0"
 description = "Modern local AI gateway — OpenAI-compatible, GGUF-native"
 readme = "README.md"
@@ -38,8 +38,9 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-llama = ["llama-cpp-python>=0.2.79"]
-gguf  = ["gguf>=0.10"]
+llama  = ["llama-cpp-python>=0.2.79"]
+gguf   = ["gguf>=0.10"]
+nvidia = ["nvidia-ml-py>=12"]
 dev   = [
     "pytest>=8",
     "pytest-cov>=5",

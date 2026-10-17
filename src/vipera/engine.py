@@ -11,7 +11,7 @@ class Engine:
         try:
             from llama_cpp import Llama
         except ImportError:
-            raise RuntimeError("llama-cpp-python is not installed.")
+            raise RuntimeError("llama-cpp-python is not installed.") from None
 
         self.plan = plan
         self._model_path = model_path
@@ -23,7 +23,7 @@ class Engine:
         except Exception:
             pass
 
-        print(f"\n[!] Warning: failed to load with GPU. Falling back to CPU...")
+        print("\n[!] Warning: failed to load with GPU. Falling back to CPU...")
         safe_plan = replace(
             plan,
             gpu_layers=0,

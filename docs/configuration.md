@@ -1,0 +1,173 @@
+# Configuration and storage
+
+Vipera keeps everything under one directory: `VIPERA_HOME`, which defaults to
+`~/.vipera`. Configuration is a single JSON file; there is no environment
+variable per setting and no global/system-wide config.
+
+## Layout
+
+```text
+~/.vipera/
+├── config.json      # gateway settings
+├── registry.json    # model index (alias → path + metadata)
+├── models/          # *.gguf artifacts
+└── logs/            # created, currently unused
+```
+
+`logs/` is created on startup but nothing writes to it yet.
+
+### `VIPERA_HOME`
+
+```bash
+VIPERA_HOME=/srv/vipera vipera serve start
+```
+
+The environment variable is read **once, at import time**, in
+`src/vipera/config.py`. Changing it after the package has been imported (for
+example in a long-lived Python process) has no effect; set it before launching
+`vipera`. Tests patch the module constants rather than the environment for this
+reason.
+
+Directories and files are created with the process umask; Vipera does not
+tighten permissions on model files or config.
+
+## `config.json`
+
+Create or edit it with `vipera system config`, or write JSON directly:
+
+```bash
+vipera system config                 # show all
+vipera system config port            # show one
+vipera system config port 9000       # set one
+```
+
+Unknown keys are rejected by `vipera system config` (exit 1 with the valid key
+list). A key present in the file but absent from the defaults is preserved when
+the file is loaded and rewritten by the next `save_config` call, but the CLI
+cannot create it.
+
+If `config.json` is missing or unparseable, `load_config()` silently falls back
+to the defaults. Corrupt JSON does not produce an error.
+
+### Keys
+
+| Key | Type | Default | Read by | Meaning |
+|---|---|---|---|---|
+| `host` | `str` | `127.0.0.1` | `serve start`, `serve status` | Gateway bind address. |
+| `port` | `int` | `8686` | `serve start`, `serve status` | Gateway port. |
+| `default_model` | `str \| null` | `null` | root command, `serve start`, `chat`, `bench` | Alias used when `--model` is absent. |
+| `profile` | `str` | `auto` | nothing currently | Planner profile. `serve start --profile` defaults to `auto` independently. |
+| `ctx` | `int` | `8192` | `serve start`, `chat` | Context size for the planner. `bench run` uses its own `--ctx` list. |
+| `kv_cache` | `str` | `q8_0` | `serve start`, `chat`, `bench` | KV cache type; forced to `f16` on CPU-only plans. |
+| `flash_attn` | `bool` | `true` | nothing currently | Planner decides flash attention from VRAM instead. |
+| `n_batch` | `int` | `512` | `serve start`, `chat`, `bench` | Prompt batch size; capped by the plan. |
+| `temperature` | `float` | `0.7` | nothing currently | Per-request default comes from `server.ChatRequest`. |
+| `max_tokens` | `int` | `2048` | nothing currently | Per-request default comes from `server.ChatRequest`. |
+| `top_p` | `float` | `0.95` | nothing currently | Per-request default comes from `server.ChatRequest`. |
+| `show_bench_on_start` | `bool` | `true` | `serve start` | Run the 20-token speed check after loading. |
+
+The "read by nothing" rows are accepted and persisted so the schema is stable,
+but changing them does not alter runtime behavior today. See
+[known gaps](architecture.md#known-gaps).
+
+### Type coercion
+
+When loading, known keys are coerced:
+
+- `port`, `ctx`, `n_batch`, `max_tokens` → `int`
+- `temperature`, `top_p` → `float`
+- `flash_attn`, `show_bench_on_start` → `bool`
+- Strings `"1"`, `"true"`, `"yes"`, `"on"` (case-insensitive) become `True`;
+  every other string becomes `False`.
+
+```bash
+vipera system config port 9000        # stored as 9000, not "9000"
+vipera system config flash_attn false # stored as false
+```
+
+Coercion failures (for example `port = "abc"`) are ignored, leaving the raw
+value in memory. `save_config` writes whatever is in memory, so a bad value can
+round-trip and fail later when it is used. Prefer valid values.
+
+## Registry
+
+`registry.json` is a flat object keyed by alias:
+
+```json
+{
+  "deepseek-v2-lite": {
+    "name": "deepseek-v2-lite",
+    "path": "/home/user/.vipera/models/deepseek-v2-lite.gguf",
+    "added": "2026-10-17T18:04:11.123456Z",
+    "meta": {
+      "size_bytes": 10363723776,
+      "n_layers": 27,
+      "n_params": 15700000000,
+      "context_length": 163840,
+      "quant": "Q4_K_M",
+      "architecture": "deepseek2"
+    }
+  }
+}
+```
+
+- `name` duplicates the key; consumers index by key.
+- `path` is stored as a string and may be relative if a download returned a
+  relative path.
+- `added` is UTC, ISO 8601, with `+00:00` normalized to `Z`.
+- `meta` is written by `model import` / `model search`. Missing fields are
+  tolerated by the planner, which falls back to defaults.
+
+`size_bytes` is always the on-disk size. `n_layers`, `n_params`,
+`context_length`, and `architecture` require the optional `gguf` package; when
+it is absent, `n_layers` stays `0` and the CLI displays `?`. `quant` is parsed
+from the filename when GGUF metadata is unavailable.
+
+### Registry operations
+
+| Operation | Trigger | Notes |
+|---|---|---|
+| Add/overwrite | `model import`, `model search` | Same alias overwrites the entry. Both commands generate a unique alias first. |
+| Set default | `model import`, `model search` | `default_model` is updated in `config.json`. |
+| Remove | `model rm` | Deletes the registry entry and the file at `path`; clears `default_model` if it matched. |
+
+The registry has no file locking and writes are not atomic. Running two Vipera
+commands that mutate the registry at the same time can lose an entry or leave a
+partially written file; the next read then falls back to `{}` because parse
+errors are suppressed. Do not run `model import`, `model search`, or `model rm`
+concurrently.
+
+## Environment variables
+
+| Variable | Effect |
+|---|---|
+| `VIPERA_HOME` | Root storage directory. Read at import time. |
+
+Nothing else is configurable via the environment. In particular, `HOST` and
+`PORT` have no effect; use `vipera serve start --host/--port` or the config
+file.
+
+## Typical recipes
+
+**Change the port and keep the model default:**
+
+```bash
+vipera system config port 9000
+vipera serve start
+```
+
+**Serve a different model without changing the default:**
+
+```bash
+vipera serve start --model other-model --port 9000
+```
+
+**Keep two independent setups on one machine:**
+
+```bash
+VIPERA_HOME=~/.vipera-work vipera model list
+VIPERA_HOME=~/.vipera-personal vipera model list
+```
+
+Each home has its own config, registry, and model files. Models are copied, not
+shared, so disk usage doubles.

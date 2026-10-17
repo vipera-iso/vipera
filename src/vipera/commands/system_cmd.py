@@ -48,17 +48,21 @@ def doctor():
     py_ver = f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}"
     row("python", py_ver)
 
+    llama_missing = False
     try:
         import llama_cpp  # noqa: F401
         row("llama-cpp-python", "installed")
     except ImportError:
         row("llama-cpp-python", "missing", "FAIL", C_RED)
+        llama_missing = True
 
+    gguf_missing = False
     try:
         import gguf  # noqa: F401
         row("gguf", "installed")
     except ImportError:
         row("gguf", "missing", "WARN", C_YELLOW)
+        gguf_missing = True
     end_sec()
 
     add_sec("HARDWARE")
@@ -94,6 +98,19 @@ def doctor():
         box=box.ROUNDED,
         padding=(0, 1),
     ))
+
+    if llama_missing:
+        console.print(
+            f"[{C_YELLOW}] ⚠ llama-cpp-python is required to load models.[/]"
+        )
+        console.print(f"[{C_DIM}]   Install:[/] python -m pip install llama-cpp-python")
+        console.print(f"[{C_DIM}]   Then restart the gateway.[/]\n")
+
+    if gguf_missing:
+        console.print(
+            f"[{C_YELLOW}] ⚠ gguf is optional, but layer and parameter metadata need it.[/]"
+        )
+        console.print(f"[{C_DIM}]   Install:[/] python -m pip install gguf\n")
 
 
 @app.command("config")

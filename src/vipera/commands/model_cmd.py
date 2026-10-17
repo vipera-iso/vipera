@@ -4,13 +4,15 @@ import shutil
 from pathlib import Path
 
 import typer
-from rich import box
 from huggingface_hub import HfApi, hf_hub_download, list_repo_files
+from rich import box
 from rich.panel import Panel
 from rich.prompt import IntPrompt, Prompt
 from rich.table import Table
+from rich.text import Text
 
 from vipera.config import MODELS_DIR, ensure_dirs, load_config, save_config
+from vipera.gguf_analyzer import GGUFAnalysisError, analyze_gguf_structure
 from vipera.registry import add_model, get_model, list_models, remove_model
 from vipera.ui import (
     C_ACCENT,
@@ -32,7 +34,7 @@ _QUANT_RE = re.compile(
 )
 
 
-def _read_meta(path: Path) -> dict:
+def _read_meta(path: Path, name: str | None = None) -> dict:
     meta = {
         "size_bytes": path.stat().st_size,
         "n_layers": 0,
@@ -42,7 +44,7 @@ def _read_meta(path: Path) -> dict:
         "architecture": None,
     }
 
-    m = _QUANT_RE.search(path.name)
+    m = _QUANT_RE.search(name or path.name)
     if m:
         meta["quant"] = m.group(1).upper()
 
@@ -108,7 +110,7 @@ def import_model(
             shutil.copy2(src_path, dst)
 
     animated_loading_bar("IMPORTING GGUF", 1.0)
-    meta = _read_meta(dst)
+    meta = _read_meta(dst, src_path.name)
     add_model(alias, dst, meta)
 
     cfg = load_config()
@@ -142,7 +144,7 @@ def search_model():
             models = list(api.list_models(search=query, filter="gguf", limit=10))
         except Exception as e:
             console.print(f"[{C_RED}] ✗ Connection failed: {e}[/]")
-            raise typer.Exit(1)
+            raise typer.Exit(1) from e
 
     if not models:
         console.print(f"[{C_YELLOW}] ⚠ No models found.[/]")
@@ -165,8 +167,8 @@ def search_model():
         try:
             files = list_repo_files(repo_id=selected_repo)
             gguf_files = [f for f in files if f.endswith(".gguf")]
-        except Exception:
-            raise typer.Exit(1)
+        except Exception as e:
+            raise typer.Exit(1) from e
 
     if not gguf_files:
         console.print(f"[{C_RED}] ✗ No .gguf files found.[/]")
@@ -213,6 +215,116 @@ def search_model():
         console.print(f"\n[{C_YELLOW}] ⚠ Download cancelled.[/]")
     except Exception as e:
         console.print(f"\n[{C_RED}] ✗ Download failed: {e}[/]")
+
+
+def _format_bytes(value: int) -> str:
+    size = float(value)
+    for unit in ("B", "KB", "MB", "GB", "TB"):
+        if size < 1024 or unit == "TB":
+            return f"{size:.1f} {unit}"
+        size /= 1024
+    return f"{value} B"
+
+
+@app.command("inspect")
+def inspect_model(
+    path: str = typer.Argument(..., help="Path to a .gguf file"),
+    tensors: bool = typer.Option(False, "--tensors", help="List every tensor"),
+):
+    """Analyze GGUF metadata and tensor layout without loading weights."""
+    try:
+        result = analyze_gguf_structure(path)
+    except GGUFAnalysisError as e:
+        console.print(f"[{C_RED}] ✗ {e}[/]")
+        raise typer.Exit(1) from e
+
+    meta = result["metadata"]
+    summary = Table(box=box.ROUNDED, title="GGUF ANATOMY", title_justify="left")
+    summary.add_column("PROPERTY", style=C_DIM)
+    summary.add_column("VALUE", style=C_TEXT)
+    summary.add_row("file", result["path"])
+    summary.add_row("architecture", str(meta.get("architecture") or "?"))
+    summary.add_row("name", str(meta.get("name") or "?"))
+    summary.add_row("layers", str(meta.get("n_layers") or "?"))
+    summary.add_row("context", f"{meta['context_length']:,}" if meta.get("context_length") else "?")
+    summary.add_row(
+        "embedding",
+        f"{meta['embedding_length']:,}" if meta.get("embedding_length") else "?",
+    )
+    summary.add_row("quant (file name)", str(meta.get("quant") or "?"))
+    summary.add_row("quant (dominant)", str(meta.get("dominant_quant") or "?"))
+    summary.add_row("tensors", str(meta.get("tensor_count", 0)))
+    summary.add_row("size", _format_bytes(int(meta.get("file_size_bytes", 0))))
+    console.print(summary)
+
+    total = max(1, int(meta.get("file_size_bytes", 0)))
+    tensor_counts: dict[str, int] = {}
+    for tensor in result["tensor_map"]:
+        tensor_counts[tensor["category"]] = tensor_counts.get(tensor["category"], 0) + 1
+
+    categories = Table(box=box.ROUNDED, title="SIZE BY CATEGORY", title_justify="left")
+    categories.add_column("CATEGORY", style=C_TEXT)
+    categories.add_column("TENSORS", style=C_DIM, justify="right")
+    categories.add_column("SIZE", style=C_ACCENT, justify="right")
+    categories.add_column("SHARE", style=C_DIM, justify="right")
+    for category, size in sorted(
+        result["category_sizes"].items(), key=lambda item: item[1], reverse=True
+    ):
+        categories.add_row(
+            category,
+            str(tensor_counts.get(category, 0)),
+            _format_bytes(size),
+            f"{size / total * 100:.1f}%",
+        )
+    console.print(categories)
+
+    quant_table = Table(box=box.ROUNDED, title="QUANTIZATION MIX", title_justify="left")
+    quant_table.add_column("QUANT", style=C_ACCENT)
+    quant_table.add_column("TENSORS", style=C_DIM, justify="right")
+    quant_table.add_column("SIZE", style=C_TEXT, justify="right")
+    for quant, size in sorted(
+        result["quant_sizes"].items(), key=lambda item: item[1], reverse=True
+    ):
+        quant_table.add_row(
+            quant,
+            str(result["quant_counts"].get(quant, 0)),
+            _format_bytes(size),
+        )
+    console.print(quant_table)
+
+    warnings = result["warnings"]
+    if warnings:
+        lines = []
+        for warning in warnings[:10]:
+            lines.append(f"  • {warning['tensor']}: {warning['quant']}")
+        if len(warnings) > 10:
+            lines.append(f"  … and {len(warnings) - 10} more")
+        console.print(
+            Panel(
+                "\n".join(lines),
+                title=Text(" QUALITY WARNINGS ", style=C_YELLOW),
+                border_style=C_YELLOW,
+                box=box.ROUNDED,
+            )
+        )
+
+    if tensors:
+        tensor_table = Table(box=box.SIMPLE, title="TENSORS", title_justify="left")
+        tensor_table.add_column("LAYER", style=C_DIM, justify="right")
+        tensor_table.add_column("NAME", style=C_TEXT)
+        tensor_table.add_column("QUANT", style=C_ACCENT)
+        tensor_table.add_column("SHAPE", style=C_DIM, justify="right")
+        tensor_table.add_column("SIZE", style=C_DIM, justify="right")
+        for tensor in result["tensor_map"]:
+            layer = tensor["layer"]
+            tensor_table.add_row(
+                str(layer) if layer is not None else "—",
+                tensor["name"],
+                tensor["quant"],
+                "x".join(str(dim) for dim in tensor["shape"]),
+                _format_bytes(tensor["n_bytes"]),
+            )
+        console.print(tensor_table)
 
 
 @app.command("list")

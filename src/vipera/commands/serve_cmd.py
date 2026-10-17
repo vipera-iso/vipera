@@ -146,7 +146,7 @@ def start(
             engine = Engine(p, m["path"])
     except RuntimeError as e:
         console.print(f"[{C_RED}] ✗ {e}[/]")
-        raise typer.Exit(1)
+        raise typer.Exit(1) from e
 
     animated_loading_bar("KERNEL INIT", 1.2)
 

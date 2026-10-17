@@ -27,10 +27,15 @@ exact flags that plan implies. No reimplemented runtime, no second inference
 engine, no guessing.
 
 ```bash
-pip install vipera
+pip install "vipera-ai[llama,gguf,nvidia] @ git+https://github.com/vipera-iso/vipera.git"
 vipera model search         # download a GGUF from HuggingFace
 vipera serve start          # → http://127.0.0.1:8686/v1/chat/completions
 ```
+
+> The distribution is named `vipera-ai`; it is not on PyPI yet. The PyPI project
+> named `vipera` is an unrelated tool, so do not install that. Use the GitHub
+> source command above, or follow the no-Git
+> [installation guide](docs/install.md).
 
 ![Vipera demo](docs/images/demo.gif)
 
@@ -70,8 +75,8 @@ Where Vipera differs in practice:
 ## ⚡ Quick start
 
 ```bash
-# 1. install
-pip install vipera
+# 1. install (see docs/install.md for a no-Git option)
+pip install "vipera-ai[llama,gguf,nvidia] @ git+https://github.com/vipera-iso/vipera.git"
 
 # 2. fetch a model
 vipera model search
@@ -116,6 +121,7 @@ Vipera ships a single `vipera` entry point. Every command is discoverable with
 |---|---|
 | `vipera model search` | Search HuggingFace for GGUF models, then download one. |
 | `vipera model import <path> [--name <alias>]` | Copy a local `.gguf` into the Vipera store. |
+| `vipera model inspect <path> [--tensors]` | Analyze GGUF metadata, tensor categories, and quantization mix. |
 | `vipera model list` | List every model registered locally. |
 | `vipera model rm <alias> [--yes]` | Remove a model and its file. |
 
@@ -281,6 +287,23 @@ edit the JSON — unknown keys are rejected, known keys are type-coerced.
 
 Override the home with `VIPERA_HOME=/path/to/dir`.
 
+## 🔬 GGUF inspection
+
+`vipera model inspect` reads the GGUF index only — weights are never loaded
+into memory — and prints the architecture, layer/context/embedding sizes, a
+size breakdown by tensor category (embedding, attention, FFN, expert, norm),
+and the quantization mix.
+
+```bash
+vipera model inspect ~/.vipera/models/model.gguf
+vipera model inspect ~/.vipera/models/model.gguf --tensors   # every tensor
+```
+
+It warns when quality-sensitive tensors (`attn_v`, `ffn_down`, including their
+`_exps` variants) are quantized below Q4_K. That check is a heuristic, not a
+quality measurement. The command is read-only; imatrix and quantize pipelines
+are not implemented yet.
+
 ## 📊 Benchmarks
 
 Vipera measures what the gateway actually produces, on the machine it runs on.
@@ -314,6 +337,14 @@ instrument; the numbers are yours.
 
 ## 📚 Documentation
 
+Start at the [docs index](docs/README.md).
+
+- [Installation](docs/install.md) — step-by-step setup for non-technical users.
+- [Architecture](docs/architecture.md) — module map, planner, engine fallback, concurrency.
+- [CLI reference](docs/cli.md) — every command, flag, and default.
+- [HTTP API](docs/http-api.md) — endpoints, schemas, SSE framing, client examples.
+- [Configuration](docs/configuration.md) — config keys, storage layout, registry schema.
+- [Development](docs/development.md) — setup, tests, CI, release process.
 - [CONTRIBUTING.md](CONTRIBUTING.md) — dev setup, PR flow, how to record the demo GIF.
 - [SECURITY.md](SECURITY.md) — reporting vulnerabilities, supported versions.
 - [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md) — Contributor Covenant 2.1.

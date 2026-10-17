@@ -45,6 +45,7 @@ def show_help():
     guide.append("  ▸ MODELS (vipera model ...)\n", style=C_ACCENT)
     guide.append("    • vipera model list               List installed models\n", style=C_TEXT)
     guide.append("    • vipera model import <path>      Import a local .gguf file\n", style=C_TEXT)
+    guide.append("    • vipera model inspect <path>     Analyze GGUF layout & quants\n", style=C_TEXT)
     guide.append("    • vipera model rm <name>          Remove a model\n\n", style=C_TEXT)
 
     guide.append("  ▸ INFERENCE (vipera chat / bench ...)\n", style=C_ACCENT)
