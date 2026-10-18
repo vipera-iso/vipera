@@ -1,3 +1,4 @@
+import gc
 from dataclasses import replace
 from typing import Any
 
@@ -88,4 +89,7 @@ class Engine:
         if self._closed:
             return
         self._closed = True
+        llm = self.llm
         self.llm = None
+        del llm
+        gc.collect()

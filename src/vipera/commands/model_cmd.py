@@ -415,6 +415,16 @@ def quantize_cmd(
     allow_requantize: bool = typer.Option(
         False, "--allow-requantize", help="Allow requantizing an already quantized model"
     ),
+    output_tensor: str = typer.Option(
+        None,
+        "--output-tensor",
+        help="Mixed-precision type for output layer (e.g. q6_k)",
+    ),
+    token_embedding: str = typer.Option(
+        None,
+        "--token-embedding",
+        help="Mixed-precision type for token embeddings (e.g. q6_k)",
+    ),
     bin_dir: str = typer.Option(None, "--bin-dir", help="Directory with llama.cpp tools"),
     dry_run: bool = typer.Option(False, "--dry-run", help="Print the command only"),
 ):
@@ -439,6 +449,8 @@ def quantize_cmd(
             prior_weight=prior_weight,
             allow_requantize=allow_requantize,
             supports_prior_weight=supports_prior,
+            output_tensor_type=output_tensor,
+            token_embedding_type=token_embedding,
         )
     except OptimizerError as e:
         console.print(f"[{C_RED}] ✗ {e}[/]")
@@ -470,6 +482,16 @@ def optimize_cmd(
     output: str = typer.Option(None, "--output", "-o", help="Output .gguf path"),
     prune_layers: str = typer.Option(None, "--prune-layers"),
     prior_weight: int = typer.Option(1, "--prior-weight"),
+    output_tensor: str = typer.Option(
+        None,
+        "--output-tensor",
+        help="Mixed-precision type for output layer (e.g. q6_k)",
+    ),
+    token_embedding: str = typer.Option(
+        None,
+        "--token-embedding",
+        help="Mixed-precision type for token embeddings (e.g. q6_k)",
+    ),
     bin_dir: str = typer.Option(None, "--bin-dir"),
     dry_run: bool = typer.Option(False, "--dry-run"),
 ):
@@ -556,6 +578,8 @@ def optimize_cmd(
             prior_weight=prior_weight,
             allow_requantize=True,
             supports_prior_weight=supports_prior,
+            output_tensor_type=output_tensor,
+            token_embedding_type=token_embedding,
         )
     except OptimizerError as e:
         console.print(f"[{C_RED}] ✗ {e}[/]")
@@ -621,13 +645,16 @@ def rm_cmd(
         raise typer.Exit(1)
     if not yes and not typer.confirm(f"Remove model '{name}'?"):
         raise typer.Abort()
-    Path(m["path"]).unlink(missing_ok=True)
+
+    # Registry first: a dangling file is easy to reclaim, a dangling entry is not.
     remove_model(name)
 
     cfg = load_config()
     if cfg.get("default_model") == name:
         cfg["default_model"] = None
         save_config(cfg)
+
+    Path(m["path"]).unlink(missing_ok=True)
 
     console.print(f"[{C_GREEN}] ✓ Removed: {name}[/]")
 

@@ -44,7 +44,7 @@ def _build(model: str) -> Engine:
         return Engine(p, m["path"])
 
 
-def repl_loop(engine: Engine):
+def repl_loop(engine: Engine, typewriter: bool = False):
     console.print(Panel(
         Text("  System Ready. Type 'exit' or Ctrl+C to quit.", style=C_SUCCESS),
         border_style=C_ACCENT, box=box.ROUNDED,
@@ -69,7 +69,10 @@ def repl_loop(engine: Engine):
 
         try:
             stream = engine.chat(history, stream=True)
-            reply = typewriter_chat_stream(stream, title_text=" AI ")
+            if typewriter:
+                reply = typewriter_chat_stream(stream, title_text=" AI ")
+            else:
+                reply = plain_chat_stream(stream, title_text=" AI ")
             history.append({"role": "assistant", "content": reply})
         except Exception as e:
             console.print(f"\n  [{C_RED}]✗ Error: {e}[/]")
@@ -77,7 +80,12 @@ def repl_loop(engine: Engine):
 
 
 @app.command("repl")
-def repl(model: str = typer.Option(None, "--model", "-m", help="Model alias")):
+def repl(
+    model: str = typer.Option(None, "--model", "-m", help="Model alias"),
+    typewriter: bool = typer.Option(
+        False, "--typewriter", help="Animate output (slower, nicer for demos)"
+    ),
+):
     """Start interactive chat REPL."""
     cfg = load_config()
     model = model or cfg.get("default_model")
@@ -85,7 +93,7 @@ def repl(model: str = typer.Option(None, "--model", "-m", help="Model alias")):
         model = pick_model("SELECT A MODEL TO CHAT")
     engine = _build(model)
     try:
-        repl_loop(engine)
+        repl_loop(engine, typewriter=typewriter)
     finally:
         engine.close()
 

@@ -77,7 +77,7 @@ def heartbeat_banner():
         time.sleep(0.25)
 
 
-def print_banner():
+def print_banner(host: str = "localhost"):
     console.print()
     heartbeat_banner()
 
@@ -85,7 +85,7 @@ def print_banner():
     rule.append("   " + "▬" * 74 + "\n", style=C_BORDER)
     rule.append("   ◆ ", style=C_ACCENT)
     rule.append("NODE   ", style=C_DIM)
-    rule.append("localhost", style=C_TEXT)
+    rule.append(host, style=C_TEXT)
     rule.append("     ◆ ", style=C_ACCENT)
     rule.append("VERSION  ", style=C_DIM)
     rule.append(__version__, style=C_TEXT)

@@ -49,6 +49,12 @@ def _quick_bench(engine: Engine) -> None:
             usage = out.get("usage", {}) or {}
             gen_tok = usage.get("completion_tokens", 0)
             prompt_tok = usage.get("prompt_tokens", 0)
+
+            if not usage:
+                # Backend didn't report usage; fall back to a rough char/4 estimate.
+                content = (out.get("choices") or [{}])[0].get("message", {}).get("content", "")
+                gen_tok = max(1, len(content) // 4) if content else 0
+
             tps = gen_tok / dt if dt > 0 else 0
 
             if tps >= 20:
@@ -190,10 +196,10 @@ def start(
         uvicorn.run(fastapi_app, host=host, port=port, log_level="warning")
 
     except ImportError:
-            console.print(f"[{C_YELLOW}] ⚠ FastAPI is not installed. Falling back to Chat REPL.[/]\n")
-            from vipera.commands.chat_cmd import repl_loop
+        console.print(f"[{C_YELLOW}] ⚠ FastAPI is not installed. Falling back to Chat REPL.[/]\n")
+        from vipera.commands.chat_cmd import repl_loop
 
-            repl_loop(engine)
+        repl_loop(engine)
     finally:
         engine.close()
 

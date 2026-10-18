@@ -1,5 +1,5 @@
+import asyncio
 import json
-from threading import Lock
 from typing import Literal
 
 from fastapi import FastAPI, HTTPException
@@ -29,7 +29,7 @@ class ChatRequest(BaseModel):
 
 def build_app(engine, model_name: str) -> FastAPI:
     app = FastAPI(title="Vipera Gateway", version="1.0.0")
-    lock = Lock()
+    lock = asyncio.Lock()
 
     @app.get("/health")
     def health():
@@ -71,8 +71,10 @@ def build_app(engine, model_name: str) -> FastAPI:
 
         if req.stream:
             async def _stream():
-                await run_in_threadpool(lock.acquire)
-                try:
+                # asyncio.Lock (unlike the old threading.Lock + threadpool acquire)
+                # is released correctly if the client disconnects mid-stream,
+                # which used to leak the lock and deadlock the gateway.
+                async with lock:
                     try:
                         for chunk in engine.chat(messages, stream=True, **kwargs):
                             payload = json.dumps(chunk, ensure_ascii=False)
@@ -80,16 +82,11 @@ def build_app(engine, model_name: str) -> FastAPI:
                     except Exception as exc:
                         err = {"error": {"message": str(exc)}}
                         yield f"data: {json.dumps(err, ensure_ascii=False)}\n\n"
-                finally:
-                    lock.release()
                 yield "data: [DONE]\n\n"
 
             return StreamingResponse(_stream(), media_type="text/event-stream")
 
-        def _generate():
-            with lock:
-                return engine.chat(messages, stream=False, **kwargs)
-
-        return await run_in_threadpool(_generate)
+        async with lock:
+            return await run_in_threadpool(engine.chat, messages, stream=False, **kwargs)
 
     return app

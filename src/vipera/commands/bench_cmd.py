@@ -36,7 +36,8 @@ def _run_bench(engine: Engine, prompt: str, max_tokens: int) -> dict:
     except Exception:
         prompt_tok = 0
 
-    gen_tok = 0
+    chunk_count = 0
+    final_usage: dict | None = None
     first_token_at = None
     t0 = time.perf_counter()
 
@@ -47,21 +48,33 @@ def _run_bench(engine: Engine, prompt: str, max_tokens: int) -> dict:
             max_tokens=max_tokens,
         )
         for chunk in stream:
+            usage = chunk.get("usage") if isinstance(chunk, dict) else None
+            if usage:
+                final_usage = usage
             try:
-                delta = chunk["choices"][0]["delta"].get("content", "")
+                delta = chunk["choices"][0]["delta"].get("content", "") if chunk.get("choices") else ""
             except (KeyError, IndexError, TypeError):
                 delta = ""
             if delta:
-                gen_tok += 1
+                chunk_count += 1
                 if first_token_at is None:
                     first_token_at = time.perf_counter()
     except Exception as e:
-        return {"error": str(e), "prompt_tok": prompt_tok, "gen_tok": gen_tok}
+        return {"error": str(e), "prompt_tok": prompt_tok, "gen_tok": chunk_count}
 
     dt = time.perf_counter() - t0
     ttft = (first_token_at - t0) if first_token_at else dt
     gen_time = dt - ttft
     prompt_tps = prompt_tok / ttft if ttft > 0 and prompt_tok > 0 else 0.0
+
+    # Prefer the model's own token count when the backend reports it; llama.cpp
+    # only does so when asked via stream_options, which this build may not
+    # support, so the streamed-chunk count remains the fallback.
+    gen_tok = chunk_count
+    token_count_is_exact = False
+    if final_usage and final_usage.get("completion_tokens"):
+        gen_tok = int(final_usage["completion_tokens"])
+        token_count_is_exact = True
 
     if gen_time > 0 and gen_tok > 1:
         gen_tps = (gen_tok - 1) / gen_time
@@ -73,6 +86,7 @@ def _run_bench(engine: Engine, prompt: str, max_tokens: int) -> dict:
     return {
         "prompt_tok": prompt_tok,
         "gen_tok": gen_tok,
+        "token_count_is_exact": token_count_is_exact,
         "ttft_ms": ttft * 1000.0,
         "prompt_tps": prompt_tps,
         "gen_tps": gen_tps,
@@ -142,13 +156,17 @@ def run(
 
             layers_total = int(m["meta"].get("n_layers") or 0) or max(p.gpu_layers, 1)
 
+            gen_tok_str = str(result["gen_tok"])
+            if not result.get("token_count_is_exact"):
+                gen_tok_str = f"~{result['gen_tok']}"
+
             t.add_row(
                 str(c),
                 f"{p.gpu_layers}/{layers_total}",
                 str(result["prompt_tok"]),
                 f"{result['ttft_ms']:.0f} ms",
                 f"{result['prompt_tps']:.1f}",
-                str(result["gen_tok"]),
+                gen_tok_str,
                 f"{result['gen_tps']:.2f}",
                 f"{result['total_s']:.2f} s",
             )
@@ -159,5 +177,7 @@ def run(
     console.print(t)
     console.print(
         f"[{C_DIM}]  * TTFT = time to first token. PREFILL T/s is prompt_tokens / TTFT "
-        f"(approximate). GEN T/s is measured after the first token.[/]\n"
+        f"(approximate). GEN T/s is measured after the first token. "
+        f"A '~' prefix on GEN TOK means the backend did not report usage and the "
+        f"count is a streamed-chunk approximation.[/]\n"
     )

@@ -21,13 +21,16 @@ DEFAULT_CONFIG = {
     "temperature": 0.7,
     "max_tokens": 2048,
     "top_p": 0.95,
+    "repeat_penalty": 1.1,
     "show_bench_on_start": True,
 }
 
+_KV_CACHE_TYPES = {"f32", "f16", "q4_0", "q4_1", "q8_0"}
+
 _TYPE_MAP = {
     "port": int, "ctx": int, "n_batch": int, "max_tokens": int,
-    "temperature": float, "top_p": float, "flash_attn": bool,
-    "show_bench_on_start": bool,
+    "temperature": float, "top_p": float, "repeat_penalty": float,
+    "flash_attn": bool, "show_bench_on_start": bool,
 }
 
 
@@ -46,6 +49,8 @@ def _coerce(cfg: dict) -> dict:
                     cfg[k] = cast(cfg[k])
             except (ValueError, TypeError):
                 pass
+    if cfg.get("kv_cache") not in _KV_CACHE_TYPES:
+        cfg["kv_cache"] = DEFAULT_CONFIG["kv_cache"]
     return cfg
 
 
@@ -60,6 +65,9 @@ def _coerce_strict(cfg: dict) -> dict:
                     cfg[k] = cast(cfg[k])
             except (ValueError, TypeError) as exc:
                 raise ValueError(f"{k}: invalid {cast.__name__} value '{cfg[k]}'") from exc
+    if "kv_cache" in cfg and cfg["kv_cache"] not in _KV_CACHE_TYPES:
+        valid = ", ".join(sorted(_KV_CACHE_TYPES))
+        raise ValueError(f"kv_cache: must be one of {valid}")
     return cfg
 
 

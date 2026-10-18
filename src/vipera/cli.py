@@ -85,7 +85,8 @@ def main(
     if ctx.invoked_subcommand is not None:
         return
 
-    print_banner()
+    cfg = load_config()
+    print_banner(host=cfg.get("host", "localhost"))
 
     installed = list_models()
     if not installed:
