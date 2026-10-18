@@ -92,7 +92,8 @@ def main(
     if ctx.invoked_subcommand is not None:
         return
 
-    print_banner()
+    cfg = load_config()
+    print_banner(host=cfg.get("host", "localhost"))
 
     installed = list_models()
     if not installed:
@@ -168,7 +169,8 @@ def _run_bench(engine: Engine, prompt: str, max_tokens: int) -> dict:
     except Exception:
         prompt_tok = 0
 
-    gen_tok = 0
+    chunk_count = 0
+    final_usage: dict | None = None
     first_token_at = None
     t0 = time.perf_counter()
 
@@ -179,21 +181,33 @@ def _run_bench(engine: Engine, prompt: str, max_tokens: int) -> dict:
             max_tokens=max_tokens,
         )
         for chunk in stream:
+            usage = chunk.get("usage") if isinstance(chunk, dict) else None
+            if usage:
+                final_usage = usage
             try:
-                delta = chunk["choices"][0]["delta"].get("content", "")
+                delta = chunk["choices"][0]["delta"].get("content", "") if chunk.get("choices") else ""
             except (KeyError, IndexError, TypeError):
                 delta = ""
             if delta:
-                gen_tok += 1
+                chunk_count += 1
                 if first_token_at is None:
                     first_token_at = time.perf_counter()
     except Exception as e:
-        return {"error": str(e), "prompt_tok": prompt_tok, "gen_tok": gen_tok}
+        return {"error": str(e), "prompt_tok": prompt_tok, "gen_tok": chunk_count}
 
     dt = time.perf_counter() - t0
     ttft = (first_token_at - t0) if first_token_at else dt
     gen_time = dt - ttft
     prompt_tps = prompt_tok / ttft if ttft > 0 and prompt_tok > 0 else 0.0
+
+    # Prefer the model's own token count when the backend reports it; llama.cpp
+    # only does so when asked via stream_options, which this build may not
+    # support, so the streamed-chunk count remains the fallback.
+    gen_tok = chunk_count
+    token_count_is_exact = False
+    if final_usage and final_usage.get("completion_tokens"):
+        gen_tok = int(final_usage["completion_tokens"])
+        token_count_is_exact = True
 
     if gen_time > 0 and gen_tok > 1:
         gen_tps = (gen_tok - 1) / gen_time
@@ -205,6 +219,7 @@ def _run_bench(engine: Engine, prompt: str, max_tokens: int) -> dict:
     return {
         "prompt_tok": prompt_tok,
         "gen_tok": gen_tok,
+        "token_count_is_exact": token_count_is_exact,
         "ttft_ms": ttft * 1000.0,
         "prompt_tps": prompt_tps,
         "gen_tps": gen_tps,
@@ -274,13 +289,17 @@ def run(
 
             layers_total = int(m["meta"].get("n_layers") or 0) or max(p.gpu_layers, 1)
 
+            gen_tok_str = str(result["gen_tok"])
+            if not result.get("token_count_is_exact"):
+                gen_tok_str = f"~{result['gen_tok']}"
+
             t.add_row(
                 str(c),
                 f"{p.gpu_layers}/{layers_total}",
                 str(result["prompt_tok"]),
                 f"{result['ttft_ms']:.0f} ms",
                 f"{result['prompt_tps']:.1f}",
-                str(result["gen_tok"]),
+                gen_tok_str,
                 f"{result['gen_tps']:.2f}",
                 f"{result['total_s']:.2f} s",
             )
@@ -291,7 +310,9 @@ def run(
     console.print(t)
     console.print(
         f"[{C_DIM}]  * TTFT = time to first token. PREFILL T/s is prompt_tokens / TTFT "
-        f"(approximate). GEN T/s is measured after the first token.[/]\n"
+        f"(approximate). GEN T/s is measured after the first token. "
+        f"A '~' prefix on GEN TOK means the backend did not report usage and the "
+        f"count is a streamed-chunk approximation.[/]\n"
     )
 
 # commands/chat_cmd.py
@@ -341,7 +362,7 @@ def _build(model: str) -> Engine:
         return Engine(p, m["path"])
 
 
-def repl_loop(engine: Engine):
+def repl_loop(engine: Engine, typewriter: bool = False):
     console.print(Panel(
         Text("  System Ready. Type 'exit' or Ctrl+C to quit.", style=C_SUCCESS),
         border_style=C_ACCENT, box=box.ROUNDED,
@@ -366,7 +387,10 @@ def repl_loop(engine: Engine):
 
         try:
             stream = engine.chat(history, stream=True)
-            reply = typewriter_chat_stream(stream, title_text=" AI ")
+            if typewriter:
+                reply = typewriter_chat_stream(stream, title_text=" AI ")
+            else:
+                reply = plain_chat_stream(stream, title_text=" AI ")
             history.append({"role": "assistant", "content": reply})
         except Exception as e:
             console.print(f"\n  [{C_RED}]✗ Error: {e}[/]")
@@ -374,7 +398,12 @@ def repl_loop(engine: Engine):
 
 
 @app.command("repl")
-def repl(model: str = typer.Option(None, "--model", "-m", help="Model alias")):
+def repl(
+    model: str = typer.Option(None, "--model", "-m", help="Model alias"),
+    typewriter: bool = typer.Option(
+        False, "--typewriter", help="Animate output (slower, nicer for demos)"
+    ),
+):
     """Start interactive chat REPL."""
     cfg = load_config()
     model = model or cfg.get("default_model")
@@ -382,7 +411,7 @@ def repl(model: str = typer.Option(None, "--model", "-m", help="Model alias")):
         model = pick_model("SELECT A MODEL TO CHAT")
     engine = _build(model)
     try:
-        repl_loop(engine)
+        repl_loop(engine, typewriter=typewriter)
     finally:
         engine.close()
 
@@ -830,6 +859,16 @@ def quantize_cmd(
     allow_requantize: bool = typer.Option(
         False, "--allow-requantize", help="Allow requantizing an already quantized model"
     ),
+    output_tensor: str = typer.Option(
+        None,
+        "--output-tensor",
+        help="Mixed-precision type for output layer (e.g. q6_k)",
+    ),
+    token_embedding: str = typer.Option(
+        None,
+        "--token-embedding",
+        help="Mixed-precision type for token embeddings (e.g. q6_k)",
+    ),
     bin_dir: str = typer.Option(None, "--bin-dir", help="Directory with llama.cpp tools"),
     dry_run: bool = typer.Option(False, "--dry-run", help="Print the command only"),
 ):
@@ -854,6 +893,8 @@ def quantize_cmd(
             prior_weight=prior_weight,
             allow_requantize=allow_requantize,
             supports_prior_weight=supports_prior,
+            output_tensor_type=output_tensor,
+            token_embedding_type=token_embedding,
         )
     except OptimizerError as e:
         console.print(f"[{C_RED}] ✗ {e}[/]")
@@ -885,6 +926,16 @@ def optimize_cmd(
     output: str = typer.Option(None, "--output", "-o", help="Output .gguf path"),
     prune_layers: str = typer.Option(None, "--prune-layers"),
     prior_weight: int = typer.Option(1, "--prior-weight"),
+    output_tensor: str = typer.Option(
+        None,
+        "--output-tensor",
+        help="Mixed-precision type for output layer (e.g. q6_k)",
+    ),
+    token_embedding: str = typer.Option(
+        None,
+        "--token-embedding",
+        help="Mixed-precision type for token embeddings (e.g. q6_k)",
+    ),
     bin_dir: str = typer.Option(None, "--bin-dir"),
     dry_run: bool = typer.Option(False, "--dry-run"),
 ):
@@ -971,6 +1022,8 @@ def optimize_cmd(
             prior_weight=prior_weight,
             allow_requantize=True,
             supports_prior_weight=supports_prior,
+            output_tensor_type=output_tensor,
+            token_embedding_type=token_embedding,
         )
     except OptimizerError as e:
         console.print(f"[{C_RED}] ✗ {e}[/]")
@@ -1036,13 +1089,16 @@ def rm_cmd(
         raise typer.Exit(1)
     if not yes and not typer.confirm(f"Remove model '{name}'?"):
         raise typer.Abort()
-    Path(m["path"]).unlink(missing_ok=True)
+
+    # Registry first: a dangling file is easy to reclaim, a dangling entry is not.
     remove_model(name)
 
     cfg = load_config()
     if cfg.get("default_model") == name:
         cfg["default_model"] = None
         save_config(cfg)
+
+    Path(m["path"]).unlink(missing_ok=True)
 
     console.print(f"[{C_GREEN}] ✓ Removed: {name}[/]")
 
@@ -1133,6 +1189,12 @@ def _quick_bench(engine: Engine) -> None:
             usage = out.get("usage", {}) or {}
             gen_tok = usage.get("completion_tokens", 0)
             prompt_tok = usage.get("prompt_tokens", 0)
+
+            if not usage:
+                # Backend didn't report usage; fall back to a rough char/4 estimate.
+                content = (out.get("choices") or [{}])[0].get("message", {}).get("content", "")
+                gen_tok = max(1, len(content) // 4) if content else 0
+
             tps = gen_tok / dt if dt > 0 else 0
 
             if tps >= 20:
@@ -1274,10 +1336,10 @@ def start(
         uvicorn.run(fastapi_app, host=host, port=port, log_level="warning")
 
     except ImportError:
-            console.print(f"[{C_YELLOW}] ⚠ FastAPI is not installed. Falling back to Chat REPL.[/]\n")
-            from vipera.commands.chat_cmd import repl_loop
+        console.print(f"[{C_YELLOW}] ⚠ FastAPI is not installed. Falling back to Chat REPL.[/]\n")
+        from vipera.commands.chat_cmd import repl_loop
 
-            repl_loop(engine)
+        repl_loop(engine)
     finally:
         engine.close()
 
@@ -1477,13 +1539,16 @@ DEFAULT_CONFIG = {
     "temperature": 0.7,
     "max_tokens": 2048,
     "top_p": 0.95,
+    "repeat_penalty": 1.1,
     "show_bench_on_start": True,
 }
 
+_KV_CACHE_TYPES = {"f32", "f16", "q4_0", "q4_1", "q8_0"}
+
 _TYPE_MAP = {
     "port": int, "ctx": int, "n_batch": int, "max_tokens": int,
-    "temperature": float, "top_p": float, "flash_attn": bool,
-    "show_bench_on_start": bool,
+    "temperature": float, "top_p": float, "repeat_penalty": float,
+    "flash_attn": bool, "show_bench_on_start": bool,
 }
 
 
@@ -1502,6 +1567,8 @@ def _coerce(cfg: dict) -> dict:
                     cfg[k] = cast(cfg[k])
             except (ValueError, TypeError):
                 pass
+    if cfg.get("kv_cache") not in _KV_CACHE_TYPES:
+        cfg["kv_cache"] = DEFAULT_CONFIG["kv_cache"]
     return cfg
 
 
@@ -1516,6 +1583,9 @@ def _coerce_strict(cfg: dict) -> dict:
                     cfg[k] = cast(cfg[k])
             except (ValueError, TypeError) as exc:
                 raise ValueError(f"{k}: invalid {cast.__name__} value '{cfg[k]}'") from exc
+    if "kv_cache" in cfg and cfg["kv_cache"] not in _KV_CACHE_TYPES:
+        valid = ", ".join(sorted(_KV_CACHE_TYPES))
+        raise ValueError(f"kv_cache: must be one of {valid}")
     return cfg
 
 
@@ -1532,6 +1602,7 @@ def save_config(cfg: dict) -> None:
     CONFIG_FILE.write_text(json.dumps(cfg, indent=2))
 
 # engine.py
+import gc
 from dataclasses import replace
 from typing import Any
 
@@ -1622,7 +1693,10 @@ class Engine:
         if self._closed:
             return
         self._closed = True
+        llm = self.llm
         self.llm = None
+        del llm
+        gc.collect()
 
 # gguf_analyzer.py
 """Inspect GGUF headers, tensor metadata, and per-layer size distribution.
@@ -2397,8 +2471,8 @@ def remove_model(name: str) -> bool:
     return False
 
 # server.py
+import asyncio
 import json
-from threading import Lock
 from typing import Literal
 
 from fastapi import FastAPI, HTTPException
@@ -2428,7 +2502,7 @@ class ChatRequest(BaseModel):
 
 def build_app(engine, model_name: str) -> FastAPI:
     app = FastAPI(title="Vipera Gateway", version="1.0.0")
-    lock = Lock()
+    lock = asyncio.Lock()
 
     @app.get("/health")
     def health():
@@ -2470,8 +2544,10 @@ def build_app(engine, model_name: str) -> FastAPI:
 
         if req.stream:
             async def _stream():
-                await run_in_threadpool(lock.acquire)
-                try:
+                # asyncio.Lock (unlike the old threading.Lock + threadpool acquire)
+                # is released correctly if the client disconnects mid-stream,
+                # which used to leak the lock and deadlock the gateway.
+                async with lock:
                     try:
                         for chunk in engine.chat(messages, stream=True, **kwargs):
                             payload = json.dumps(chunk, ensure_ascii=False)
@@ -2479,17 +2555,12 @@ def build_app(engine, model_name: str) -> FastAPI:
                     except Exception as exc:
                         err = {"error": {"message": str(exc)}}
                         yield f"data: {json.dumps(err, ensure_ascii=False)}\n\n"
-                finally:
-                    lock.release()
                 yield "data: [DONE]\n\n"
 
             return StreamingResponse(_stream(), media_type="text/event-stream")
 
-        def _generate():
-            with lock:
-                return engine.chat(messages, stream=False, **kwargs)
-
-        return await run_in_threadpool(_generate)
+        async with lock:
+            return await run_in_threadpool(engine.chat, messages, stream=False, **kwargs)
 
     return app
 
@@ -2573,7 +2644,7 @@ def heartbeat_banner():
         time.sleep(0.25)
 
 
-def print_banner():
+def print_banner(host: str = "localhost"):
     console.print()
     heartbeat_banner()
 
@@ -2581,7 +2652,7 @@ def print_banner():
     rule.append("   " + "▬" * 74 + "\n", style=C_BORDER)
     rule.append("   ◆ ", style=C_ACCENT)
     rule.append("NODE   ", style=C_DIM)
-    rule.append("localhost", style=C_TEXT)
+    rule.append(host, style=C_TEXT)
     rule.append("     ◆ ", style=C_ACCENT)
     rule.append("VERSION  ", style=C_DIM)
     rule.append(__version__, style=C_TEXT)
