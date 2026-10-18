@@ -140,7 +140,7 @@ def _wrap_block(text: str, width: int = 68) -> str:
 _LIVE_UPDATE_INTERVAL = 0.03
 
 
-def plain_chat_stream(stream_generator, title_text: str = " AI "):
+def typewriter_chat_stream(stream_generator, title_text: str = " AI "):
     full_response = ""
     start_time = time.time()
     chunk_count = 0
@@ -200,6 +200,54 @@ def plain_chat_stream(stream_generator, title_text: str = " AI "):
     stat.append(f"{chunk_count} chunks  ·  {tps:.1f} c/s  ·  {dt:.2f}s\n", style=C_DIM)
     console.print(stat)
     return full_response
+
+
+def plain_chat_stream(stream_generator, title_text: str = " AI "):
+    """Stream a chat reply as fast as the model produces tokens."""
+    full = []
+    start_time = time.time()
+    chunk_count = 0
+
+    with Live(console=console, refresh_per_second=20, transient=True) as live:
+        for chunk in stream_generator:
+            try:
+                delta = chunk["choices"][0]["delta"].get("content", "")
+            except (KeyError, IndexError, TypeError):
+                continue
+            if not delta:
+                continue
+            chunk_count += 1
+            full.append(delta)
+            live.update(
+                Panel(
+                    Text("".join(full), style=C_TEXT),
+                    title=Text(title_text, style=C_ACCENT),
+                    title_align="left",
+                    border_style=C_ACCENT,
+                    box=box.ROUNDED,
+                    padding=(0, 1),
+                )
+            )
+
+    text = "".join(full)
+    console.print(
+        Panel(
+            Text(text, style=C_TEXT),
+            title=Text(title_text, style=C_ACCENT),
+            title_align="left",
+            border_style=C_ACCENT,
+            box=box.ROUNDED,
+            padding=(0, 1),
+        )
+    )
+
+    dt = time.time() - start_time
+    tps = chunk_count / dt if dt > 0 else 0
+    stat = Text("    ")
+    stat.append("└─ ", style=C_BORDER)
+    stat.append(f"{chunk_count} chunks  ·  {tps:.1f} c/s  ·  {dt:.2f}s\n", style=C_DIM)
+    console.print(stat)
+    return text
 
 
 def pick_model(title: str = "SELECT A MODEL") -> str:
