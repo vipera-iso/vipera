@@ -264,6 +264,7 @@ def analyze_gguf(path: str) -> dict[str, Any]:
             "n_layers": n_layers,
             "context_length": context_length,
             "embedding_length": embedding_length,
+            "n_params": _as_int(_field_value(fields, "general.parameter_count")),
             "quant": filename_quant or dominant_quant or "?",
             "dominant_quant": dominant_quant,
             "tensor_count": len(tensor_map),

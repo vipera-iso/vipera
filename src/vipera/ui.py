@@ -140,7 +140,7 @@ def _wrap_block(text: str, width: int = 68) -> str:
 _LIVE_UPDATE_INTERVAL = 0.03
 
 
-def typewriter_chat_stream(stream_generator, title_text: str = " AI "):
+def plain_chat_stream(stream_generator, title_text: str = " AI "):
     full_response = ""
     start_time = time.time()
     chunk_count = 0

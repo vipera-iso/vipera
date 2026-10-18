@@ -15,6 +15,7 @@ from vipera.ui import (
     C_SUCCESS,
     console,
     pick_model,
+    plain_chat_stream,
     typewriter_chat_stream,
 )
 
@@ -77,13 +78,19 @@ def repl(model: str = typer.Option(None, "--model", "-m", help="Model alias")):
     if not model:
         model = pick_model("SELECT A MODEL TO CHAT")
     engine = _build(model)
-    repl_loop(engine)
+    try:
+        repl_loop(engine)
+    finally:
+        engine.close()
 
 
 @app.command("oneshot")
 def oneshot(
     prompt: str = typer.Argument(..., help="Prompt to send"),
     model: str = typer.Option(None, "--model", "-m", help="Model alias"),
+    typewriter: bool = typer.Option(
+        False, "--typewriter", help="Animate output (slower, nicer for demos)"
+    ),
 ):
     """Ask a single question and exit."""
     cfg = load_config()
@@ -91,5 +98,13 @@ def oneshot(
     if not model:
         model = pick_model("SELECT A MODEL TO CHAT")
     engine = _build(model)
-    stream = engine.chat([{"role": "user", "content": prompt}], stream=True)
-    typewriter_chat_stream(stream, title_text=" AI ")
+    try:
+        stream = engine.chat(
+            [{"role": "user", "content": prompt}], stream=True, **_chat_kwargs(cfg)
+        )
+        if typewriter:
+            typewriter_chat_stream(stream, title_text=" AI ")
+        else:
+            plain_chat_stream(stream, title_text=" AI ")
+    finally:
+        engine.close()

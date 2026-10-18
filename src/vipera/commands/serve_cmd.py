@@ -104,6 +104,17 @@ def start(
         console.print(f"[{C_RED}] ✗ Model not found: {model}[/]")
         raise typer.Exit(1)
 
+    if host not in {"127.0.0.1", "localhost", "::1", "0.0.0.0"}:
+        console.print(
+            f"[{C_RED}] ⚠ WARNING: binding to {host} exposes the model to the "
+            f"network with no authentication.[/]"
+        )
+        console.print(f"[{C_DIM}]  Aborting in 5s — press Ctrl+C to stop now.[/]")
+        try:
+            time.sleep(5)
+        except KeyboardInterrupt:
+            raise typer.Exit(1) from None
+
     hw = detect()
     p = plan(
         m["meta"], hw, profile=profile, ctx=ctx,
@@ -155,9 +166,7 @@ def start(
 
     try:
         import uvicorn
-
         from vipera.server import build_app
-
         fastapi_app = build_app(engine, model)
 
         ready = Text()
@@ -180,10 +189,12 @@ def start(
         uvicorn.run(fastapi_app, host=host, port=port, log_level="warning")
 
     except ImportError:
-        console.print(f"[{C_YELLOW}] ⚠ FastAPI is not installed. Falling back to Chat REPL.[/]\n")
-        from vipera.commands.chat_cmd import repl_loop
+            console.print(f"[{C_YELLOW}] ⚠ FastAPI is not installed. Falling back to Chat REPL.[/]\n")
+            from vipera.commands.chat_cmd import repl_loop
 
-        repl_loop(engine)
+            repl_loop(engine)
+    finally:
+        engine.close()
 
 
 @app.command("status")

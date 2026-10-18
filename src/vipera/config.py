@@ -3,7 +3,7 @@ import json
 import os
 from pathlib import Path
 
-VIPERA_HOME = Path(os.environ.get("VIPERA_HOME", Path.home() / ".vipera"))
+VIPERA_HOME = Path(os.environ.get("VIPERA_HOME") or (Path.home() / ".vipera"))
 MODELS_DIR = VIPERA_HOME / "models"
 LOGS_DIR = VIPERA_HOME / "logs"
 REGISTRY_FILE = VIPERA_HOME / "registry.json"
@@ -46,6 +46,20 @@ def _coerce(cfg: dict) -> dict:
                     cfg[k] = cast(cfg[k])
             except (ValueError, TypeError):
                 pass
+    return cfg
+
+
+def _coerce_strict(cfg: dict) -> dict:
+    """Raise ValueError on any invalid typed value."""
+    for k, cast in _TYPE_MAP.items():
+        if k in cfg and cfg[k] is not None:
+            try:
+                if cast is bool:
+                    cfg[k] = str(cfg[k]).lower() in ("1", "true", "yes", "on")
+                else:
+                    cfg[k] = cast(cfg[k])
+            except (ValueError, TypeError) as exc:
+                raise ValueError(f"{k}: invalid {cast.__name__} value '{cfg[k]}'") from exc
     return cfg
 
 

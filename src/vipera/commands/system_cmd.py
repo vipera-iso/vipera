@@ -6,7 +6,7 @@ from rich import box
 from rich.panel import Panel
 from rich.text import Text
 
-from vipera.config import DEFAULT_CONFIG, _coerce, load_config, save_config
+from vipera.config import DEFAULT_CONFIG, _coerce, _coerce_strict, load_config, save_config
 from vipera.hardware import detect
 from vipera.ui import (
     C_ACCENT,
@@ -28,19 +28,26 @@ def doctor():
     content = Text()
     counters = {"pass": 0, "warn": 0, "fail": 0}
 
+    ROW_W = 78
+
     def add_sec(title: str):
-        content.append(f"  ┌─[ {title} ]", style=C_ACCENT)
-        content.append("─" * max(0, 62 - len(title)), style=C_BORDER)
-        content.append("┐\n", style=C_BORDER)
+        inner = f"[ {title} ]"
+        rest = ROW_W - 5 - len(inner)
+        content.append(f"  ┌─{inner}", style=C_ACCENT)
+        content.append("─" * max(0, rest) + "┐\n", style=C_BORDER)
 
     def end_sec():
-        content.append("  └" + "─" * 72 + "┘\n\n", style=C_BORDER)
+        content.append("  └" + "─" * (ROW_W - 4) + "┘\n\n", style=C_BORDER)
 
     def row(label: str, val: str, status: str = "PASS", col: str = C_GREEN):
         counters[status.lower()] += 1
-        pad = "·" * max(0, 42 - len(label) - len(val))
-        content.append(f"  │ {label:<20} {val} {pad} ", style=C_TEXT)
-        content.append(f"[ {status:^4} ] │\n", style=col)
+        status_s = f"[ {status:^4} ]"
+        dots = "·" * max(1, 41 - len(val))
+        content.append(f"  │ {label:<20} ", style=C_TEXT)
+        content.append(val, style=C_TEXT)
+        content.append(f" {dots} ", style=C_TEXT)
+        content.append(status_s, style=col)
+        content.append(" │\n", style=C_TEXT)
 
     add_sec("RUNTIME")
     os_info = f"{platform.system()} {platform.release()} ({platform.machine()})"
@@ -140,6 +147,10 @@ def config_cmd(
         return
 
     cfg[key] = value
-    cfg = _coerce(cfg)
+    try:
+        cfg = _coerce_strict(cfg)
+    except ValueError as exc:
+        console.print(f"[{C_RED}] ✗ {exc}[/]")
+        raise typer.Exit(1) from exc
     save_config(cfg)
     console.print(f"[{C_GREEN}] ✓[/]  {key} = {cfg[key]}")

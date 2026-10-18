@@ -11,17 +11,22 @@ class Engine:
         try:
             from llama_cpp import Llama
         except ImportError:
-            raise RuntimeError("llama-cpp-python is not installed.") from None
+            raise RuntimeError(
+                "llama-cpp-python is not installed. "
+                "Install it with: pip install llama-cpp-python"
+            ) from None
 
         self.plan = plan
         self._model_path = model_path
         self._Llama = Llama
+        self._closed = False
 
+        gpu_exc: Exception | None = None
         try:
             self.llm = self._load(plan)
             return
-        except Exception:
-            pass
+        except Exception as exc:  # noqa: BLE001 — need to try CPU fallback
+            gpu_exc = exc
 
         print("\n[!] Warning: failed to load with GPU. Falling back to CPU...")
         safe_plan = replace(
@@ -37,8 +42,10 @@ class Engine:
         try:
             self.llm = self._load(safe_plan)
             self.plan = safe_plan
-        except Exception as e2:
-            raise RuntimeError(f"Không thể khởi tạo model ngay cả trên CPU: {e2}") from e2
+        except Exception as exc:
+            raise RuntimeError(
+                f"Failed to initialize model even on CPU: {exc}"
+            ) from gpu_exc
 
     def _load(self, p: Plan):
         kv = _KV_TYPES.get(p.kv_cache)
@@ -76,3 +83,9 @@ class Engine:
             top_p=kw.get("top_p", 0.95),
             repeat_penalty=kw.get("repeat_penalty", 1.1),
         )
+
+    def close(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        self.llm = None

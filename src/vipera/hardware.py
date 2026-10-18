@@ -2,8 +2,6 @@ import contextlib
 import platform
 from dataclasses import dataclass
 
-import psutil
-
 
 @dataclass
 class HardwareInfo:
@@ -18,6 +16,14 @@ class HardwareInfo:
 
 
 def detect() -> HardwareInfo:
+    try:
+        import psutil
+    except ImportError as exc:
+        raise RuntimeError(
+            "psutil is required for hardware detection. "
+            "Install it with: pip install psutil"
+        ) from exc
+
     cores = psutil.cpu_count(logical=False) or 1
     threads = psutil.cpu_count(logical=True) or cores
     vm = psutil.virtual_memory()
@@ -38,12 +44,15 @@ def detect() -> HardwareInfo:
             import pynvml
 
             pynvml.nvmlInit()
-            h = pynvml.nvmlDeviceGetHandleByIndex(0)
-            name = pynvml.nvmlDeviceGetName(h)
-            gpu_name = name.decode() if isinstance(name, bytes) else name
-            mem = pynvml.nvmlDeviceGetMemoryInfo(h)
-            vram_total = mem.total / 1024**3
-            vram_free = mem.free / 1024**3
+            try:
+                h = pynvml.nvmlDeviceGetHandleByIndex(0)
+                name = pynvml.nvmlDeviceGetName(h)
+                gpu_name = name.decode() if isinstance(name, bytes) else name
+                mem = pynvml.nvmlDeviceGetMemoryInfo(h)
+                vram_total = mem.total / 1024**3
+                vram_free = mem.free / 1024**3
+            finally:
+                pynvml.nvmlShutdown()
 
     return HardwareInfo(
         cpu_cores=cores, cpu_threads=threads,

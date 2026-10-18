@@ -124,34 +124,37 @@ def run(
             n_batch=cfg.get("n_batch", 512),
         )
 
-        with console.status(f"[{C_ACCENT}] Loading model with ctx={c} (GPU: {p.gpu_layers} layers)…"):
-            try:
-                engine = Engine(p, m["path"])
-            except Exception as e:
-                console.print(f"[{C_RED}] ✗ Failed to load model with ctx={c}: {e}[/]")
+        engine = None
+        try:
+            with console.status(f"[{C_ACCENT}] Loading model with ctx={c} (GPU: {p.gpu_layers} layers)…"):
+                try:
+                    engine = Engine(p, m["path"])
+                except Exception as e:  # noqa: BLE001
+                    console.print(f"[{C_RED}] ✗ Failed to load model with ctx={c}: {e}[/]")
+                    continue
+
+            animated_loading_bar(f"RUNNING CTX {c}", 0.5)
+            result = _run_bench(engine, PROMPT, max_tokens)
+
+            if "error" in result:
+                console.print(f"[{C_RED}] ✗ Benchmark error at ctx={c}: {result['error']}[/]")
                 continue
 
-        animated_loading_bar(f"RUNNING CTX {c}", 0.5)
-        result = _run_bench(engine, PROMPT, max_tokens)
+            layers_total = int(m["meta"].get("n_layers") or 0) or max(p.gpu_layers, 1)
 
-        if "error" in result:
-            console.print(f"[{C_RED}] ✗ Benchmark error at ctx={c}: {result['error']}[/]")
-            del engine
-            continue
-
-        layers_total = int(m["meta"].get("n_layers") or 0) or max(p.gpu_layers, 1)
-
-        t.add_row(
-            str(c),
-            f"{p.gpu_layers}/{layers_total}",
-            str(result["prompt_tok"]),
-            f"{result['ttft_ms']:.0f} ms",
-            f"{result['prompt_tps']:.1f}",
-            str(result["gen_tok"]),
-            f"{result['gen_tps']:.2f}",
-            f"{result['total_s']:.2f} s",
-        )
-        del engine
+            t.add_row(
+                str(c),
+                f"{p.gpu_layers}/{layers_total}",
+                str(result["prompt_tok"]),
+                f"{result['ttft_ms']:.0f} ms",
+                f"{result['prompt_tps']:.1f}",
+                str(result["gen_tok"]),
+                f"{result['gen_tps']:.2f}",
+                f"{result['total_s']:.2f} s",
+            )
+        finally:
+            if engine is not None:
+                engine.close()
 
     console.print(t)
     console.print(

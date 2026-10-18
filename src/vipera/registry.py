@@ -1,5 +1,6 @@
 import contextlib
 import json
+import os
 from datetime import UTC, datetime
 
 from vipera.config import REGISTRY_FILE, ensure_dirs
@@ -15,7 +16,9 @@ def _load() -> dict:
 
 def _save(data: dict) -> None:
     ensure_dirs()
-    REGISTRY_FILE.write_text(json.dumps(data, indent=2))
+    tmp = REGISTRY_FILE.with_suffix(REGISTRY_FILE.suffix + ".tmp")
+    tmp.write_text(json.dumps(data, indent=2))
+    os.replace(tmp, REGISTRY_FILE)
 
 
 def add_model(name: str, path, meta: dict | None = None) -> dict:

@@ -8,6 +8,7 @@ interrupts.
 import os
 import shutil
 import subprocess
+import sys
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -149,7 +150,21 @@ def estimate_size_for_quant(
     return int(current_size_bytes * _quant_bpw(target_quant) / current_bpw)
 
 
+def _is_runnable(path: Path) -> bool:
+    if not path.is_file():
+        return False
+    if sys.platform == "win32":
+        return path.suffix.lower() in (".exe", ".bat", ".cmd", "")
+    return os.access(path, os.X_OK)
+
+
 def find_llama_tool(tool: str, bin_dir: str | None = None) -> str:
+    
+    primary = _TOOL_NAMES.get(tool, tool)
+    names: list[str] = [primary]
+    if tool not in names:
+        names.append(tool)
+    
     """Locate a llama.cpp tool by explicit directory, env var, PATH, or defaults."""
     filename = _TOOL_NAMES.get(tool, tool)
     directories: list[Path] = []
@@ -161,16 +176,18 @@ def find_llama_tool(tool: str, bin_dir: str | None = None) -> str:
     directories.extend(_COMMON_BIN_DIRS)
 
     for directory in directories:
-        candidate = directory / filename
-        if candidate.is_file() and os.access(candidate, os.X_OK):
-            return str(candidate)
+        for name in names:
+            for candidate in (directory / name, directory / f"{name}.exe"):
+                if _is_runnable(candidate):
+                    return str(candidate)
 
-    found = shutil.which(filename)
-    if found:
-        return found
+    for name in names:
+        found = shutil.which(name)
+        if found:
+            return found
 
     raise OptimizerError(
-        f"{filename} was not found. Build llama.cpp, add it to PATH, set "
+        f"{primary} was not found. Build llama.cpp, add it to PATH, set "
         "VIPERA_LLAMA_BIN, or pass --bin-dir."
     )
 

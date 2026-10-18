@@ -6,7 +6,6 @@ import subprocess
 from pathlib import Path
 
 import typer
-from huggingface_hub import HfApi, hf_hub_download, list_repo_files
 from rich import box
 from rich.panel import Panel
 from rich.prompt import IntPrompt, Prompt
@@ -40,7 +39,6 @@ from vipera.ui import (
 )
 
 app = typer.Typer()
-api = HfApi()
 
 _QUANT_RE = re.compile(
     r"(Q\d+_K(?:_[A-Z]+)?|Q\d+_\d|IQ\d+_\w+|F16|BF16|F32|Q\d+)",
@@ -62,34 +60,18 @@ def _read_meta(path: Path, name: str | None = None) -> dict:
     if m:
         meta["quant"] = m.group(1).upper()
 
-    with contextlib.suppress(Exception):
-        from gguf import GGUFReader
+    try:
+        from vipera.gguf_analyzer import analyze_gguf
 
-        r = GGUFReader(str(path))
-        fields = getattr(r, "fields", {})
-
-        def _val(key: str):
-            f = fields.get(key)
-            if not f:
-                return None
-            try:
-                v = f.contents()
-                return v[0] if isinstance(v, (list, tuple)) and len(v) == 1 else v
-            except Exception:
-                return None
-
-        arch = _val("general.architecture")
-        if arch:
-            meta["architecture"] = str(arch)
-            nl = _val(f"{arch}.block_count")
-            if nl:
-                meta["n_layers"] = int(nl)
-            ctx = _val(f"{arch}.context_length")
-            if ctx:
-                meta["context_length"] = int(ctx)
-        np_ = _val("general.parameter_count")
-        if np_:
-            meta["n_params"] = int(np_)
+        am = analyze_gguf(str(path))["metadata"]
+        meta["n_layers"] = int(am.get("n_layers") or 0)
+        meta["n_params"] = int(am.get("n_params") or 0)
+        meta["context_length"] = int(am.get("context_length") or 0)
+        meta["architecture"] = am.get("architecture")
+        if meta["quant"] == "?" and am.get("dominant_quant"):
+            meta["quant"] = am["dominant_quant"]
+    except Exception:  # noqa: BLE001 — analyzer is best-effort
+        pass
 
     return meta
 

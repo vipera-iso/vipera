@@ -54,7 +54,7 @@ def plan(
         else:
             note = "CPU ONLY"
     else:
-        flash_attn = has_gpu and hw.vram_total_gb > 4 and profile != "speed"
+        flash_attn = has_gpu and hw.vram_total_gb > 4
         offload_kqv = True
         n_batch = min(n_batch, 512)
         note = "Full GPU" if gpu_layers == n_layers else f"Hybrid: {gpu_layers}/{n_layers} layers"
