@@ -47,3 +47,41 @@ def test_type_coercion(isolated_home):
 def test_corrupt_config_falls_back(isolated_home):
     (isolated_home / "config.json").write_text("not json {")
     assert cfg_mod.load_config()["port"] == 8686
+
+
+def test_repeat_penalty_in_defaults():
+    # _chat_kwargs, server.ChatRequest and Engine.chat all read this key, so it
+    # must exist in the defaults or it silently never takes effect.
+    assert cfg_mod.DEFAULT_CONFIG["repeat_penalty"] == pytest.approx(1.1)
+
+
+def test_repeat_penalty_is_coerced(isolated_home):
+    (isolated_home / "config.json").write_text(json.dumps({"repeat_penalty": "1.4"}))
+    assert cfg_mod.load_config()["repeat_penalty"] == pytest.approx(1.4)
+
+
+def test_coerce_resets_unknown_kv_cache():
+    out = cfg_mod._coerce({"kv_cache": "q9_z"})
+    assert out["kv_cache"] == cfg_mod.DEFAULT_CONFIG["kv_cache"]
+
+
+def test_coerce_keeps_valid_kv_cache():
+    assert cfg_mod._coerce({"kv_cache": "q4_0"})["kv_cache"] == "q4_0"
+
+
+@pytest.mark.parametrize("kv", sorted(cfg_mod._KV_CACHE_TYPES))
+def test_every_declared_kv_cache_type_is_accepted(kv):
+    assert cfg_mod._coerce_strict({"kv_cache": kv})["kv_cache"] == kv
+
+
+def test_coerce_strict_rejects_unknown_kv_cache():
+    with pytest.raises(ValueError, match="kv_cache"):
+        cfg_mod._coerce_strict({"kv_cache": "q9_z"})
+
+
+def test_invalid_kv_cache_on_disk_is_repaired(isolated_home):
+    # The user-facing path: a hand-edited config with a typo must not crash
+    # startup, and must not silently hand an unknown type to the engine.
+    (isolated_home / "config.json").write_text(json.dumps({"kv_cache": "q4_k_m"}))
+    cfg = cfg_mod.load_config()
+    assert cfg["kv_cache"] == cfg_mod.DEFAULT_CONFIG["kv_cache"]
