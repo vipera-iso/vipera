@@ -152,6 +152,18 @@ def _as_int(value: Any) -> int | None:
         return None
 
 
+def _field_first_int(fields: dict, key: str) -> int | None:
+    """Return the first element of an int-array field, or None.
+
+    Per-layer arrays such as attention.head_count are uniform for the
+    architectures we support, so the first entry describes the model.
+    """
+    value = _field_value(fields, key)
+    if isinstance(value, (list, tuple)):
+        return _as_int(value[0]) if value else None
+    return _as_int(value)
+
+
 def _as_text(value: Any) -> str | None:
     if value is None:
         return None
@@ -191,10 +203,19 @@ def analyze_gguf(path: str) -> dict[str, Any]:
     n_layers = None
     context_length = None
     embedding_length = None
+    n_heads = None
+    n_kv_heads = None
+    head_dim = None
     if architecture:
         n_layers = _as_int(_field_value(fields, f"{architecture}.block_count"))
         context_length = _as_int(_field_value(fields, f"{architecture}.context_length"))
         embedding_length = _as_int(_field_value(fields, f"{architecture}.embedding_length"))
+
+        n_heads = _field_first_int(fields, f"{architecture}.attention.head_count")
+        n_kv_heads = _field_first_int(fields, f"{architecture}.attention.head_count_kv")
+        head_dim = _field_first_int(fields, f"{architecture}.attention.key_length")
+        if head_dim is None and n_heads and embedding_length:
+            head_dim = embedding_length // n_heads
 
     tensor_map: list[dict[str, Any]] = []
     layer_sizes: dict[int | None, int] = defaultdict(int)
@@ -264,6 +285,9 @@ def analyze_gguf(path: str) -> dict[str, Any]:
             "n_layers": n_layers,
             "context_length": context_length,
             "embedding_length": embedding_length,
+            "n_heads": n_heads,
+            "n_kv_heads": n_kv_heads,
+            "head_dim": head_dim,
             "n_params": _as_int(_field_value(fields, "general.parameter_count")),
             "quant": filename_quant or dominant_quant or "?",
             "dominant_quant": dominant_quant,

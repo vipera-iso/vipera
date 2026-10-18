@@ -56,6 +56,10 @@ def _read_meta(path: Path, name: str | None = None) -> dict:
         "context_length": 0,
         "quant": "?",
         "architecture": None,
+        "embedding_length": 0,
+        "n_heads": 0,
+        "n_kv_heads": 0,
+        "head_dim": 0,
     }
 
     m = _QUANT_RE.search(name or path.name)
@@ -70,6 +74,12 @@ def _read_meta(path: Path, name: str | None = None) -> dict:
         meta["n_params"] = int(am.get("n_params") or 0)
         meta["context_length"] = int(am.get("context_length") or 0)
         meta["architecture"] = am.get("architecture")
+        # The planner sizes the KV cache from these; without them it silently
+        # falls back to the fixed 1.5 GB @ 8k heuristic.
+        meta["embedding_length"] = int(am.get("embedding_length") or 0)
+        meta["n_heads"] = int(am.get("n_heads") or 0)
+        meta["n_kv_heads"] = int(am.get("n_kv_heads") or 0)
+        meta["head_dim"] = int(am.get("head_dim") or 0)
         if meta["quant"] == "?" and am.get("dominant_quant"):
             meta["quant"] = am["dominant_quant"]
     except Exception:  # analyzer is best-effort

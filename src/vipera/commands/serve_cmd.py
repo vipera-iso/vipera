@@ -122,11 +122,15 @@ def start(
             raise typer.Exit(1) from None
 
     hw = detect()
-    p = plan(
-        m["meta"], hw, profile=profile, ctx=ctx,
-        kv_cache=cfg.get("kv_cache", "q8_0"),
-        n_batch=cfg.get("n_batch", 512),
-    )
+    try:
+        p = plan(
+            m["meta"], hw, profile=profile, ctx=ctx,
+            kv_cache=cfg.get("kv_cache", "q8_0"),
+            n_batch=cfg.get("n_batch", 512),
+        )
+    except ValueError as e:
+        console.print(f"[{C_RED}] ✗ {e}[/]")
+        raise typer.Exit(1) from e
 
     n_layers_total = int(m["meta"].get("n_layers") or 0) or max(p.gpu_layers, 1)
     quant = m["meta"].get("quant") or "?"
