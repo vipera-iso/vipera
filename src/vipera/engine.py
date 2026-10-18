@@ -25,7 +25,7 @@ class Engine:
         try:
             self.llm = self._load(plan)
             return
-        except Exception as exc:  # noqa: BLE001 — need to try CPU fallback
+        except Exception as exc:  # need to try CPU fallback
             gpu_exc = exc
 
         print("\n[!] Warning: failed to load with GPU. Falling back to CPU...")

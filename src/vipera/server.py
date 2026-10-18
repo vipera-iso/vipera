@@ -77,7 +77,7 @@ def build_app(engine, model_name: str) -> FastAPI:
                         for chunk in engine.chat(messages, stream=True, **kwargs):
                             payload = json.dumps(chunk, ensure_ascii=False)
                             yield f"data: {payload}\n\n"
-                    except Exception as exc:  # noqa: BLE001
+                    except Exception as exc:
                         err = {"error": {"message": str(exc)}}
                         yield f"data: {json.dumps(err, ensure_ascii=False)}\n\n"
                 finally:

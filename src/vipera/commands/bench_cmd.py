@@ -129,7 +129,7 @@ def run(
             with console.status(f"[{C_ACCENT}] Loading model with ctx={c} (GPU: {p.gpu_layers} layers)…"):
                 try:
                     engine = Engine(p, m["path"])
-                except Exception as e:  # noqa: BLE001
+                except Exception as e:
                     console.print(f"[{C_RED}] ✗ Failed to load model with ctx={c}: {e}[/]")
                     continue
 

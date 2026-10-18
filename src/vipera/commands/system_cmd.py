@@ -6,7 +6,7 @@ from rich import box
 from rich.panel import Panel
 from rich.text import Text
 
-from vipera.config import DEFAULT_CONFIG, _coerce, _coerce_strict, load_config, save_config
+from vipera.config import DEFAULT_CONFIG, _coerce_strict, load_config, save_config
 from vipera.hardware import detect
 from vipera.ui import (
     C_ACCENT,

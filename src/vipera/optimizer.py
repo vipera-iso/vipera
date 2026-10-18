@@ -159,14 +159,12 @@ def _is_runnable(path: Path) -> bool:
 
 
 def find_llama_tool(tool: str, bin_dir: str | None = None) -> str:
-    
+    """Locate a llama.cpp tool by explicit directory, env var, PATH, or defaults."""
     primary = _TOOL_NAMES.get(tool, tool)
     names: list[str] = [primary]
     if tool not in names:
         names.append(tool)
-    
-    """Locate a llama.cpp tool by explicit directory, env var, PATH, or defaults."""
-    filename = _TOOL_NAMES.get(tool, tool)
+
     directories: list[Path] = []
     if bin_dir:
         directories.append(Path(bin_dir).expanduser())

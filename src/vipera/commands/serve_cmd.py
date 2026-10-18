@@ -166,6 +166,7 @@ def start(
 
     try:
         import uvicorn
+
         from vipera.server import build_app
         fastapi_app = build_app(engine, model)
 

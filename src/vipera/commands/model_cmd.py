@@ -1,4 +1,3 @@
-import contextlib
 import re
 import shlex
 import shutil
@@ -73,7 +72,7 @@ def _read_meta(path: Path, name: str | None = None) -> dict:
         meta["architecture"] = am.get("architecture")
         if meta["quant"] == "?" and am.get("dominant_quant"):
             meta["quant"] = am["dominant_quant"]
-    except Exception:  # noqa: BLE001 — analyzer is best-effort
+    except Exception:  # analyzer is best-effort
         pass
 
     return meta
@@ -642,7 +641,7 @@ def recommend_quantization(
         result = analyze_gguf(path)
     except GGUFAnalysisError as e:
         console.print(f"[{C_RED}] ✗ {e}[/]")
-        raise typer.Exit(1)
+        raise typer.Exit(1) from e
 
     meta = result["metadata"]
     current_quant = meta.get("quant", "Unknown")
