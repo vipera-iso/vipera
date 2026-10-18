@@ -44,13 +44,14 @@ def _build(model: str) -> Engine:
         return Engine(p, m["path"])
 
 
-def repl_loop(engine: Engine, typewriter: bool = False):
+def repl_loop(engine: Engine, typewriter: bool = False, chat_kwargs: dict | None = None):
     console.print(Panel(
         Text("  System Ready. Type 'exit' or Ctrl+C to quit.", style=C_SUCCESS),
         border_style=C_ACCENT, box=box.ROUNDED,
     ))
 
     history = [{"role": "system", "content": "You are a helpful assistant."}]
+    kwargs = chat_kwargs or {}
 
     while True:
         console.print(f"\n  [{C_ACCENT}]User >[/] ", end="")
@@ -68,7 +69,7 @@ def repl_loop(engine: Engine, typewriter: bool = False):
         history.append({"role": "user", "content": user})
 
         try:
-            stream = engine.chat(history, stream=True)
+            stream = engine.chat(history, stream=True, **kwargs)
             if typewriter:
                 reply = typewriter_chat_stream(stream, title_text=" AI ")
             else:
@@ -93,7 +94,7 @@ def repl(
         model = pick_model("SELECT A MODEL TO CHAT")
     engine = _build(model)
     try:
-        repl_loop(engine, typewriter=typewriter)
+        repl_loop(engine, typewriter=typewriter, chat_kwargs=_chat_kwargs(cfg))
     finally:
         engine.close()
 

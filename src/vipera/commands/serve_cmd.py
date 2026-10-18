@@ -201,9 +201,9 @@ def start(
 
     except ImportError:
         console.print(f"[{C_YELLOW}] ⚠ FastAPI is not installed. Falling back to Chat REPL.[/]\n")
-        from vipera.commands.chat_cmd import repl_loop
+        from vipera.commands.chat_cmd import _chat_kwargs, repl_loop
 
-        repl_loop(engine)
+        repl_loop(engine, chat_kwargs=_chat_kwargs(cfg))
     finally:
         engine.close()
 
