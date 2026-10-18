@@ -6,6 +6,7 @@ import subprocess
 from pathlib import Path
 
 import typer
+from huggingface_hub import HfApi, hf_hub_download, list_repo_files
 from rich import box
 from rich.panel import Panel
 from rich.prompt import IntPrompt, Prompt
@@ -39,6 +40,8 @@ from vipera.ui import (
 )
 
 app = typer.Typer()
+
+api = HfApi()
 
 _QUANT_RE = re.compile(
     r"(Q\d+_K(?:_[A-Z]+)?|Q\d+_\d|IQ\d+_\w+|F16|BF16|F32|Q\d+)",

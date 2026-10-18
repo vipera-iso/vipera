@@ -22,6 +22,12 @@ from vipera.ui import (
 app = typer.Typer()
 
 
+def _chat_kwargs(cfg: dict) -> dict:
+    """Pull the sampling overrides the engine understands out of the config."""
+    keys = ("temperature", "max_tokens", "top_p", "repeat_penalty")
+    return {k: cfg[k] for k in keys if k in cfg and cfg[k] is not None}
+
+
 def _build(model: str) -> Engine:
     m = get_model(model)
     if not m:
