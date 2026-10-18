@@ -11,6 +11,8 @@ _MAX_TOKENS = 32_768
 _MAX_MESSAGES = 200
 _MAX_PROMPT_CHARS = 500_000
 
+_SENTINEL = object()
+
 
 class Message(BaseModel):
     role: Literal["system", "user", "assistant", "tool"]
@@ -71,12 +73,18 @@ def build_app(engine, model_name: str) -> FastAPI:
 
         if req.stream:
             async def _stream():
-                # asyncio.Lock (unlike the old threading.Lock + threadpool acquire)
-                # is released correctly if the client disconnects mid-stream,
-                # which used to leak the lock and deadlock the gateway.
+                # The engine's stream is a SYNC generator. Iterating it inline
+                # would block the event loop for the whole generation, so pull
+                # each chunk in a worker thread instead. If the client
+                # disconnects, aclose() cancels us here; the pending to_thread
+                # call returns and the sync iterator is GC'd, which closes it.
                 async with lock:
+                    iterator = engine.chat(messages, stream=True, **kwargs)
                     try:
-                        for chunk in engine.chat(messages, stream=True, **kwargs):
+                        while True:
+                            chunk = await asyncio.to_thread(next, iterator, _SENTINEL)
+                            if chunk is _SENTINEL:
+                                break
                             payload = json.dumps(chunk, ensure_ascii=False)
                             yield f"data: {payload}\n\n"
                     except Exception as exc:
