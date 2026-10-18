@@ -33,8 +33,13 @@ def plan(
     model_size_gb = size_bytes / 1024**3
     use_mlock = (hw.ram_free_gb - model_size_gb) > 2.0
 
-    safe_vram = max(0.0, hw.vram_free_gb - 1.0)
-    usable_vram = safe_vram * 0.90
+    safe_vram = max(0.0, hw.vram_free_gb - 1.0)  # reserve 1GB for OS/driver
+
+    # KV cache estimate: roughly 1.5x the context size in bytes for a 7-8B model.
+    # This is conservative — assumes uniform layer sizes and a 128-byte KV per token.
+    kv_cache_gb = (ctx / 8192.0) * 1.5
+
+    usable_vram = max(0.0, safe_vram - kv_cache_gb)
 
     layer_gb = (size_bytes / 1024**3) / n_layers if n_layers else 0.4
     gpu_layers = 0

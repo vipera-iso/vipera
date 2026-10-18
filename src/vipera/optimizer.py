@@ -241,6 +241,8 @@ def build_quantize_command(
     prior_weight: int = 1,
     allow_requantize: bool = False,
     supports_prior_weight: bool = False,
+    output_tensor_type: str | None = None,
+    token_embedding_type: str | None = None,
 ) -> list[str]:
     command = [binary]
     if allow_requantize:
@@ -259,6 +261,13 @@ def build_quantize_command(
                 "upgrade llama.cpp or omit the option."
             )
         command.extend(["--prior-weight", str(prior_weight)])
+
+    # Mixed-precision: keep output layer and token embeddings at higher precision
+    # while the rest of the model is quantized to `quant`.
+    if output_tensor_type:
+        command.extend(["--output-tensor-type", normalize_quant(output_tensor_type)])
+    if token_embedding_type:
+        command.extend(["--token-embedding-type", normalize_quant(token_embedding_type)])
 
     command.extend([str(model), str(output), normalize_quant(quant)])
     return command

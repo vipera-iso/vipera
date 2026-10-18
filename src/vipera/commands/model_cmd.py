@@ -628,3 +628,38 @@ def rm_cmd(
         save_config(cfg)
 
     console.print(f"[{C_GREEN}] ✓ Removed: {name}[/]")
+
+
+@app.command("recommend")
+def recommend_quantization(
+    path: str = typer.Argument(..., help="Path to a .gguf file"),
+):
+    """Analyze a model and recommend mixed-precision quantization settings."""
+    try:
+        result = analyze_gguf(path)
+    except GGUFAnalysisError as e:
+        console.print(f"[{C_RED}] ✗ {e}[/]")
+        raise typer.Exit(1)
+
+    meta = result["metadata"]
+    current_quant = meta.get("quant", "Unknown")
+    warnings = result["warnings"]
+
+    console.print(f"\n[{C_ACCENT}]▸ Optimization Recommendations for {path}[/]\n")
+
+    if not warnings:
+        console.print(f"  [{C_GREEN}]✓ This model has no critical low-precision tensors.[/]")
+        console.print(f"  [{C_DIM}]You can safely quantize to {current_quant} or lower.[/]\n")
+        return
+
+    console.print(f"  [{C_YELLOW}]⚠ Found {len(warnings)} critical tensors quantized below Q4_K[/]")
+    console.print(f"  [{C_DIM}]To preserve quality, use mixed-precision for output & embeddings:[/]\n")
+
+    console.print(f"  [{C_ACCENT}]Command to run:[/]")
+    console.print(
+        f"  vipera model quantize {path} \\\n"
+        f"    --target-quant {current_quant} \\\n"
+        f"    --output-tensor q6_k \\\n"
+        f"    --token-embedding q6_k \\\n"
+        f"    --imatrix <your_imatrix.gguf>\n"
+    )
