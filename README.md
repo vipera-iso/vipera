@@ -46,15 +46,17 @@ One `.gguf` in, an OpenAI-compatible HTTP server out.
 
 ## Quick start
 
-> [!WARNING]
-> The distribution is named `vipera-ai`; it is not on PyPI yet. The PyPI
-> project named `vipera` is an unrelated tool, so do not install that. Use the
-> GitHub source command below, or follow the no-Git
+> [!NOTE]
+> The distribution is named `vipera-ai`. The PyPI project named `vipera` is an
+> unrelated PDF tool, so install `vipera-ai`, not `vipera`. Step-by-step help:
 > [installation guide](docs/install.md).
 
 ```bash
-# 1. install (llama-cpp-python must build for your platform)
-pip install "vipera-ai[llama,gguf,nvidia] @ git+https://github.com/vipera-iso/vipera.git"
+# 1. install from PyPI (llama-cpp-python must build for your platform)
+pip install "vipera-ai[llama,gguf,nvidia]"
+
+# or straight from the repository
+# pip install "vipera-ai[llama,gguf,nvidia] @ git+https://github.com/vipera-iso/vipera.git"
 
 # 2. fetch a GGUF from HuggingFace
 vipera model search

@@ -9,10 +9,9 @@ This guide is for getting Vipera running on a normal laptop or desktop. You do
 not need to know Python, and you do not need a GPU. You will use a terminal for
 a few copy-paste commands.
 
-> **Do not run `pip install vipera`.**
-> The project currently published on PyPI under that name is an unrelated PDF
-> tool. Vipera's distribution is named `vipera-ai`, which is not on PyPI yet.
-> Until it is published, install it from GitHub with the commands below.
+> **Install `vipera-ai`, not `vipera`.**
+> The project published on PyPI as `vipera` is an unrelated PDF tool. Vipera's
+> distribution is `vipera-ai`; every command below uses that name.
 
 ## What you need
 
@@ -83,27 +82,20 @@ active. You must activate it again every time you open a new terminal.
 
 Choose one option.
 
-### Option A — no Git required
-
-1. Download the source archive:
-   <https://github.com/vipera-iso/vipera/archive/refs/heads/main.zip>
-2. Extract the ZIP. You get a folder named `vipera-main`.
-3. In the terminal, go into that folder and install. Adjust the path if your
-   browser saved or extracted it somewhere else.
-
-**Windows:**
-
-```powershell
-cd "$env:USERPROFILE\Downloads\vipera-main"
-python -m pip install ".[llama,gguf,nvidia]"
-```
-
-**macOS / Linux:**
+### Option A — install from PyPI (no Git)
 
 ```bash
-cd ~/Downloads/vipera-main
-python -m pip install ".[llama,gguf,nvidia]"
+python -m pip install "vipera-ai[llama,gguf,nvidia]"
 ```
+
+The command is the same in PowerShell and in bash/zsh, once the virtual
+environment from Step 2 is active. `python -m pip` picks the interpreter of that
+environment, so no path juggling is needed.
+
+If PyPI is unreachable, download
+<https://github.com/vipera-iso/vipera/archive/refs/heads/main.zip>, extract it,
+and run `python -m pip install ".[llama,gguf,nvidia]"` inside the extracted
+`vipera-main` folder.
 
 ### Option B — one command with Git
 
