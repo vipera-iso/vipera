@@ -123,3 +123,29 @@ def test_invalid_kv_cache_on_disk_is_repaired(isolated_home):
     (isolated_home / "config.json").write_text(json.dumps({"kv_cache": "q4_k_m"}))
     cfg = cfg_mod.load_config()
     assert cfg["kv_cache"] == cfg_mod.DEFAULT_CONFIG["kv_cache"]
+
+
+def test_corrupt_config_is_backed_up_before_a_save_overwrites(isolated_home, capsys):
+    bad = '{"port": 9000,}'  # trailing comma: invalid JSON
+    (isolated_home / "config.json").write_text(bad)
+
+    assert cfg_mod.load_config()["port"] == 8686  # still falls back...
+    assert "unreadable" in capsys.readouterr().err  # ...but not silently
+
+    # The bytes survive, so a later save cannot erase the file without a trace.
+    backup = isolated_home / "config.json.corrupt"
+    assert backup.read_text() == bad
+
+    cfg = cfg_mod.load_config()
+    cfg["port"] = 9999
+    cfg_mod.save_config(cfg)
+    assert json.loads((isolated_home / "config.json").read_text())["port"] == 9999
+    assert backup.read_text() == bad
+
+
+def test_config_that_is_not_an_object_is_backed_up(isolated_home):
+    # Valid JSON of the wrong shape would otherwise crash on **data.
+    (isolated_home / "config.json").write_text("[1, 2, 3]")
+
+    assert cfg_mod.load_config()["port"] == 8686
+    assert (isolated_home / "config.json.corrupt").read_text() == "[1, 2, 3]"

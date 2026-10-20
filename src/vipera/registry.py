@@ -1,16 +1,21 @@
-import contextlib
 import json
 import os
 from datetime import UTC, datetime
 
-from vipera.config import REGISTRY_FILE, ensure_dirs
+from vipera.config import REGISTRY_FILE, ensure_dirs, quarantine_corrupt
 
 
 def _load() -> dict:
     ensure_dirs()
     if REGISTRY_FILE.exists():
-        with contextlib.suppress(Exception):
-            return json.loads(REGISTRY_FILE.read_text())
+        try:
+            data = json.loads(REGISTRY_FILE.read_text())
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+            quarantine_corrupt(REGISTRY_FILE, exc)
+        else:
+            if isinstance(data, dict):
+                return data
+            quarantine_corrupt(REGISTRY_FILE, ValueError("not a JSON object"))
     return {}
 
 

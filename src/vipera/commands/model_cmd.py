@@ -680,7 +680,13 @@ def rm_cmd(
         cfg["default_model"] = None
         save_config(cfg)
 
-    Path(m["path"]).unlink(missing_ok=True)
+    path = Path(m["path"])
+    if any(other["path"] == m["path"] for other in list_models()):
+        # Two aliases can share one file (`model search` for the same download
+        # twice); deleting it here would break the alias that remains.
+        console.print(f"[{C_DIM}]  Kept {path}: another alias still uses it.[/]")
+    else:
+        path.unlink(missing_ok=True)
 
     console.print(f"[{C_GREEN}] ✓ Removed: {name}[/]")
 
