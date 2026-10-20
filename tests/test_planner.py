@@ -8,9 +8,13 @@ _GIB = 1024**3
 
 def _hw(**overrides):
     base = dict(
-        cpu_cores=8, cpu_threads=16,
-        ram_total_gb=16, ram_free_gb=12,
-        gpu_name="None", vram_total_gb=0.0, vram_free_gb=0.0,
+        cpu_cores=8,
+        cpu_threads=16,
+        ram_total_gb=16,
+        ram_free_gb=12,
+        gpu_name="None",
+        vram_total_gb=0.0,
+        vram_free_gb=0.0,
         is_apple_silicon=False,
     )
     base.update(overrides)
@@ -133,8 +137,11 @@ def test_mlock_disabled_when_host_kv_leaves_no_headroom():
     # no-swap box leaves nothing for compute buffers; the process gets OOM
     # killed instead of failing cleanly, so mlock must stay off.
     hw = _hw(
-        gpu_name="GTX 1650", vram_total_gb=4.0, vram_free_gb=3.7,
-        ram_total_gb=15.4, ram_free_gb=10.6,
+        gpu_name="GTX 1650",
+        vram_total_gb=4.0,
+        vram_free_gb=3.7,
+        ram_total_gb=15.4,
+        ram_free_gb=10.6,
     )
     p = plan(_HERMES_META, hw, ctx=65536, kv_cache="q8_0", n_batch=128)
     assert p.use_mlock is False
@@ -143,7 +150,10 @@ def test_mlock_disabled_when_host_kv_leaves_no_headroom():
 def test_mlock_enabled_with_generous_headroom():
     hw = _hw(ram_total_gb=32, ram_free_gb=24)
     meta = {
-        "n_layers": 32, "n_heads": 32, "n_kv_heads": 8, "head_dim": 128,
+        "n_layers": 32,
+        "n_heads": 32,
+        "n_kv_heads": 8,
+        "head_dim": 128,
         "size_bytes": 4 * 1024**3,
     }
     p = plan(meta, hw)
@@ -158,6 +168,7 @@ def test_low_ram_safe_mode():
 
 
 # --- profiles ---------------------------------------------------------------
+
 
 def test_unknown_profile_rejected():
     with pytest.raises(ValueError, match="unknown profile"):
@@ -180,8 +191,11 @@ def test_gpu_profile_without_gpu_is_explained():
 def test_lowmem_profile_caps_context_and_batch():
     hw = _hw(gpu_name="X", vram_total_gb=24.0, vram_free_gb=24.0)
     p = plan(
-        {"n_layers": 32, "size_bytes": 4 * 1024**3}, hw,
-        profile="lowmem", ctx=8192, n_batch=512,
+        {"n_layers": 32, "size_bytes": 4 * 1024**3},
+        hw,
+        profile="lowmem",
+        ctx=8192,
+        n_batch=512,
     )
     assert p.gpu_layers == 0
     assert p.context <= 2048
@@ -191,6 +205,7 @@ def test_lowmem_profile_caps_context_and_batch():
 
 
 # --- KV-cache estimation ----------------------------------------------------
+
 
 def test_kv_estimate_prefers_real_head_counts():
     # Llama-3-8B: 32 layers, 8 KV heads (GQA), head_dim 128.

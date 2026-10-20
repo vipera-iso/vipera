@@ -15,9 +15,11 @@ class FakeEngine:
     def chat(self, messages, stream=False, **kw):
         self.calls.append({"messages": messages, "stream": stream, **kw})
         if stream:
+
             def _gen():
                 for tok in ["hi", " ", "there"]:
                     yield {"choices": [{"delta": {"content": tok}}]}
+
             return _gen()
         return {
             "choices": [{"message": {"role": "assistant", "content": "hi there"}}],
@@ -40,19 +42,26 @@ def test_models():
 
 def test_chat_non_stream():
     client = TestClient(build_app(FakeEngine(), "test-model"))
-    r = client.post("/v1/chat/completions", json={
-        "messages": [{"role": "user", "content": "hi"}],
-    })
+    r = client.post(
+        "/v1/chat/completions",
+        json={
+            "messages": [{"role": "user", "content": "hi"}],
+        },
+    )
     assert r.status_code == 200
     assert "hi there" in r.json()["choices"][0]["message"]["content"]
 
 
 def test_chat_stream():
     client = TestClient(build_app(FakeEngine(), "test-model"))
-    with client.stream("POST", "/v1/chat/completions", json={
-        "messages": [{"role": "user", "content": "hi"}],
-        "stream": True,
-    }) as r:
+    with client.stream(
+        "POST",
+        "/v1/chat/completions",
+        json={
+            "messages": [{"role": "user", "content": "hi"}],
+            "stream": True,
+        },
+    ) as r:
         assert r.status_code == 200
         assert "text/event-stream" in r.headers["content-type"]
         body = b"".join(r.iter_bytes()).decode()
@@ -62,15 +71,20 @@ def test_chat_stream():
 
 def test_stream_engine_error_becomes_sse_event():
     """A failure before the first chunk must not abort the body mid-stream."""
+
     class RaisingEngine:
         def chat(self, messages, stream=False, **kw):
             raise RuntimeError("engine exploded")
 
     client = TestClient(build_app(RaisingEngine(), "test-model"))
-    with client.stream("POST", "/v1/chat/completions", json={
-        "messages": [{"role": "user", "content": "hi"}],
-        "stream": True,
-    }) as r:
+    with client.stream(
+        "POST",
+        "/v1/chat/completions",
+        json={
+            "messages": [{"role": "user", "content": "hi"}],
+            "stream": True,
+        },
+    ) as r:
         assert r.status_code == 200
         body = b"".join(r.iter_bytes()).decode()
 
@@ -85,6 +99,7 @@ def test_lock_not_released_while_worker_is_still_generating():
     The lock has to stay held until that thread returns; releasing it on
     cancellation would allow two calls into the same llama.cpp context.
     """
+
     class SlowEngine:
         def __init__(self):
             self.active = 0
@@ -92,6 +107,7 @@ def test_lock_not_released_while_worker_is_still_generating():
 
         def chat(self, messages, stream=False, **kw):
             if stream:
+
                 def _gen():
                     self.active += 1
                     self.max_active = max(self.max_active, self.active)
@@ -101,6 +117,7 @@ def test_lock_not_released_while_worker_is_still_generating():
                             yield {"choices": [{"delta": {"content": str(i)}}]}
                     finally:
                         self.active -= 1
+
                 return _gen()
 
             self.active += 1
@@ -115,13 +132,15 @@ def test_lock_not_released_while_worker_is_still_generating():
         engine = SlowEngine()
         app = build_app(engine, "test-model")
         endpoint = next(
-            r.endpoint for r in app.routes
-            if getattr(r, "path", None) == "/v1/chat/completions"
+            r.endpoint for r in app.routes if getattr(r, "path", None) == "/v1/chat/completions"
         )
 
-        response = await endpoint(ChatRequest(
-            messages=[{"role": "user", "content": "hi"}], stream=True,
-        ))
+        response = await endpoint(
+            ChatRequest(
+                messages=[{"role": "user", "content": "hi"}],
+                stream=True,
+            )
+        )
         iterator = response.body_iterator
         await anext(iterator)  # first chunk; the lock stays held
 
@@ -155,13 +174,16 @@ def test_health_responsive_while_streaming():
     answer until the stream finished. Chunks are pulled via asyncio.to_thread
     instead; this asserts that actually holds.
     """
+
     class SlowEngine(FakeEngine):
         def chat(self, messages, stream=False, **kw):
             if stream:
+
                 def _gen():
                     for i in range(4):
                         time.sleep(0.15)  # stand in for token generation
                         yield {"choices": [{"delta": {"content": str(i)}}]}
+
                 return _gen()
             return super().chat(messages, stream=stream, **kw)
 
@@ -169,10 +191,14 @@ def test_health_responsive_while_streaming():
         finished = threading.Event()
 
         def run_stream():
-            with client.stream("POST", "/v1/chat/completions", json={
-                "messages": [{"role": "user", "content": "hi"}],
-                "stream": True,
-            }) as r:
+            with client.stream(
+                "POST",
+                "/v1/chat/completions",
+                json={
+                    "messages": [{"role": "user", "content": "hi"}],
+                    "stream": True,
+                },
+            ) as r:
                 b"".join(r.iter_bytes())
             finished.set()
 
@@ -193,41 +219,46 @@ def test_health_responsive_while_streaming():
         assert finished.is_set()
 
 
-TOOLS = [{
-    "type": "function",
-    "function": {
-        "name": "get_weather",
-        "description": "Get the weather for a city",
-        "parameters": {
-            "type": "object",
-            "properties": {"city": {"type": "string"}},
-            "required": ["city"],
+TOOLS = [
+    {
+        "type": "function",
+        "function": {
+            "name": "get_weather",
+            "description": "Get the weather for a city",
+            "parameters": {
+                "type": "object",
+                "properties": {"city": {"type": "string"}},
+                "required": ["city"],
+            },
         },
-    },
-}]
+    }
+]
 
 
 def test_chat_forwards_openai_params_to_engine():
     engine = FakeEngine()
     client = TestClient(build_app(engine, "test-model"))
 
-    r = client.post("/v1/chat/completions", json={
-        "messages": [{"role": "user", "content": "hi"}],
-        "temperature": 0.2,
-        "max_tokens": 64,
-        "top_p": 0.8,
-        "top_k": 10,
-        "min_p": 0.01,
-        "repeat_penalty": 1.2,
-        "presence_penalty": 0.1,
-        "frequency_penalty": -0.1,
-        "stop": ["\n\n"],
-        "seed": 7,
-        "logit_bias": {"42": -2.0},
-        "response_format": {"type": "json_object"},
-        "tools": TOOLS,
-        "tool_choice": "auto",
-    })
+    r = client.post(
+        "/v1/chat/completions",
+        json={
+            "messages": [{"role": "user", "content": "hi"}],
+            "temperature": 0.2,
+            "max_tokens": 64,
+            "top_p": 0.8,
+            "top_k": 10,
+            "min_p": 0.01,
+            "repeat_penalty": 1.2,
+            "presence_penalty": 0.1,
+            "frequency_penalty": -0.1,
+            "stop": ["\n\n"],
+            "seed": 7,
+            "logit_bias": {"42": -2.0},
+            "response_format": {"type": "json_object"},
+            "tools": TOOLS,
+            "tool_choice": "auto",
+        },
+    )
 
     assert r.status_code == 200
     call = engine.calls[-1]
@@ -251,10 +282,13 @@ def test_unset_optional_params_are_not_forwarded_as_null():
     engine = FakeEngine()
     client = TestClient(build_app(engine, "test-model"))
 
-    r = client.post("/v1/chat/completions", json={
-        "messages": [{"role": "user", "content": "hi"}],
-        "stop": "###",
-    })
+    r = client.post(
+        "/v1/chat/completions",
+        json={
+            "messages": [{"role": "user", "content": "hi"}],
+            "stop": "###",
+        },
+    )
 
     assert r.status_code == 200
     call = engine.calls[-1]
@@ -269,32 +303,39 @@ def test_tool_calls_pass_through_non_streaming():
         def chat(self, messages, stream=False, **kw):
             self.calls.append({"messages": messages, "stream": stream, **kw})
             return {
-                "choices": [{
-                    "index": 0,
-                    "message": {
-                        "role": "assistant",
-                        "content": None,
-                        "tool_calls": [{
-                            "id": "call_1",
-                            "type": "function",
-                            "function": {
-                                "name": "get_weather",
-                                "arguments": "{\"city\":\"Paris\"}",
-                            },
-                        }],
-                    },
-                    "finish_reason": "tool_calls",
-                }],
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {
+                            "role": "assistant",
+                            "content": None,
+                            "tool_calls": [
+                                {
+                                    "id": "call_1",
+                                    "type": "function",
+                                    "function": {
+                                        "name": "get_weather",
+                                        "arguments": '{"city":"Paris"}',
+                                    },
+                                }
+                            ],
+                        },
+                        "finish_reason": "tool_calls",
+                    }
+                ],
                 "usage": {"prompt_tokens": 9, "completion_tokens": 5},
             }
 
     engine = ToolEngine()
     client = TestClient(build_app(engine, "test-model"))
-    r = client.post("/v1/chat/completions", json={
-        "messages": [{"role": "user", "content": "Weather in Paris?"}],
-        "tools": TOOLS,
-        "tool_choice": "auto",
-    })
+    r = client.post(
+        "/v1/chat/completions",
+        json={
+            "messages": [{"role": "user", "content": "Weather in Paris?"}],
+            "tools": TOOLS,
+            "tool_choice": "auto",
+        },
+    )
 
     assert r.status_code == 200
     tool_calls = r.json()["choices"][0]["message"]["tool_calls"]
@@ -309,16 +350,41 @@ def test_tool_call_deltas_stream_and_usage_frame_is_emitted():
 
             def _gen():
                 yield {"choices": [{"index": 0, "delta": {"role": "assistant"}}]}
-                yield {"choices": [{"index": 0, "delta": {"tool_calls": [{
-                    "index": 0,
-                    "id": "call_1",
-                    "type": "function",
-                    "function": {"name": "get_weather", "arguments": "{\"city\":"},
-                }]}}]}
-                yield {"choices": [{"index": 0, "delta": {"tool_calls": [{
-                    "index": 0,
-                    "function": {"arguments": "\"Paris\"}"},
-                }]}}]}
+                yield {
+                    "choices": [
+                        {
+                            "index": 0,
+                            "delta": {
+                                "tool_calls": [
+                                    {
+                                        "index": 0,
+                                        "id": "call_1",
+                                        "type": "function",
+                                        "function": {
+                                            "name": "get_weather",
+                                            "arguments": '{"city":',
+                                        },
+                                    }
+                                ]
+                            },
+                        }
+                    ]
+                }
+                yield {
+                    "choices": [
+                        {
+                            "index": 0,
+                            "delta": {
+                                "tool_calls": [
+                                    {
+                                        "index": 0,
+                                        "function": {"arguments": '"Paris"}'},
+                                    }
+                                ]
+                            },
+                        }
+                    ]
+                }
                 yield {
                     "choices": [{"index": 0, "delta": {}, "finish_reason": "tool_calls"}],
                     "usage": {"prompt_tokens": 9, "completion_tokens": 5},
@@ -327,12 +393,16 @@ def test_tool_call_deltas_stream_and_usage_frame_is_emitted():
             return _gen()
 
     client = TestClient(build_app(ToolStreamEngine(), "test-model"))
-    with client.stream("POST", "/v1/chat/completions", json={
-        "messages": [{"role": "user", "content": "Weather in Paris?"}],
-        "tools": TOOLS,
-        "stream": True,
-        "stream_options": {"include_usage": True},
-    }) as r:
+    with client.stream(
+        "POST",
+        "/v1/chat/completions",
+        json={
+            "messages": [{"role": "user", "content": "Weather in Paris?"}],
+            "tools": TOOLS,
+            "stream": True,
+            "stream_options": {"include_usage": True},
+        },
+    ) as r:
         assert r.status_code == 200
         body = b"".join(r.iter_bytes()).decode()
 
@@ -348,18 +418,27 @@ def test_tool_call_deltas_stream_and_usage_frame_is_emitted():
 def test_assistant_tool_call_turn_is_accepted_without_content():
     engine = FakeEngine()
     client = TestClient(build_app(engine, "test-model"))
-    r = client.post("/v1/chat/completions", json={
-        "messages": [
-            {"role": "user", "content": "Weather in Paris?"},
-            {"role": "assistant", "content": None, "tool_calls": [{
-                "id": "call_1",
-                "type": "function",
-                "function": {"name": "get_weather", "arguments": "{\"city\":\"Paris\"}"},
-            }]},
-            {"role": "tool", "tool_call_id": "call_1", "content": "22C sunny"},
-        ],
-        "tools": TOOLS,
-    })
+    r = client.post(
+        "/v1/chat/completions",
+        json={
+            "messages": [
+                {"role": "user", "content": "Weather in Paris?"},
+                {
+                    "role": "assistant",
+                    "content": None,
+                    "tool_calls": [
+                        {
+                            "id": "call_1",
+                            "type": "function",
+                            "function": {"name": "get_weather", "arguments": '{"city":"Paris"}'},
+                        }
+                    ],
+                },
+                {"role": "tool", "tool_call_id": "call_1", "content": "22C sunny"},
+            ],
+            "tools": TOOLS,
+        },
+    )
 
     assert r.status_code == 200
     sent = engine.calls[-1]["messages"]
@@ -370,9 +449,12 @@ def test_assistant_tool_call_turn_is_accepted_without_content():
 
 def test_message_without_content_or_tool_calls_is_rejected():
     client = TestClient(build_app(FakeEngine(), "test-model"))
-    r = client.post("/v1/chat/completions", json={
-        "messages": [{"role": "user"}],
-    })
+    r = client.post(
+        "/v1/chat/completions",
+        json={
+            "messages": [{"role": "user"}],
+        },
+    )
     assert r.status_code == 422
 
 
@@ -386,17 +468,23 @@ def test_invalid_sampling_ranges_are_rejected():
         {"top_k": -1},
         {"max_tokens": 0},
     ):
-        r = client.post("/v1/chat/completions", json={
-            "messages": [{"role": "user", "content": "hi"}],
-            **payload,
-        })
+        r = client.post(
+            "/v1/chat/completions",
+            json={
+                "messages": [{"role": "user", "content": "hi"}],
+                **payload,
+            },
+        )
         assert r.status_code in {400, 422}, payload
 
 
 def test_unknown_model_is_still_rejected():
     client = TestClient(build_app(FakeEngine(), "test-model"))
-    r = client.post("/v1/chat/completions", json={
-        "model": "other",
-        "messages": [{"role": "user", "content": "hi"}],
-    })
+    r = client.post(
+        "/v1/chat/completions",
+        json={
+            "model": "other",
+            "messages": [{"role": "user", "content": "hi"}],
+        },
+    )
     assert r.status_code == 404

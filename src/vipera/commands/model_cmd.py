@@ -156,12 +156,14 @@ def import_model(
 def search_model():
     """Search and download GGUF models from Hugging Face."""
     ensure_dirs()
-    console.print(Panel(
-        "  Enter a keyword to search for GGUF models on Hugging Face.",
-        title="[ SEARCH HUB ]",
-        border_style=C_ACCENT,
-        box=box.ROUNDED,
-    ))
+    console.print(
+        Panel(
+            "  Enter a keyword to search for GGUF models on Hugging Face.",
+            title="[ SEARCH HUB ]",
+            border_style=C_ACCENT,
+            box=box.ROUNDED,
+        )
+    )
     query = Prompt.ask(f"[{C_ACCENT}]  ▸ Keyword[/]")
     if not query:
         return
@@ -237,7 +239,9 @@ def search_model():
         console.print(
             f"    [{C_DIM}]└─ {param_str}{meta['size_bytes'] / 1e9:.2f} GB  ·  {meta['quant']}[/]"
         )
-        console.print(f"\n[{C_ACCENT}] ▸ Just run [bold]vipera[/bold] and this model will be pre-selected.\n")
+        console.print(
+            f"\n[{C_ACCENT}] ▸ Just run [bold]vipera[/bold] and this model will be pre-selected.\n"
+        )
     except KeyboardInterrupt:
         console.print(f"\n[{C_YELLOW}] ⚠ Download cancelled.[/]")
     except Exception as e:
@@ -486,15 +490,12 @@ def quantize_cmd(
         raise typer.Exit(1) from e
 
     if prune_layers:
-        console.print(
-            f"[{C_YELLOW}] ⚠ Pruning layers can substantially reduce quality.[/]"
-        )
+        console.print(f"[{C_YELLOW}] ⚠ Pruning layers can substantially reduce quality.[/]")
     if not _run_tool(command, dry_run, cleanup=out):
         raise typer.Exit(1)
     if not dry_run:
         console.print(
-            f"[{C_GREEN}] ✓ quantized model:[/] {out} "
-            f"({_format_bytes(out.stat().st_size)})"
+            f"[{C_GREEN}] ✓ quantized model:[/] {out} ({_format_bytes(out.stat().st_size)})"
         )
 
 
@@ -556,9 +557,7 @@ def optimize_cmd(
 
     try:
         quantize_bin = find_llama_tool("quantize", bin_dir)
-        supports_prior = prior_weight != 1 and tool_supports_flag(
-            quantize_bin, "--prior-weight"
-        )
+        supports_prior = prior_weight != 1 and tool_supports_flag(quantize_bin, "--prior-weight")
     except OptimizerError as e:
         console.print(f"[{C_RED}] ✗ {e}[/]")
         raise typer.Exit(1) from e
@@ -615,19 +614,15 @@ def optimize_cmd(
         raise typer.Exit(1) from e
 
     if prune_layers:
-        console.print(
-            f"[{C_YELLOW}] ⚠ Pruning layers can substantially reduce quality.[/]"
-        )
+        console.print(f"[{C_YELLOW}] ⚠ Pruning layers can substantially reduce quality.[/]")
     console.print(
-        f"[{C_YELLOW}] ⚠ Optimizing an already-quantized model requantizes it; "
-        "quality can drop.[/]"
+        f"[{C_YELLOW}] ⚠ Optimizing an already-quantized model requantizes it; quality can drop.[/]"
     )
     if not _run_tool(command, dry_run, cleanup=out):
         raise typer.Exit(1)
     if not dry_run:
         console.print(
-            f"[{C_GREEN}] ✓ optimized model:[/] {out} "
-            f"({_format_bytes(out.stat().st_size)})"
+            f"[{C_GREEN}] ✓ optimized model:[/] {out} ({_format_bytes(out.stat().st_size)})"
         )
 
 
@@ -653,7 +648,9 @@ def list_cmd():
         ctx_val = meta.get("context_length") or 0
         ctx_str = f"{ctx_val:,}" if ctx_val else "?"
         t.add_row(
-            f"[{i + 1:02d}]", m["name"], size_str,
+            f"[{i + 1:02d}]",
+            m["name"],
+            size_str,
             meta.get("quant", "?"),
             f"{meta.get('n_layers', 0) or '?'}",
             ctx_str,
@@ -711,7 +708,9 @@ def recommend_quantization(
         return
 
     console.print(f"  [{C_YELLOW}]⚠ Found {len(warnings)} critical tensors quantized below Q4_K[/]")
-    console.print(f"  [{C_DIM}]To preserve quality, use mixed-precision for output & embeddings:[/]\n")
+    console.print(
+        f"  [{C_DIM}]To preserve quality, use mixed-precision for output & embeddings:[/]\n"
+    )
 
     console.print(f"  [{C_ACCENT}]Command to run:[/]")
     console.print(

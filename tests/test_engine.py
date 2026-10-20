@@ -108,10 +108,12 @@ def test_final_fallback_uses_f16_without_flash_attention(fake_llama):
 
 def test_chat_forwards_openai_sampling_and_tool_params(fake_llama):
     engine = Engine(_plan(), "model.gguf")
-    tools = [{
-        "type": "function",
-        "function": {"name": "get_weather", "parameters": {"type": "object"}},
-    }]
+    tools = [
+        {
+            "type": "function",
+            "function": {"name": "get_weather", "parameters": {"type": "object"}},
+        }
+    ]
 
     engine.chat(
         [{"role": "user", "content": "hi"}],
@@ -160,9 +162,9 @@ def test_chat_drops_unknown_and_unset_params(fake_llama):
 
     engine.chat(
         [{"role": "user", "content": "hi"}],
-        user="someone",              # not a llama.cpp chat parameter
+        user="someone",  # not a llama.cpp chat parameter
         stream_options={"include_usage": True},
-        top_k=None,                  # unset optional knob
+        top_k=None,  # unset optional knob
         seed=None,
     )
 

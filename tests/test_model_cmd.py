@@ -26,17 +26,19 @@ def test_read_meta_always_exposes_kv_estimate_fields(tmp_path, monkeypatch):
     model.write_bytes(b"")
 
     def fake_analyze(_path):
-        return {"metadata": {
-            "n_layers": 80,
-            "n_params": 70_000_000_000,
-            "context_length": 32768,
-            "embedding_length": 8192,
-            "architecture": "qwen2",
-            "n_heads": 64,
-            "n_kv_heads": 8,
-            "head_dim": 128,
-            "dominant_quant": "Q4_K_M",
-        }}
+        return {
+            "metadata": {
+                "n_layers": 80,
+                "n_params": 70_000_000_000,
+                "context_length": 32768,
+                "embedding_length": 8192,
+                "architecture": "qwen2",
+                "n_heads": 64,
+                "n_kv_heads": 8,
+                "head_dim": 128,
+                "dominant_quant": "Q4_K_M",
+            }
+        }
 
     monkeypatch.setattr(gguf_analyzer, "analyze_gguf", fake_analyze)
     meta = _read_meta(model, "model-Q4_K_M.gguf")

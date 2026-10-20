@@ -88,9 +88,15 @@ def test_run_rejects_unknown_model(monkeypatch):
 
 def test_run_rejects_malformed_ctx(monkeypatch):
     monkeypatch.setattr(bench_cmd, "load_config", lambda: dict(DEFAULT_CONFIG))
-    monkeypatch.setattr(bench_cmd, "get_model", lambda name: {
-        "name": name, "path": "/tmp/m.gguf", "meta": {"n_layers": 4},
-    })
+    monkeypatch.setattr(
+        bench_cmd,
+        "get_model",
+        lambda name: {
+            "name": name,
+            "path": "/tmp/m.gguf",
+            "meta": {"n_layers": 4},
+        },
+    )
 
     with pytest.raises(typer.Exit) as exc:
         bench_cmd.run(model="m", ctx="512,not-a-number", max_tokens=2)
@@ -100,9 +106,15 @@ def test_run_rejects_malformed_ctx(monkeypatch):
 
 def test_run_rejects_non_positive_ctx(monkeypatch):
     monkeypatch.setattr(bench_cmd, "load_config", lambda: dict(DEFAULT_CONFIG))
-    monkeypatch.setattr(bench_cmd, "get_model", lambda name: {
-        "name": name, "path": "/tmp/m.gguf", "meta": {"n_layers": 4},
-    })
+    monkeypatch.setattr(
+        bench_cmd,
+        "get_model",
+        lambda name: {
+            "name": name,
+            "path": "/tmp/m.gguf",
+            "meta": {"n_layers": 4},
+        },
+    )
 
     with pytest.raises(typer.Exit) as exc:
         bench_cmd.run(model="m", ctx="0", max_tokens=2)
@@ -119,14 +131,24 @@ def test_run_benchmarks_each_context_and_closes_engines(monkeypatch):
             engines.append(self)
 
     monkeypatch.setattr(bench_cmd, "load_config", lambda: dict(DEFAULT_CONFIG))
-    monkeypatch.setattr(bench_cmd, "get_model", lambda name: {
-        "name": name,
-        "path": "/tmp/m.gguf",
-        "meta": {"n_layers": 4, "quant": "Q4_K_M"},
-    })
-    monkeypatch.setattr(bench_cmd, "detect", lambda: types.SimpleNamespace(
-        cpu_cores=4, ram_free_gb=8.0, gpu_name="none",
-    ))
+    monkeypatch.setattr(
+        bench_cmd,
+        "get_model",
+        lambda name: {
+            "name": name,
+            "path": "/tmp/m.gguf",
+            "meta": {"n_layers": 4, "quant": "Q4_K_M"},
+        },
+    )
+    monkeypatch.setattr(
+        bench_cmd,
+        "detect",
+        lambda: types.SimpleNamespace(
+            cpu_cores=4,
+            ram_free_gb=8.0,
+            gpu_name="none",
+        ),
+    )
     monkeypatch.setattr(bench_cmd, "plan", lambda *a, **kw: _plan())
     monkeypatch.setattr(bench_cmd, "Engine", TrackingEngine)
     monkeypatch.setattr(bench_cmd, "animated_loading_bar", lambda *a, **kw: None)

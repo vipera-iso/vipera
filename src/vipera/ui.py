@@ -15,19 +15,19 @@ from vipera import __version__
 
 console = Console(highlight=False, soft_wrap=True)
 
-C_PRIMARY   = "#5B7C99"
-C_ACCENT    = "#8FB4CC"
+C_PRIMARY = "#5B7C99"
+C_ACCENT = "#8FB4CC"
 C_HIGHLIGHT = "#B8C7D3"
-C_TEXT      = "bold #E4E8EC"
-C_DIM       = "#6B7A87"
-C_BORDER    = "#3E5568"
+C_TEXT = "bold #E4E8EC"
+C_DIM = "#6B7A87"
+C_BORDER = "#3E5568"
 
-C_GREEN   = "#7BA05B"
-C_RED     = "#C25B5B"
-C_YELLOW  = "#D4A574"
+C_GREEN = "#7BA05B"
+C_RED = "#C25B5B"
+C_YELLOW = "#D4A574"
 C_SUCCESS = C_GREEN
-C_ERROR   = C_RED
-C_WARN    = C_YELLOW
+C_ERROR = C_RED
+C_WARN = C_YELLOW
 
 
 VIPERA_ART = r"""

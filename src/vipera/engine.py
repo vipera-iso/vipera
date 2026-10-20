@@ -11,13 +11,34 @@ _KV_TYPES = {"f32": 0, "f16": 1, "q4_0": 2, "q4_1": 3, "q8_0": 8}
 # Sampling and tool-calling parameters accepted by
 # llama_cpp.Llama.create_chat_completion. Anything else is dropped so a typo in
 # an HTTP request cannot turn into a TypeError from the backend.
-_CHAT_PARAMS = frozenset({
-    "temperature", "top_p", "top_k", "min_p", "typical_p", "max_tokens",
-    "stop", "seed", "presence_penalty", "frequency_penalty", "repeat_penalty",
-    "tfs_z", "mirostat_mode", "mirostat_tau", "mirostat_eta", "logit_bias",
-    "logprobs", "top_logprobs", "grammar", "response_format",
-    "tools", "tool_choice", "functions", "function_call",
-})
+_CHAT_PARAMS = frozenset(
+    {
+        "temperature",
+        "top_p",
+        "top_k",
+        "min_p",
+        "typical_p",
+        "max_tokens",
+        "stop",
+        "seed",
+        "presence_penalty",
+        "frequency_penalty",
+        "repeat_penalty",
+        "tfs_z",
+        "mirostat_mode",
+        "mirostat_tau",
+        "mirostat_eta",
+        "logit_bias",
+        "logprobs",
+        "top_logprobs",
+        "grammar",
+        "response_format",
+        "tools",
+        "tool_choice",
+        "functions",
+        "function_call",
+    }
+)
 
 _DEFAULT_SAMPLING = {
     "temperature": 0.7,
@@ -33,8 +54,7 @@ class Engine:
             from llama_cpp import Llama
         except ImportError:
             raise RuntimeError(
-                "llama-cpp-python is not installed. "
-                "Install it with: pip install llama-cpp-python"
+                "llama-cpp-python is not installed. Install it with: pip install llama-cpp-python"
             ) from None
 
         self.plan = plan
@@ -98,9 +118,7 @@ class Engine:
             except Exception as exc:
                 last_exc = exc
 
-        raise RuntimeError(
-            f"Failed to initialize model even on CPU: {last_exc}"
-        ) from gpu_exc
+        raise RuntimeError(f"Failed to initialize model even on CPU: {last_exc}") from gpu_exc
 
     def _load(self, p: Plan):
         kv = _KV_TYPES.get(p.kv_cache)

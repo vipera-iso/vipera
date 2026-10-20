@@ -84,9 +84,7 @@ def test_quick_bench_swallows_engine_errors(monkeypatch):
     serve_cmd._quick_bench(Broken(_plan(), "/tmp/m.gguf"))
 
 
-def test_start_serves_without_running_the_benchmark(
-    monkeypatch, isolated_home
-):
+def test_start_serves_without_running_the_benchmark(monkeypatch, isolated_home):
     calls = {}
 
     monkeypatch.setattr(serve_cmd, "load_config", lambda: _cfg())
@@ -94,19 +92,17 @@ def test_start_serves_without_running_the_benchmark(
     monkeypatch.setattr(serve_cmd, "detect", lambda: types.SimpleNamespace())
     monkeypatch.setattr(serve_cmd, "plan", lambda *a, **kw: _plan())
     monkeypatch.setattr(serve_cmd, "Engine", FakeEngine)
-    monkeypatch.setattr(
-        serve_cmd, "_quick_bench", lambda engine: calls.setdefault("bench", True)
-    )
+    monkeypatch.setattr(serve_cmd, "_quick_bench", lambda engine: calls.setdefault("bench", True))
     monkeypatch.setitem(
-        sys.modules, "uvicorn", types.SimpleNamespace(run=lambda app, **kw: calls.setdefault("uvicorn", kw))
+        sys.modules,
+        "uvicorn",
+        types.SimpleNamespace(run=lambda app, **kw: calls.setdefault("uvicorn", kw)),
     )
     monkeypatch.setattr(
         "vipera.server.build_app", lambda engine, model: calls.setdefault("app", (engine, model))
     )
 
-    serve_cmd.start(
-        model="m", host="127.0.0.1", port=8686, profile="auto", ctx=1024, bench=False
-    )
+    serve_cmd.start(model="m", host="127.0.0.1", port=8686, profile="auto", ctx=1024, bench=False)
 
     # Readiness must not wait on a speed check.
     assert "bench" not in calls
@@ -128,14 +124,10 @@ def test_start_runs_bench_only_when_requested(monkeypatch, isolated_home):
     monkeypatch.setattr(
         serve_cmd, "_quick_bench", lambda engine: calls.setdefault("bench_calls", 0)
     )
-    monkeypatch.setitem(
-        sys.modules, "uvicorn", types.SimpleNamespace(run=lambda app, **kw: None)
-    )
+    monkeypatch.setitem(sys.modules, "uvicorn", types.SimpleNamespace(run=lambda app, **kw: None))
     monkeypatch.setattr("vipera.server.build_app", lambda engine, model: object())
 
-    serve_cmd.start(
-        model="m", host="127.0.0.1", port=8686, profile="auto", ctx=1024, bench=True
-    )
+    serve_cmd.start(model="m", host="127.0.0.1", port=8686, profile="auto", ctx=1024, bench=True)
 
     assert "bench_calls" in calls
 
@@ -154,7 +146,11 @@ def test_start_rejects_unknown_model(monkeypatch):
     monkeypatch.setattr(serve_cmd, "get_model", lambda name: None)
     with pytest.raises(typer.Exit) as exc:
         serve_cmd.start(
-            model="missing", host="127.0.0.1", port=8686, profile="auto", ctx=1024,
+            model="missing",
+            host="127.0.0.1",
+            port=8686,
+            profile="auto",
+            ctx=1024,
             bench=False,
         )
     assert exc.value.exit_code == 1

@@ -58,6 +58,7 @@ def doctor():
     llama_missing = False
     try:
         import llama_cpp  # noqa: F401
+
         row("llama-cpp-python", "installed")
     except ImportError:
         row("llama-cpp-python", "missing", "FAIL", C_RED)
@@ -66,6 +67,7 @@ def doctor():
     gguf_missing = False
     try:
         import gguf  # noqa: F401
+
         row("gguf", "installed")
     except ImportError:
         row("gguf", "missing", "WARN", C_YELLOW)
@@ -78,16 +80,13 @@ def doctor():
 
     if hw.is_apple_silicon:
         row("gpu", "Apple Silicon (Metal)", "PASS", C_GREEN)
-        row("unified memory",
-            f"{hw.ram_free_gb:.1f} GB free / {hw.ram_total_gb:.1f} GB total")
+        row("unified memory", f"{hw.ram_free_gb:.1f} GB free / {hw.ram_total_gb:.1f} GB total")
     elif hw.gpu_name != "None":
         row("gpu", hw.gpu_name, "PASS", C_GREEN)
-        row("vram",
-            f"{hw.vram_free_gb:.1f} GB free / {hw.vram_total_gb:.1f} GB total")
+        row("vram", f"{hw.vram_free_gb:.1f} GB free / {hw.vram_total_gb:.1f} GB total")
     else:
         row("gpu", "None (CPU Only)", "WARN", C_YELLOW)
-        row("ram available",
-            f"{hw.ram_free_gb:.1f} GB free / {hw.ram_total_gb:.1f} GB total")
+        row("ram available", f"{hw.ram_free_gb:.1f} GB free / {hw.ram_total_gb:.1f} GB total")
     end_sec()
 
     summary = Text("  SUMMARY   ", style=C_ACCENT)
@@ -98,18 +97,18 @@ def doctor():
     summary.append(f"[ {counters['fail']} FAIL ]\n", style=C_RED)
     content.append(summary)
 
-    console.print(Panel(
-        content,
-        title=Text(" VIPERA DIAGNOSTICS ", style=C_ACCENT),
-        border_style=C_ACCENT,
-        box=box.ROUNDED,
-        padding=(0, 1),
-    ))
+    console.print(
+        Panel(
+            content,
+            title=Text(" VIPERA DIAGNOSTICS ", style=C_ACCENT),
+            border_style=C_ACCENT,
+            box=box.ROUNDED,
+            padding=(0, 1),
+        )
+    )
 
     if llama_missing:
-        console.print(
-            f"[{C_YELLOW}] ⚠ llama-cpp-python is required to load models.[/]"
-        )
+        console.print(f"[{C_YELLOW}] ⚠ llama-cpp-python is required to load models.[/]")
         console.print(f"[{C_DIM}]   Install:[/] python -m pip install llama-cpp-python")
         console.print(f"[{C_DIM}]   Then restart the gateway.[/]\n")
 

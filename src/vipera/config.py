@@ -30,8 +30,13 @@ _TRUE_STRINGS = {"1", "true", "yes", "on"}
 _FALSE_STRINGS = {"0", "false", "no", "off", ""}
 
 _TYPE_MAP = {
-    "port": int, "ctx": int, "n_batch": int, "max_tokens": int,
-    "temperature": float, "top_p": float, "repeat_penalty": float,
+    "port": int,
+    "ctx": int,
+    "n_batch": int,
+    "max_tokens": int,
+    "temperature": float,
+    "top_p": float,
+    "repeat_penalty": float,
     "flash_attn": bool,
 }
 

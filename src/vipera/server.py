@@ -78,9 +78,7 @@ def build_app(engine, model_name: str) -> FastAPI:
         if not req.messages:
             raise HTTPException(400, "messages must not be empty")
         if req.model and req.model != model_name:
-            raise HTTPException(
-                404, f"model '{req.model}' not loaded (active: '{model_name}')"
-            )
+            raise HTTPException(404, f"model '{req.model}' not loaded (active: '{model_name}')")
         if len(req.messages) > _MAX_MESSAGES:
             raise HTTPException(400, f"too many messages (max {_MAX_MESSAGES})")
         if sum(len(m.content or "") for m in req.messages) > _MAX_PROMPT_CHARS:
@@ -101,6 +99,7 @@ def build_app(engine, model_name: str) -> FastAPI:
         )
 
         if req.stream:
+
             async def _stream():
                 # The engine's stream is a SYNC generator. Iterating it inline
                 # would block the event loop for the whole generation, so pull
@@ -119,9 +118,7 @@ def build_app(engine, model_name: str) -> FastAPI:
                     try:
                         iterator = engine.chat(messages, stream=True, **kwargs)
                         while True:
-                            task = asyncio.create_task(
-                                asyncio.to_thread(next, iterator, _SENTINEL)
-                            )
+                            task = asyncio.create_task(asyncio.to_thread(next, iterator, _SENTINEL))
                             try:
                                 # shield: cancelling this request must not
                                 # cancel the task that wraps the worker thread.
@@ -162,9 +159,7 @@ def build_app(engine, model_name: str) -> FastAPI:
                         and req.stream_options.include_usage
                         and usage is not None
                     ):
-                        payload = json.dumps(
-                            {"choices": [], "usage": usage}, ensure_ascii=False
-                        )
+                        payload = json.dumps({"choices": [], "usage": usage}, ensure_ascii=False)
                         yield f"data: {payload}\n\n"
                     yield "data: [DONE]\n\n"
                 finally:
@@ -181,9 +176,7 @@ def build_app(engine, model_name: str) -> FastAPI:
         await lock.acquire()
         released = False
         try:
-            task = asyncio.create_task(
-                asyncio.to_thread(engine.chat, messages, False, **kwargs)
-            )
+            task = asyncio.create_task(asyncio.to_thread(engine.chat, messages, False, **kwargs))
             try:
                 return await asyncio.shield(task)
             except asyncio.CancelledError:

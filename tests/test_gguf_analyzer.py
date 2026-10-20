@@ -130,9 +130,7 @@ def test_read_meta_records_size_of_one_repeating_layer(monkeypatch, tmp_path):
     }
     path = tmp_path / "model-q4_k_m.gguf"
     path.write_bytes(b"x" * 10)
-    monkeypatch.setattr(
-        "vipera.gguf_analyzer.analyze_gguf", lambda p: analysis
-    )
+    monkeypatch.setattr("vipera.gguf_analyzer.analyze_gguf", lambda p: analysis)
 
     meta = model_cmd._read_meta(path)
 
@@ -144,9 +142,7 @@ def test_read_meta_without_layer_info_leaves_layer_bytes_zero(monkeypatch, tmp_p
     analysis = {"metadata": {"n_layers": 2}, "layer_distribution": {}}
     path = tmp_path / "model.gguf"
     path.write_bytes(b"x")
-    monkeypatch.setattr(
-        "vipera.gguf_analyzer.analyze_gguf", lambda p: analysis
-    )
+    monkeypatch.setattr("vipera.gguf_analyzer.analyze_gguf", lambda p: analysis)
 
     assert model_cmd._read_meta(path)["layer_bytes"] == 0
 
