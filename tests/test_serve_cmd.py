@@ -1,4 +1,5 @@
 import sys
+import time
 import types
 
 import psutil
@@ -293,3 +294,58 @@ def test_stop_force_kills_after_timeout(monkeypatch, isolated_home):
     assert proc.terminated is True
     assert proc.killed is True
     assert not pid_file.exists()
+
+
+def test_is_loopback_only_accepts_loopback():
+    # 0.0.0.0 is the canonical "expose to everything" bind; it must warn.
+    assert serve_cmd._is_loopback("127.0.0.1")
+    assert serve_cmd._is_loopback("127.0.0.53")
+    assert serve_cmd._is_loopback("localhost")
+    assert serve_cmd._is_loopback("::1")
+    assert not serve_cmd._is_loopback("0.0.0.0")
+    assert not serve_cmd._is_loopback("::")
+    assert not serve_cmd._is_loopback("192.168.1.10")
+    assert not serve_cmd._is_loopback("example.lan")
+
+
+def test_start_warns_for_non_loopback_host_and_still_serves(monkeypatch, isolated_home, capsys):
+    calls = {}
+    slept = []
+
+    monkeypatch.setattr(serve_cmd, "load_config", lambda: _cfg())
+    monkeypatch.setattr(serve_cmd, "get_model", lambda name: _model())
+    monkeypatch.setattr(serve_cmd, "detect", lambda: types.SimpleNamespace())
+    monkeypatch.setattr(serve_cmd, "plan", lambda *a, **kw: _plan())
+    monkeypatch.setattr(serve_cmd, "Engine", FakeEngine)
+    monkeypatch.setattr(time, "sleep", slept.append)
+    monkeypatch.setitem(
+        sys.modules,
+        "uvicorn",
+        types.SimpleNamespace(run=lambda app, **kw: calls.setdefault("uvicorn", kw)),
+    )
+    monkeypatch.setattr("vipera.server.build_app", lambda engine, model: object())
+
+    serve_cmd.start(model="m", host="0.0.0.0", port=8686, profile="auto", ctx=1024, bench=False)
+
+    out = capsys.readouterr().out
+    assert "exposes the model to the network" in out
+    # The grace message must describe what actually happens: Ctrl+C aborts,
+    # the server keeps starting.
+    assert "Serving in 5s" in out
+    assert "Aborting in 5s" not in out
+    assert slept == [5]
+    assert calls["uvicorn"]["host"] == "0.0.0.0"
+
+
+def test_start_grace_period_aborts_on_ctrl_c(monkeypatch, isolated_home):
+    def boom(_seconds):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(serve_cmd, "load_config", lambda: _cfg())
+    monkeypatch.setattr(serve_cmd, "get_model", lambda name: _model())
+    monkeypatch.setattr(time, "sleep", boom)
+
+    with pytest.raises(typer.Exit) as exc:
+        serve_cmd.start(model="m", host="0.0.0.0", port=8686, profile="auto", ctx=1024, bench=False)
+
+    assert exc.value.exit_code == 1

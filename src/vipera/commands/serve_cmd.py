@@ -38,6 +38,15 @@ def _pid_file(port: int) -> Path:
     return VIPERA_HOME / f"serve-{port}.pid"
 
 
+_LOOPBACK_HOSTS = {"localhost", "::1"}
+
+
+def _is_loopback(host: str) -> bool:
+    """Only loopback binds keep the unauthenticated API on this machine."""
+    h = (host or "").strip().lower()
+    return h in _LOOPBACK_HOSTS or h.startswith("127.")
+
+
 def _quick_bench(engine: Engine) -> None:
     """Informational speed check after load."""
     prompt = "Write a short sentence about AI."
@@ -127,12 +136,12 @@ def start(
         console.print(f"[{C_RED}] ✗ Model not found: {model}[/]")
         raise typer.Exit(1)
 
-    if host not in {"127.0.0.1", "localhost", "::1", "0.0.0.0"}:
+    if not _is_loopback(host):
         console.print(
             f"[{C_RED}] ⚠ WARNING: binding to {host} exposes the model to the "
             f"network with no authentication.[/]"
         )
-        console.print(f"[{C_DIM}]  Aborting in 5s — press Ctrl+C to stop now.[/]")
+        console.print(f"[{C_DIM}]  Serving in 5s — press Ctrl+C to abort now.[/]")
         try:
             time.sleep(5)
         except KeyboardInterrupt:

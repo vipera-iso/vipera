@@ -19,6 +19,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - A GGUF whose tensor type the installed `gguf` cannot size now fails with
   `GGUFAnalysisError: failed to read ...` instead of a traceback.
 
+### Fixed
+- **`serve start` warns for every non-loopback `--host`** — `0.0.0.0` was
+  treated as safe, so the most common "expose to the network" bind got no
+  warning at all, and the grace-period message claimed the server was aborting
+  when it actually started (Ctrl+C is what aborts).
+- **A corrupt `config.json`/`registry.json` is no longer erased in silence** —
+  the unreadable file is copied to `<name>.corrupt` and a warning names the
+  backup, instead of defaults being saved over the user's settings on the next
+  write.
+- **`vipera model rm` keeps a file another alias still references** —
+  downloading the same file twice via `model search` created two aliases for
+  one path; removing one of them deleted the shared file out from under the
+  other.
+
 ## [1.2.0] - 2026-10-20
 
 ### Changed

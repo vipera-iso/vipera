@@ -1,6 +1,8 @@
 import contextlib
 import json
 import os
+import shutil
+import sys
 from pathlib import Path
 
 VIPERA_HOME = Path(os.environ.get("VIPERA_HOME") or (Path.home() / ".vipera"))
@@ -90,11 +92,33 @@ def _coerce_strict(cfg: dict) -> dict:
     return cfg
 
 
+def quarantine_corrupt(path: Path, exc: Exception) -> Path:
+    """Keep an unreadable JSON file before anything overwrites it.
+
+    Loads fall back to defaults, so without this copy the next
+    ``system config``/``model import`` would silently erase the user's file.
+    """
+    backup = path.with_name(path.name + ".corrupt")
+    with contextlib.suppress(OSError):
+        shutil.copy2(path, backup)
+    print(
+        f"vipera: {path} is unreadable ({exc}); using defaults. Original kept at {backup}",
+        file=sys.stderr,
+    )
+    return backup
+
+
 def load_config() -> dict:
     ensure_dirs()
     if CONFIG_FILE.exists():
-        with contextlib.suppress(Exception):
-            return _coerce({**DEFAULT_CONFIG, **json.loads(CONFIG_FILE.read_text())})
+        try:
+            data = json.loads(CONFIG_FILE.read_text())
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+            quarantine_corrupt(CONFIG_FILE, exc)
+        else:
+            if isinstance(data, dict):
+                return _coerce({**DEFAULT_CONFIG, **data})
+            quarantine_corrupt(CONFIG_FILE, ValueError("not a JSON object"))
     return dict(DEFAULT_CONFIG)
 
 
