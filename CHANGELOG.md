@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.2.0] - 2026-10-20
+
 ### Changed
 - **Planner budgets VRAM from real per-layer sizes** — registering a model now
   stores `layer_bytes` (mean size of one repeating `blk.N` block, read from the
@@ -79,6 +81,7 @@ First public release.
 - The `model` field in `/v1/chat/completions` is ignored; one gateway serves
   one model.
 
-[Unreleased]: https://github.com/vipera-iso/vipera/compare/v1.1.0...HEAD
+[Unreleased]: https://github.com/vipera-iso/vipera/compare/v1.2.0...HEAD
+[1.2.0]: https://github.com/vipera-iso/vipera/releases/tag/v1.2.0
 [1.1.0]: https://github.com/vipera-iso/vipera/releases/tag/v1.1.0
 [1.0.0]: https://github.com/vipera-iso/vipera/releases/tag/v1.0.0
