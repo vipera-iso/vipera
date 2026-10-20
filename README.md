@@ -134,6 +134,7 @@ Vipera ships a single `vipera` entry point. Every command is discoverable with
 |---|---|
 | `vipera serve start [--model] [--host] [--port] [--profile] [--ctx]` | Load a model and start the OpenAI-compatible server. |
 | `vipera serve status` | Probe the configured host/port for a live gateway. |
+| `vipera serve stop [--force]` | Stop the gateway using its pid file. |
 
 ### `vipera chat` — terminal chat
 
@@ -268,7 +269,7 @@ edit the JSON — unknown keys are rejected, known keys are type-coerced.
 | `host` | `str` | `127.0.0.1` | Gateway bind address. |
 | `port` | `int` | `8686` | Gateway port. |
 | `default_model` | `str \| null` | `null` | Alias used when `--model` is not given. |
-| `profile` | `str` | `auto` | Planner profile (`auto`, `speed`, `balanced`). |
+| `profile` | `str` | `auto` | Planner profile (`auto`, `cpu`, `gpu`, `lowmem`). |
 | `ctx` | `int` | `8192` | Context size in tokens. |
 | `kv_cache` | `str` | `q8_0` | KV cache type (`f16`, `q8_0`, `q4_0`, ...). |
 | `flash_attn` | `bool` | `true` | Enable flash attention when GPU present. |
@@ -276,7 +277,6 @@ edit the JSON — unknown keys are rejected, known keys are type-coerced.
 | `temperature` | `float` | `0.7` | Sampling temperature. |
 | `max_tokens` | `int` | `2048` | Generation cap. |
 | `top_p` | `float` | `0.95` | Nucleus sampling. |
-| `show_bench_on_start` | `bool` | `true` | Run a quick speed check after `serve start` loads. |
 
 **Storage layout:**
 

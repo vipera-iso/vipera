@@ -22,15 +22,17 @@ DEFAULT_CONFIG = {
     "max_tokens": 2048,
     "top_p": 0.95,
     "repeat_penalty": 1.1,
-    "show_bench_on_start": True,
 }
 
 _KV_CACHE_TYPES = {"f32", "f16", "q4_0", "q4_1", "q8_0"}
 
+_TRUE_STRINGS = {"1", "true", "yes", "on"}
+_FALSE_STRINGS = {"0", "false", "no", "off", ""}
+
 _TYPE_MAP = {
     "port": int, "ctx": int, "n_batch": int, "max_tokens": int,
     "temperature": float, "top_p": float, "repeat_penalty": float,
-    "flash_attn": bool, "show_bench_on_start": bool,
+    "flash_attn": bool,
 }
 
 
@@ -54,13 +56,25 @@ def _coerce(cfg: dict) -> dict:
     return cfg
 
 
+def _parse_bool(value) -> bool:
+    """Strictly parse a boolean, rejecting anything that is not unambiguous."""
+    if isinstance(value, bool):
+        return value
+    s = str(value).strip().lower()
+    if s in _TRUE_STRINGS:
+        return True
+    if s in _FALSE_STRINGS:
+        return False
+    raise ValueError(f"expected a boolean, got '{value}'")
+
+
 def _coerce_strict(cfg: dict) -> dict:
     """Raise ValueError on any invalid typed value."""
     for k, cast in _TYPE_MAP.items():
         if k in cfg and cfg[k] is not None:
             try:
                 if cast is bool:
-                    cfg[k] = str(cfg[k]).lower() in ("1", "true", "yes", "on")
+                    cfg[k] = _parse_bool(cfg[k])
                 else:
                     cfg[k] = cast(cfg[k])
             except (ValueError, TypeError) as exc:
@@ -81,4 +95,8 @@ def load_config() -> dict:
 
 def save_config(cfg: dict) -> None:
     ensure_dirs()
-    CONFIG_FILE.write_text(json.dumps(cfg, indent=2))
+    # Write-then-rename so a crash mid-write cannot leave a truncated config
+    # that load_config() would silently replace with defaults.
+    tmp = CONFIG_FILE.with_suffix(CONFIG_FILE.suffix + ".tmp")
+    tmp.write_text(json.dumps(cfg, indent=2))
+    os.replace(tmp, CONFIG_FILE)

@@ -20,9 +20,19 @@ def _hw(**overrides):
 def test_cpu_only_plan():
     p = plan({"n_layers": 32, "size_bytes": 4 * 1024**3}, _hw())
     assert p.gpu_layers == 0
-    assert p.kv_cache == "f16"
+    # The requested quantized KV survives the CPU-only path (llama.cpp runs
+    # flash attention on CPU; f16 at large ctx can exceed free RAM).
+    assert p.kv_cache == "q8_0"
+    assert p.flash_attn is True
     assert p.note.startswith("CPU ONLY")
     assert p.cpu_threads == 7
+
+
+def test_cpu_only_plan_keeps_f16_without_flash_attention():
+    p = plan({"n_layers": 32, "size_bytes": 4 * 1024**3}, _hw(), kv_cache="f16")
+    assert p.gpu_layers == 0
+    assert p.kv_cache == "f16"
+    assert p.flash_attn is False
 
 
 def test_full_gpu():
@@ -37,6 +47,82 @@ def test_hybrid_partial():
     p = plan({"n_layers": 32, "size_bytes": 8 * 1024**3}, hw)
     assert 0 < p.gpu_layers < 32
     assert "Hybrid" in p.note
+
+
+# --- per-layer VRAM budgeting ------------------------------------------------
+
+# Hermes-4-14B Q4_K_M on a GTX 1650 (4 GB, ~3.7 GB free), 64K context, q4_0 KV.
+# The old planner subtracted the full 2.5 GB KV from 2.7 GB usable VRAM and
+# concluded 0 layers. llama.cpp keeps KV per layer, so ~9 layers actually fit.
+_HERMES_META = {
+    "n_layers": 40,
+    "n_heads": 40,
+    "n_kv_heads": 8,
+    "head_dim": 128,
+    "size_bytes": 9 * 1024**3,
+}
+
+
+def test_hybrid_offloads_layers_when_only_per_layer_kv_fits():
+    hw = _hw(gpu_name="GTX 1650", vram_total_gb=4.0, vram_free_gb=3.7)
+    p = plan(_HERMES_META, hw, ctx=65536, kv_cache="q4_0")
+
+    # safe_vram 2.7 GB; layer 0.225 GB + per-layer KV 0.0625 GB -> 9 layers.
+    assert p.gpu_layers == 9
+    assert p.offload_kqv is True
+    assert p.note == "Hybrid: 9/40 layers"
+
+
+def test_hybrid_offload_of_quantized_kv_requires_flash_attention():
+    # A 4 GB card fails the old `vram_total_gb > 4` FA check; quantized KV then
+    # makes llama.cpp reject the context. FA must stay on whenever KV is quantized.
+    hw = _hw(gpu_name="GTX 1650", vram_total_gb=4.0, vram_free_gb=3.7)
+    p = plan(_HERMES_META, hw, ctx=65536, kv_cache="q8_0")
+
+    assert p.gpu_layers > 0
+    assert p.flash_attn is True
+
+
+def test_f16_kv_still_offloads_some_layers():
+    hw = _hw(gpu_name="GTX 1650", vram_total_gb=4.0, vram_free_gb=3.7)
+    p = plan(_HERMES_META, hw, ctx=65536, kv_cache="f16")
+
+    # 10 GB KV / 40 layers = 0.25 GB per layer on top of 0.225 GB of weights:
+    # 2.7 / 0.475 -> 5 layers.
+    assert p.gpu_layers == 5
+
+
+def test_ram_estimate_reflects_q8_kv_at_64k():
+    hw = _hw(gpu_name="GTX 1650", vram_total_gb=4.0, vram_free_gb=3.7)
+    q8 = plan(_HERMES_META, hw, ctx=65536, kv_cache="q8_0")
+    q4 = plan(_HERMES_META, hw, ctx=65536, kv_cache="q4_0")
+
+    # Host weights (~7.4 GB) + host KV (~4.1 GB) + compute headroom.
+    assert q8.ram_estimate_gb > 12.0
+    # q4_0 halves the KV and is what actually loads on a 10 GB-free box.
+    assert q4.ram_estimate_gb < q8.ram_estimate_gb - 2.0
+
+
+def test_mlock_disabled_when_host_kv_leaves_no_headroom():
+    # Pinning ~7.4 GB of host weights plus ~4.1 GB of host KV on a 15 GB
+    # no-swap box leaves nothing for compute buffers; the process gets OOM
+    # killed instead of failing cleanly, so mlock must stay off.
+    hw = _hw(
+        gpu_name="GTX 1650", vram_total_gb=4.0, vram_free_gb=3.7,
+        ram_total_gb=15.4, ram_free_gb=10.6,
+    )
+    p = plan(_HERMES_META, hw, ctx=65536, kv_cache="q8_0", n_batch=128)
+    assert p.use_mlock is False
+
+
+def test_mlock_enabled_with_generous_headroom():
+    hw = _hw(ram_total_gb=32, ram_free_gb=24)
+    meta = {
+        "n_layers": 32, "n_heads": 32, "n_kv_heads": 8, "head_dim": 128,
+        "size_bytes": 4 * 1024**3,
+    }
+    p = plan(meta, hw)
+    assert p.use_mlock is True
 
 
 def test_low_ram_safe_mode():

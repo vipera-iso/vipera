@@ -58,13 +58,12 @@ to the defaults. Corrupt JSON does not produce an error.
 | `default_model` | `str \| null` | `null` | root command, `serve start`, `chat`, `bench` | Alias used when `--model` is absent. |
 | `profile` | `str` | `auto` | nothing currently | Planner profile. `serve start --profile` defaults to `auto` independently. |
 | `ctx` | `int` | `8192` | `serve start`, `chat` | Context size for the planner. `bench run` uses its own `--ctx` list. |
-| `kv_cache` | `str` | `q8_0` | `serve start`, `chat`, `bench` | KV cache type; forced to `f16` on CPU-only plans. |
+| `kv_cache` | `str` | `q8_0` | `serve start`, `chat`, `bench` | KV cache type; honored on CPU-only plans too (flash attention is enabled for quantized types). |
 | `flash_attn` | `bool` | `true` | nothing currently | Planner decides flash attention from VRAM instead. |
 | `n_batch` | `int` | `512` | `serve start`, `chat`, `bench` | Prompt batch size; capped by the plan. |
 | `temperature` | `float` | `0.7` | nothing currently | Per-request default comes from `server.ChatRequest`. |
 | `max_tokens` | `int` | `2048` | nothing currently | Per-request default comes from `server.ChatRequest`. |
 | `top_p` | `float` | `0.95` | nothing currently | Per-request default comes from `server.ChatRequest`. |
-| `show_bench_on_start` | `bool` | `true` | `serve start` | Run the 20-token speed check after loading. |
 
 The "read by nothing" rows are accepted and persisted so the schema is stable,
 but changing them does not alter runtime behavior today. See
@@ -76,18 +75,23 @@ When loading, known keys are coerced:
 
 - `port`, `ctx`, `n_batch`, `max_tokens` → `int`
 - `temperature`, `top_p` → `float`
-- `flash_attn`, `show_bench_on_start` → `bool`
-- Strings `"1"`, `"true"`, `"yes"`, `"on"` (case-insensitive) become `True`;
-  every other string becomes `False`.
+- `flash_attn` → `bool`
+- While loading, strings `"1"`, `"true"`, `"yes"`, `"on"` (case-insensitive)
+  become `True`; every other string becomes `False`.
+- `vipera system config` uses strict coercion: an unrecognized boolean raises
+  an error instead of silently becoming `False`.
 
 ```bash
 vipera system config port 9000        # stored as 9000, not "9000"
 vipera system config flash_attn false # stored as false
 ```
 
-Coercion failures (for example `port = "abc"`) are ignored, leaving the raw
-value in memory. `save_config` writes whatever is in memory, so a bad value can
-round-trip and fail later when it is used. Prefer valid values.
+Coercion failures during load (for example `port = "abc"`) are ignored, leaving
+the raw value in memory. `save_config` writes whatever is in memory, so a bad
+value can round-trip and fail later when it is used. Prefer valid values.
+
+`save_config` writes a temporary file and atomically renames it, matching the
+registry, so a crash mid-write cannot truncate `config.json`.
 
 ## Registry
 

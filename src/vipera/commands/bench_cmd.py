@@ -96,7 +96,7 @@ def _run_bench(engine: Engine, prompt: str, max_tokens: int) -> dict:
 
 @app.command("run")
 def run(
-    model: str = typer.Argument(None, help="Model name (default: current default model)"),
+    model: str | None = typer.Argument(None, help="Model name (default: current default model)"),
     ctx: str = typer.Option("512,2048", "--ctx", help="Comma-separated context sizes"),
     max_tokens: int = typer.Option(128, "--max-tokens", help="Max tokens to generate"),
 ):
@@ -112,7 +112,17 @@ def run(
         raise typer.Exit(1)
 
     hw = detect()
-    ctx_list = [int(x) for x in ctx.split(",") if x.strip()]
+    try:
+        ctx_list = [int(x) for x in ctx.split(",") if x.strip()]
+    except ValueError as exc:
+        console.print(
+            f"[{C_RED}] ✗ --ctx must be comma-separated integers "
+            f"(example: 512,8192,65536), got: {ctx!r}[/]"
+        )
+        raise typer.Exit(1) from exc
+    if not ctx_list or any(c <= 0 for c in ctx_list):
+        console.print(f"[{C_RED}] ✗ --ctx values must be positive integers, got: {ctx!r}[/]")
+        raise typer.Exit(1)
 
     console.print(f"\n[{C_ACCENT}]▸ Benchmarking model:[/] [{C_TEXT}]{model}[/]")
     console.print(

@@ -14,6 +14,10 @@ class Plan:
     offload_kqv: bool
     use_mlock: bool
     note: str
+    # Rough host-RAM requirement: CPU-resident weights + CPU-resident KV plus
+    # room for compute buffers. 0.0 means "not estimated" (callers skip the
+    # preflight check), which keeps hand-built Plans in tests working.
+    ram_estimate_gb: float = 0.0
 
 
 _VALID_PROFILES = ("auto", "cpu", "gpu", "lowmem")
@@ -92,25 +96,35 @@ def plan(
             note="CPU ONLY (Low Memory Profile)",
         )
 
-    use_mlock = (hw.ram_free_gb - model_size_gb) > 2.0
-
     safe_vram = max(0.0, hw.vram_free_gb - 1.0)  # reserve 1 GB for OS/driver
+
+    # llama.cpp allocates the KV cache per layer: only the layers offloaded to
+    # the GPU take their slice of KV with them, the rest stays in system RAM.
+    # Subtracting the FULL cache from VRAM before offloading anything made a
+    # 14B/Q4 model on a 4 GB card look like it had 0.2 GB free (0 layers) even
+    # though ~9 layers actually fit. Budget both weights and KV per layer.
     kv_cache_gb = _estimate_kv_cache_gb(meta, ctx, kv_cache)
-    usable_vram = max(0.0, safe_vram - kv_cache_gb)
+    per_layer_kv_gb = kv_cache_gb / n_layers if n_layers else 0.0
 
     layer_gb = model_size_gb / n_layers if n_layers else 0.4
+    layer_total_gb = layer_gb + per_layer_kv_gb
     gpu_layers = 0
 
     # profile=cpu forces no offload even when a GPU is present.
     want_gpu = has_gpu and profile != "cpu"
-    if want_gpu and usable_vram > 0 and layer_gb > 0:
-        gpu_layers = min(n_layers, int(usable_vram / layer_gb))
+    if want_gpu and safe_vram > 0 and layer_total_gb > 0:
+        gpu_layers = min(n_layers, int(safe_vram / layer_total_gb))
 
     if gpu_layers == 0:
-        flash_attn = False
         offload_kqv = False
         n_batch = min(n_batch, 128)
-        kv_cache = "f16"
+        # An explicit quantized KV request survives the CPU-only path:
+        # llama.cpp runs flash attention on the CPU backend too, and forcing
+        # f16 here would make a 64K-context KV for a 14B model ~10 GiB, which
+        # does not fit beside this gateway on a 15 GiB / no-swap box.
+        # flash_attn is required for KV quantization, so enable it whenever
+        # the cache is not f16.
+        flash_attn = kv_cache != "f16"
 
         if profile == "gpu":
             note = "CPU ONLY (GPU profile requested, no usable GPU)"
@@ -120,7 +134,8 @@ def plan(
         else:
             note = "CPU ONLY"
     else:
-        flash_attn = hw.vram_total_gb > 4
+        # Quantized KV requires flash attention, regardless of VRAM size.
+        flash_attn = kv_cache != "f16" or hw.vram_total_gb > 4
         offload_kqv = True
         n_batch = min(n_batch, 512)
         note = (
@@ -128,6 +143,20 @@ def plan(
             if gpu_layers == n_layers
             else f"Hybrid: {gpu_layers}/{n_layers} layers"
         )
+
+    # mlock pins weights in RAM, so it is only safe when the machine can hold
+    # the host-side weights AND the host-side KV cache with headroom. Checking
+    # against model size alone ignores a 5 GB KV cache (Q8_0 at 64K), which
+    # turns an mlock into an OOM on a 15 GB / no-swap box.
+    cpu_weights_gb = max(0.0, model_size_gb - layer_gb * gpu_layers)
+    cpu_kv_gb = per_layer_kv_gb * (n_layers - gpu_layers)
+    host_headroom_gb = hw.ram_free_gb - cpu_weights_gb - cpu_kv_gb
+    # 3 GB of headroom leaves room for llama.cpp compute buffers; pinning with
+    # less has OOM-killed this class of machine mid-load (no swap).
+    use_mlock = host_headroom_gb > 3.0
+    # llama.cpp needs more than weights+KV for compute buffers; 2 GB is a
+    # conservative placeholder, calibrated against a 14B/Q8_0/64K load.
+    ram_estimate_gb = cpu_weights_gb + cpu_kv_gb + 2.0
 
     return Plan(
         gpu_layers=gpu_layers,
@@ -139,4 +168,5 @@ def plan(
         offload_kqv=offload_kqv,
         use_mlock=use_mlock,
         note=note,
+        ram_estimate_gb=ram_estimate_gb,
     )

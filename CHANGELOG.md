@@ -8,6 +8,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Tool calling** — `/v1/chat/completions` accepts `tools` and `tool_choice`,
+  forwards `tool_calls` back in both streaming and non-streaming responses, and
+  accepts assistant tool-call turns plus `tool` results with `tool_call_id`.
+- **Full OpenAI sampling pass-through** — `stop`, `seed`, `presence_penalty`,
+  `frequency_penalty`, `top_k`, `min_p`, `logit_bias`, `logprobs`,
+  `top_logprobs`, `response_format`, and `stream_options.include_usage` now
+  reach `llama.cpp` instead of being dropped by the request model.
 - **GGUF inspection** — `vipera model inspect <path> [--tensors]` reads the GGUF
   index only and reports architecture, per-layer/category size distribution,
   quantization mix, and warnings for quality-sensitive tensors quantized below
@@ -17,6 +24,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   MoE `--prior-weight`, layer pruning, target-size quant selection, binary
   discovery (`--bin-dir`, `VIPERA_LLAMA_BIN`, `PATH`), dry runs, and partial
   output cleanup. Planning helpers live in `vipera.optimizer`.
+
+### Changed
+- **Faster readiness** — `serve start` no longer runs the 20-token speed check
+  before binding, and the fixed 1.2 s boot animation is gone. The check is now
+  opt-in via `vipera serve start --bench`; the `show_bench_on_start` config key
+  was removed.
 
 ## [1.0.0] - 2026-10-17
 

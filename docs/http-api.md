@@ -56,24 +56,39 @@ Request body:
 
 | Field | Type | Default | Notes |
 |---|---|---|---|
-| `model` | `string \| null` | `null` | Accepted for compatibility and **ignored**. |
+| `model` | `string \| null` | `null` | Accepted for compatibility and **ignored**; a different name returns 404. |
 | `messages` | `array` (min 1) | required | See message schema. |
 | `stream` | `boolean` | `false` | Enables SSE. |
-| `temperature` | `number` | `0.7` | Forwarded to `llama.cpp`. |
-| `max_tokens` | `integer` | `2048` | Forwarded to `llama.cpp`. |
-| `top_p` | `number` | `0.95` | Forwarded. |
+| `stream_options` | `object \| null` | `null` | `{"include_usage": true}` adds a final usage frame when the backend reports usage. |
+| `temperature` | `number` | `0.7` | 0–2. Forwarded to `llama.cpp`. |
+| `max_tokens` | `integer` | `2048` | 1–32768. Forwarded. |
+| `top_p` | `number` | `0.95` | (0, 1]. Forwarded. |
+| `top_k` | `integer \| null` | `null` | ≥ 0. Forwarded when set. |
+| `min_p` | `number \| null` | `null` | 0–1. Forwarded when set. |
 | `repeat_penalty` | `number` | `1.1` | Forwarded. |
+| `presence_penalty` | `number \| null` | `null` | −2–2. Forwarded when set. |
+| `frequency_penalty` | `number \| null` | `null` | −2–2. Forwarded when set. |
+| `stop` | `string \| array \| null` | `null` | Stop sequence(s). Forwarded. |
+| `seed` | `integer \| null` | `null` | ≥ 0. Forwarded when set; without it sampling is nondeterministic. |
+| `logit_bias` | `object \| null` | `null` | Token-id → bias map, forwarded to `llama.cpp`. |
+| `logprobs` | `boolean \| null` | `null` | Forwarded. |
+| `top_logprobs` | `integer \| null` | `null` | 0–20. Forwarded. |
+| `response_format` | `object \| null` | `null` | `{"type": "json_object"}` constrains output to JSON. |
+| `tools` | `array \| null` | `null` | OpenAI tool definitions; see tool calling below. |
+| `tool_choice` | `string \| object \| null` | `null` | `"auto"`, `"none"`, `"required"`, or a specific function. |
 
 Message object:
 
 | Field | Type | Notes |
 |---|---|---|
 | `role` | `"system" \| "user" \| "assistant" \| "tool"` | Validated; anything else is a 422. |
-| `content` | `string` | Required. Array-of-parts content (text + image) is **not** supported. |
+| `content` | `string \| null` | Required except for an assistant turn that carries `tool_calls`. Array-of-parts content (text + image) is **not** supported. |
+| `name` | `string \| null` | Optional participant name, forwarded. |
+| `tool_calls` | `array \| null` | Assistant tool calls, forwarded to the model's chat template. |
+| `tool_call_id` | `string \| null` | Links a `tool` result back to the assistant call. |
 
-Extra fields such as `tools`, `tool_choice`, `response_format`, `stop`,
-`presence_penalty`, and `seed` are not part of the model and are ignored by
-Pydantic; they do not reach the engine. Tool calling is not implemented.
+Parameters that are absent or `null` are **not** forwarded, so the backend keeps
+its own defaults (for example `seed` stays unset rather than becoming 0).
 
 #### Non-streaming
 
@@ -109,6 +124,47 @@ The gateway returns the dictionary produced by
 The `model` value comes from `llama.cpp`; Vipera does not replace it with the
 registry alias. Use `/v1/models` or `/health` if you need the alias.
 
+#### Tool calling
+
+```bash
+curl http://127.0.0.1:8686/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "messages": [{"role": "user", "content": "Weather in Paris?"}],
+    "tools": [{
+      "type": "function",
+      "function": {
+        "name": "get_weather",
+        "parameters": {
+          "type": "object",
+          "properties": {"city": {"type": "string"}},
+          "required": ["city"]
+        }
+      }
+    }],
+    "tool_choice": "auto"
+  }'
+```
+
+When the model decides to call a tool, the assistant message contains
+`tool_calls` and `finish_reason` is `tool_calls`. Send the result back as a
+`tool` message with the matching `tool_call_id`:
+
+```json
+[
+  {"role": "user", "content": "Weather in Paris?"},
+  {"role": "assistant", "content": null, "tool_calls": [
+    {"id": "call_1", "type": "function",
+     "function": {"name": "get_weather", "arguments": "{\"city\":\"Paris\"}"}}
+  ]},
+  {"role": "tool", "tool_call_id": "call_1", "content": "22C sunny"}
+]
+```
+
+Whether the model calls tools at all depends on its chat template. Models
+trained for tool use (Hermes, Qwen, Llama 3.1+) work; a plain instruct model
+will usually answer in prose instead.
+
 #### Streaming
 
 ```bash
@@ -139,6 +195,12 @@ Details that matter when writing a client:
 - There is no `event:` field and no blank keep-alive frame; only `data:` lines.
 - The final content chunk may carry `finish_reason`; clients should not depend
   on which chunk contains it.
+- Tool calls stream as `delta.tool_calls` fragments. Concatenate
+  `function.arguments` per index, exactly as with the OpenAI API.
+- With `stream_options.include_usage: true`, a final frame with
+  `"choices": []` and `"usage"` is emitted before `[DONE]` when the backend
+  reports token counts. `llama-cpp-python` 0.3.x does not report usage for
+  streams, so the frame is omitted in that case.
 - If generation raises mid-stream, the HTTP status is already `200`. Vipera
   emits `data: {"error": {"message": "..."}}` and then `[DONE]`. OpenAI SDKs do
   not expect that frame; check the pipeline outside the SDK if you need to
@@ -221,7 +283,10 @@ shows them as they arrive.
 | `GET /v1/models` | Supported, single model |
 | `model` request field | Accepted, ignored |
 | `system`/`user`/`assistant` messages | Supported |
-| `tool` role and tool calls | Role accepted; tool calling not implemented |
+| `tool` role and tool calls | Supported (`tools`, `tool_choice`, `tool_calls` deltas) |
+| `stop`, `seed`, penalties, `logit_bias`, `logprobs` | Supported, forwarded to `llama.cpp` |
+| `response_format` (JSON mode) | Supported |
+| `stream_options.include_usage` | Emitted when the backend reports usage |
 | Multimodal content parts | Not supported |
 | `POST /v1/completions` | Not implemented |
 | `POST /v1/embeddings` | Not implemented |

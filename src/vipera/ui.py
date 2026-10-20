@@ -127,13 +127,26 @@ def animated_loading_bar(prefix: str = "INITIALIZING", duration: float = 1.2):
 
 
 def _wrap_block(text: str, width: int = 68) -> str:
+    """Wrap text without destroying the indentation of code blocks."""
     out = []
     for line in text.split("\n"):
         if not line:
             out.append(" " * width)
-        else:
-            for w in textwrap.wrap(line, width=width) or [""]:
-                out.append(f"{w:<{width}}")
+            continue
+        line = line.expandtabs(4)
+        stripped = line.lstrip()
+        indent = line[: len(line) - len(stripped)]
+        wrapper = textwrap.TextWrapper(
+            width=width,
+            initial_indent=indent,
+            subsequent_indent=indent,
+            replace_whitespace=False,
+            drop_whitespace=False,
+            break_long_words=True,
+            break_on_hyphens=False,
+        )
+        for w in wrapper.wrap(stripped) or [indent]:
+            out.append(f"{w:<{width}}")
     return "\n".join(out)
 
 
@@ -197,7 +210,7 @@ def typewriter_chat_stream(stream_generator, title_text: str = " AI "):
     tps = chunk_count / dt if dt > 0 else 0
     stat = Text("    ")
     stat.append("└─ ", style=C_BORDER)
-    stat.append(f"{chunk_count} chunks  ·  {tps:.1f} c/s  ·  {dt:.2f}s\n", style=C_DIM)
+    stat.append(f"{chunk_count} tokens  ·  {tps:.1f} tok/s  ·  {dt:.2f}s\n", style=C_DIM)
     console.print(stat)
     return full_response
 
@@ -245,7 +258,7 @@ def plain_chat_stream(stream_generator, title_text: str = " AI "):
     tps = chunk_count / dt if dt > 0 else 0
     stat = Text("    ")
     stat.append("└─ ", style=C_BORDER)
-    stat.append(f"{chunk_count} chunks  ·  {tps:.1f} c/s  ·  {dt:.2f}s\n", style=C_DIM)
+    stat.append(f"{chunk_count} tokens  ·  {tps:.1f} tok/s  ·  {dt:.2f}s\n", style=C_DIM)
     console.print(stat)
     return text
 

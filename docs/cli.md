@@ -184,20 +184,38 @@ Load a model and run the OpenAI-compatible HTTP server.
 | `-m`, `--model` | `default_model` | Registry alias to serve. Required if no default is set. |
 | `--host` | `config.host` (`127.0.0.1`) | Bind address. |
 | `--port`, `-p` | `config.port` (`8686`) | Bind port. |
-| `--profile` | `auto` | Planner profile; `speed` disables flash attention. Note this is **not** read from config. |
+| `--profile` | `auto` | Planner profile (`auto`, `cpu`, `gpu`, `lowmem`). Note this is **not** read from config. |
 | `--ctx` | `config.ctx` (`8192`) | Context size passed to the planner. |
+| `--bench` | off | Run the 20-token speed check **before** serving. This delays readiness, so it is opt-in. |
 
-Startup sequence: resolve model → print plan → construct `Engine` → optional
-quick benchmark (`show_bench_on_start`) → `uvicorn.run(log_level="warning")`.
+Startup sequence: resolve model → print plan → construct `Engine` →
+`uvicorn.run(log_level="warning")`. The gateway is ready as soon as uvicorn
+binds; no benchmark blocks it.
 
-The quick benchmark generates up to 20 tokens from a fixed prompt and labels the
-result `FAST` (≥20 t/s), `OK` (≥8 t/s), or `SLOW`. It is informational and never
-fails startup.
+`--bench` generates up to 20 tokens from a fixed prompt and labels the result
+`FAST` (≥20 t/s), `OK` (≥8 t/s), or `SLOW`. It is informational and never fails
+startup. Use `vipera bench run` for a real measurement across context sizes.
 
 If `uvicorn`/`fastapi` are missing, the CLI warns and drops into the chat REPL
 with the already-loaded engine instead of serving HTTP.
 
 Exit status is 1 when the model is unspecified, unknown, or fails to load.
+
+### `vipera serve stop`
+
+Stop a gateway that was started by `vipera serve start`. The running process
+writes a pid file (`$VIPERA_HOME/serve-<port>.pid`); `stop` reads it, refuses to
+signal a PID whose command line does not contain `vipera`, sends `SIGTERM`, and
+waits up to 10 seconds. `--force` escalates to `SIGKILL`.
+
+| Option | Default | Description |
+|---|---|---|
+| `--port`, `-p` | `config.port` | Port whose pid file should be used. |
+| `--force` | off | Kill if the process ignores `SIGTERM` for 10 seconds. |
+| `-y`, `--yes` | off | Skip the confirmation prompt. |
+
+Exit status is 1 when there is no pid file, the pid is gone, or the process
+cannot be identified as vipera.
 
 ### `vipera serve status`
 

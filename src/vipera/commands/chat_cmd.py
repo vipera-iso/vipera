@@ -82,7 +82,7 @@ def repl_loop(engine: Engine, typewriter: bool = False, chat_kwargs: dict | None
 
 @app.command("repl")
 def repl(
-    model: str = typer.Option(None, "--model", "-m", help="Model alias"),
+    model: str | None = typer.Option(None, "--model", "-m", help="Model alias"),
     typewriter: bool = typer.Option(
         False, "--typewriter", help="Animate output (slower, nicer for demos)"
     ),
@@ -102,7 +102,7 @@ def repl(
 @app.command("oneshot")
 def oneshot(
     prompt: str = typer.Argument(..., help="Prompt to send"),
-    model: str = typer.Option(None, "--model", "-m", help="Model alias"),
+    model: str | None = typer.Option(None, "--model", "-m", help="Model alias"),
     typewriter: bool = typer.Option(
         False, "--typewriter", help="Animate output (slower, nicer for demos)"
     ),

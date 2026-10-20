@@ -48,8 +48,9 @@ engine plus the model alias.
 3. `hardware.detect()` builds a `HardwareInfo`; `planner.plan()` produces a
    `Plan` from the model's stored metadata and the hardware profile.
 4. `Engine(plan, model_path)` loads the model. A boot panel prints the plan
-   (offloaded layers, KV cache type, flash attention), then an optional quick
-   speed check runs (`show_bench_on_start`).
+   (offloaded layers, KV cache type, flash attention). The gateway binds as
+   soon as `uvicorn` starts; the 20-token speed check only runs when
+   `serve start --bench` is passed.
 5. `server.build_app(engine, alias)` is handed to `uvicorn.run(...)`, binding
    the configured host/port. If FastAPI/uvicorn cannot be imported, the CLI
    falls back to the chat REPL with the loaded engine.
@@ -90,24 +91,32 @@ The algorithm, in order:
 
 1. **Metadata defaults.** Missing `n_layers` → 32; missing `size_bytes` → 4 GB.
 2. **Threads.** `cpu_threads = max(1, cpu_cores - 1)`.
-3. **mlock.** Enabled when free RAM minus model size is greater than 2 GB.
-   This leaves headroom so page-locking the weights does not push the machine
-   into swap.
+3. **mlock.** Enabled only when free RAM minus the host-resident weights and
+   host-resident KV cache exceeds 3 GB. Pinning with less headroom leaves
+   nothing for llama.cpp compute buffers and can trigger the OOM killer on a
+   no-swap machine.
 4. **VRAM budget.** `safe = max(0, vram_free - 1.0)` reserves 1 GB for the
-   display/driver, then 90% of that is treated as usable.
-5. **Layer placement.** `layer_gb = size_gb / n_layers`;
-   `gpu_layers = min(n_layers, floor(usable / layer_gb))`. This assumes uniform
-   layer sizes, which is a deliberate simplification.
-6. **CPU-only path** (`gpu_layers == 0`): flash attention and KQV offload off,
-   `n_batch = min(n_batch, 128)`, KV cache forced to `f16`, and if total RAM is
-   under 8 GB the context is capped at 2048.
-7. **GPU path:** flash attention on when total VRAM exceeds 4 GB and the
-   profile is not `speed`; KQV offload on; `n_batch = min(n_batch, 512)`.
-   The note distinguishes full and hybrid offload.
+   display/driver.
+5. **Layer placement.** llama.cpp allocates the KV cache per layer: only the
+   offloaded layers keep their slice of KV in VRAM. So
+   `per_layer_kv = kv_gb / n_layers`, `layer_gb = size_gb / n_layers`, and
+   `gpu_layers = min(n_layers, floor(safe / (layer_gb + per_layer_kv)))`.
+   Subtracting the whole KV cache before offloading anything would report 0
+   layers for models that actually fit a useful hybrid split. Uniform layer
+   sizes remain a deliberate simplification.
+6. **CPU-only path** (`gpu_layers == 0`): KQV offload off,
+   `n_batch = min(n_batch, 128)`, and the requested KV type is kept. Flash
+   attention is enabled whenever that type is quantized (llama.cpp requires
+   it), so a 64K context does not silently become a 10 GB f16 cache. If total
+   RAM is under 8 GB the context is capped at 2048.
+7. **GPU path:** flash attention on when KV is quantized or total VRAM exceeds
+   4 GB; KQV offload on; `n_batch = min(n_batch, 512)`. The note distinguishes
+   full and hybrid offload.
 
-`profile` currently affects only the flash-attention decision. The planner does
-not emit MoE-specific flags (`--n-cpu-moe` or equivalents); MoE models are
-placed by the same per-layer arithmetic.
+`profile=cpu` forces zero offload and `profile=lowmem` returns a fixed
+2048-context plan; the other profiles only influence the placement note. The
+planner does not emit MoE-specific flags (`--n-cpu-moe` or equivalents); MoE
+models are placed by the same per-layer arithmetic.
 
 ## GGUF optimization
 
@@ -135,6 +144,12 @@ without creating anything.
 
 ## Engine
 
+Before loading, `Engine.__init__` checks `Plan.ram_estimate_gb` against
+`psutil.virtual_memory().available` and raises `RuntimeError` with a concrete
+suggestion when the plan clearly will not fit. This is a preflight, not a
+guarantee: an actual OOM is a `SIGKILL` and cannot be caught by the fallback
+logic below.
+
 `Engine.__init__` loads `llama_cpp.Llama` with `n_gpu_layers`, `n_ctx`,
 `n_threads`, `n_batch`, `n_ubatch=min(n_batch, 512)`, `flash_attn`,
 `offload_kqv`, `type_k`/`type_v` (from `_KV_TYPES`), `use_mmap=True`,
@@ -144,15 +159,15 @@ Two retries exist, and they are independent:
 
 1. **mlock retry** (inside `_load`): if loading with `use_mlock` raises, retry
    once with `use_mlock=False`. Common on systems with a low `RLIMIT_MEMLOCK`.
-2. **GPU→CPU fallback** (in `__init__`): if the plan fails outright, rebuild a
-   conservative plan — `gpu_layers=0`, flash attention and KQV offload off,
-   `kv_cache="f16"`, `n_batch=128`, `context=min(context, 2048)` — and load that.
-   A warning is printed; the successful plan replaces `self.plan`, so callers
-   and status output describe what actually ran.
+2. **GPU→CPU fallback** (in `__init__`), in stages: first retry on CPU with the
+   caller's `context` and `kv_cache` intact (`gpu_layers=0`, KQV offload off,
+   `n_batch` capped at 128); if that fails, retry at
+   `context=min(context, 2048)`; only as a last resort force `kv_cache="f16"`
+   with flash attention off. Every reduction prints a warning, and dropping
+   below the requested context says so explicitly. The successful plan
+   replaces `self.plan`, so callers and status output describe what ran.
 
-If both loads fail, the engine raises `RuntimeError`. Note that the message for
-the CPU-failure case is currently in Vietnamese while the rest of the runtime
-output is English.
+If every load fails, the engine raises `RuntimeError`.
 
 `chat()` forwards `messages`, `stream`, and sampling parameters
 (`temperature`, `max_tokens`, `top_p`, `repeat_penalty`, with defaults
@@ -165,11 +180,16 @@ unknown name maps to `None`, which lets `llama.cpp` use its default.
 ## Concurrency model
 
 - One process, one loaded model, one `Engine`.
-- One `threading.Lock` serializes every completion, streaming or not.
-- Non-streaming requests occupy a Starlette threadpool worker while waiting for
-  the lock; streaming requests hold the lock until the last token.
-- There is no request queue limit, cancellation, timeout, or per-client
-  accounting. A slow generation blocks other clients.
+- One `asyncio.Lock` serializes every completion, streaming or not.
+- The sync engine is driven through `asyncio.to_thread`, so the event loop stays
+  free between chunks. Streaming and non-streaming requests hold the lock until
+  generation finishes.
+- If a client disconnects while a worker thread is inside `next()` (or inside a
+  non-streaming call), the lock is not released until that thread returns; the
+  stream iterator is closed then too. This prevents a second request from
+  entering the same llama.cpp context concurrently.
+- There is no request queue limit, timeout, or per-client accounting. A slow
+  generation delays other clients.
 
 This is intentional for a single-user local gateway. If you need parallel
 decoding, you need a different serving stack.

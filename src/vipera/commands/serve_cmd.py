@@ -1,12 +1,15 @@
+import os
 import socket
 import time
+from pathlib import Path
 
+import psutil
 import typer
 from rich import box
 from rich.panel import Panel
 from rich.text import Text
 
-from vipera.config import load_config
+from vipera.config import VIPERA_HOME, load_config
 from vipera.engine import Engine
 from vipera.hardware import detect
 from vipera.planner import plan
@@ -20,7 +23,6 @@ from vipera.ui import (
     C_SUCCESS,
     C_TEXT,
     C_YELLOW,
-    animated_loading_bar,
     console,
 )
 
@@ -30,6 +32,10 @@ def _resolve_option(val, default):
     if isinstance(val, typer.models.OptionInfo):
         return default
     return val if val is not None else default
+
+
+def _pid_file(port: int) -> Path:
+    return VIPERA_HOME / f"serve-{port}.pid"
 
 
 def _quick_bench(engine: Engine) -> None:
@@ -88,11 +94,16 @@ app = typer.Typer()
 
 @app.command("start")
 def start(
-    model: str = typer.Option(None, "--model", "-m"),
+    model: str | None = typer.Option(None, "--model", "-m"),
     host: str = typer.Option(None, "--host"),
     port: int = typer.Option(None, "--port", "-p"),
     profile: str = typer.Option("auto", "--profile"),
     ctx: int = typer.Option(None, "--ctx"),
+    bench: bool = typer.Option(
+        False,
+        "--bench",
+        help="Run a 20-token speed check before serving (delays readiness)",
+    ),
 ):
     """Start the HTTP Gateway."""
     cfg = load_config()
@@ -101,6 +112,7 @@ def start(
     port = _resolve_option(port, cfg["port"])
     profile = _resolve_option(profile, "auto")
     ctx = _resolve_option(ctx, cfg["ctx"])
+    bench = _resolve_option(bench, False)
 
     if not model:
         console.print(f"[{C_RED}] ✗ No model specified. Use --model <name>[/]")
@@ -169,9 +181,11 @@ def start(
         console.print(f"[{C_RED}] ✗ {e}[/]")
         raise typer.Exit(1) from e
 
-    animated_loading_bar("KERNEL INIT", 1.2)
-
-    if cfg.get("show_bench_on_start", True):
+    # The gateway is ready as soon as uvicorn binds. The old unconditional
+    # 20-token speed check ran here and cost minutes on slow hardware (a 0.2
+    # tok/s model needed ~100s before the first request could be served), and
+    # the loading bar added a fixed 1.2s sleep. The check is now opt-in.
+    if bench:
         _quick_bench(engine)
 
     try:
@@ -197,6 +211,7 @@ def start(
 
         console.print(Panel(ready, border_style=C_SUCCESS, box=box.ROUNDED, padding=(0, 1)))
 
+        _pid_file(port).write_text(str(os.getpid()))
         uvicorn.run(fastapi_app, host=host, port=port, log_level="warning")
 
     except ImportError:
@@ -205,6 +220,7 @@ def start(
 
         repl_loop(engine, chat_kwargs=_chat_kwargs(cfg))
     finally:
+        _pid_file(port).unlink(missing_ok=True)
         engine.close()
 
 
@@ -220,3 +236,65 @@ def status():
         console.print(f"[{C_GREEN}] ● ONLINE[/]  — http://{cfg['host']}:{cfg['port']}")
     else:
         console.print(f"[{C_RED}] ● OFFLINE[/] — port {cfg['port']}")
+
+
+@app.command("stop")
+def stop(
+    port: int = typer.Option(None, "--port", "-p", help="Gateway port (default: config)"),
+    force: bool = typer.Option(False, "--force", help="SIGKILL if SIGTERM is ignored"),
+    yes: bool = typer.Option(False, "--yes", "-y", help="Do not ask for confirmation"),
+):
+    """Stop a gateway started by `vipera serve start`."""
+    cfg = load_config()
+    port = _resolve_option(port, cfg["port"])
+    pid_file = _pid_file(port)
+
+    if not pid_file.exists():
+        console.print(
+            f"[{C_RED}] ● OFFLINE[/] — no pid file for port {port}. "
+            f"If it is still running, kill it manually."
+        )
+        raise typer.Exit(1)
+
+    try:
+        pid = int(pid_file.read_text().strip())
+    except (OSError, ValueError):
+        pid_file.unlink(missing_ok=True)
+        console.print(f"[{C_RED}] ✗ unreadable pid file for port {port}; removed.[/]")
+        raise typer.Exit(1) from None
+
+    try:
+        proc = psutil.Process(pid)
+    except psutil.NoSuchProcess:
+        pid_file.unlink(missing_ok=True)
+        console.print(f"[{C_YELLOW}] ⚠ stale pid file (pid {pid} is gone); removed.[/]")
+        raise typer.Exit(1) from None
+
+    # Guard against a recycled PID: only stop a process that looks like vipera.
+    try:
+        cmdline = " ".join(proc.cmdline())
+    except psutil.Error:
+        cmdline = ""
+    if "vipera" not in cmdline.lower():
+        console.print(
+            f"[{C_RED}] ✗ pid {pid} does not look like vipera; refusing to stop it.[/]"
+        )
+        raise typer.Exit(1)
+
+    if not yes and not typer.confirm(f"Stop gateway on port {port} (pid {pid})?"):
+        raise typer.Abort()
+
+    proc.terminate()
+    try:
+        proc.wait(timeout=10)
+    except psutil.TimeoutExpired:
+        if not force:
+            console.print(
+                f"[{C_YELLOW}] ⚠ pid {pid} did not stop within 10s; retry with --force.[/]"
+            )
+            raise typer.Exit(1) from None
+        proc.kill()
+        proc.wait(timeout=5)
+
+    pid_file.unlink(missing_ok=True)
+    console.print(f"[{C_GREEN}] ✓ STOPPED[/] — port {port} (pid {pid})")

@@ -67,6 +67,9 @@ def _read_meta(path: Path, name: str | None = None) -> dict:
         meta["quant"] = m.group(1).upper()
 
     try:
+        # Imported here (not only at module level) so tests and callers can
+        # substitute the analyzer and so the optional gguf dependency is not
+        # required merely to import this module.
         from vipera.gguf_analyzer import analyze_gguf
 
         am = analyze_gguf(str(path))["metadata"]
@@ -82,8 +85,11 @@ def _read_meta(path: Path, name: str | None = None) -> dict:
         meta["head_dim"] = int(am.get("head_dim") or 0)
         if meta["quant"] == "?" and am.get("dominant_quant"):
             meta["quant"] = am["dominant_quant"]
-    except Exception:  # analyzer is best-effort
-        pass
+    except Exception as exc:  # analyzer is best-effort, but never silent
+        console.print(
+            f"[{C_YELLOW}] ⚠ Could not read GGUF metadata from {path.name}: {exc}[/]\n"
+            f"[{C_DIM}]  Planner will fall back to worst-case KV/architecture estimates.[/]"
+        )
 
     return meta
 

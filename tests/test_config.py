@@ -79,6 +79,29 @@ def test_coerce_strict_rejects_unknown_kv_cache():
         cfg_mod._coerce_strict({"kv_cache": "q9_z"})
 
 
+@pytest.mark.parametrize("value", ["maybe", "truthy", "2", "nope"])
+def test_coerce_strict_rejects_garbage_booleans(value):
+    # Lenient loading treats anything unknown as False; a command writing the
+    # config back must not silently flip a flag the user mistyped.
+    with pytest.raises(ValueError, match="flash_attn"):
+        cfg_mod._coerce_strict({"flash_attn": value})
+
+
+@pytest.mark.parametrize("value, expected", [
+    (True, True), (False, False),
+    ("true", True), ("YES", True), ("on", True), ("1", True),
+    ("false", False), ("no", False), ("off", False), ("0", False),
+], ids=repr)
+def test_coerce_strict_parses_booleans(value, expected):
+    assert cfg_mod._coerce_strict({"flash_attn": value})["flash_attn"] is expected
+
+
+def test_save_config_is_atomic(isolated_home):
+    cfg_mod.save_config({"port": 9000})
+    assert not (isolated_home / "config.json.tmp").exists()
+    assert json.loads((isolated_home / "config.json").read_text())["port"] == 9000
+
+
 def test_invalid_kv_cache_on_disk_is_repaired(isolated_home):
     # The user-facing path: a hand-edited config with a typo must not crash
     # startup, and must not silently hand an unknown type to the engine.

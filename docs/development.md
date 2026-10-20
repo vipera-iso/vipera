@@ -50,7 +50,8 @@ Test layout:
 
 | File | Covers |
 |---|---|
-| `tests/test_planner.py` | CPU-only, full-GPU, hybrid, and low-RAM planning. Uses a synthetic `HardwareInfo`. |
+| `tests/test_planner.py` | CPU-only, full-GPU, hybrid, per-layer VRAM budgeting, and low-RAM planning. Uses a synthetic `HardwareInfo`. |
+| `tests/test_engine.py` | Staged GPU→CPU fallback using a fake `llama_cpp.Llama`. |
 | `tests/test_server.py` | `/health`, `/v1/models`, non-streaming and SSE completion against a fake engine. |
 | `tests/test_config.py` | Defaults, save/reload, type coercion, corrupt-file fallback. |
 | `tests/test_registry.py` | Add/get/list/remove. |
