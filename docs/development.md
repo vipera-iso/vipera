@@ -34,7 +34,7 @@ not.
 Verify the install:
 
 ```bash
-vipera --version          # vipera 1.0.0
+vipera --version          # vipera 1.1.0
 vipera help
 vipera system doctor
 ```

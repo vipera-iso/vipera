@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.1.0] - 2026-10-20
+
 ### Added
 - **Tool calling** — `/v1/chat/completions` accepts `tools` and `tool_choice`,
   forwards `tool_calls` back in both streaming and non-streaming responses, and
@@ -58,5 +60,6 @@ First public release.
 - The `model` field in `/v1/chat/completions` is ignored; one gateway serves
   one model.
 
-[Unreleased]: https://github.com/vipera-iso/vipera/compare/v1.0.0...HEAD
+[Unreleased]: https://github.com/vipera-iso/vipera/compare/v1.1.0...HEAD
+[1.1.0]: https://github.com/vipera-iso/vipera/releases/tag/v1.1.0
 [1.0.0]: https://github.com/vipera-iso/vipera/releases/tag/v1.0.0

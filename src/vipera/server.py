@@ -7,6 +7,8 @@ from fastapi import FastAPI, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field, model_validator
 
+from vipera import __version__
+
 _MAX_TOKENS = 32_768
 _MAX_MESSAGES = 200
 _MAX_PROMPT_CHARS = 500_000
@@ -57,7 +59,7 @@ class ChatRequest(BaseModel):
 
 
 def build_app(engine, model_name: str) -> FastAPI:
-    app = FastAPI(title="Vipera Gateway", version="1.0.0")
+    app = FastAPI(title="Vipera Gateway", version=__version__)
     lock = asyncio.Lock()
 
     @app.get("/health")

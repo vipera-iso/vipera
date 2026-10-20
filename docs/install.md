@@ -131,7 +131,7 @@ vipera system doctor
 
 Expected:
 
-- `vipera --version` prints `vipera 1.0.0`.
+- `vipera --version` prints `vipera 1.1.0`.
 - `llama-cpp-python` shows `PASS`.
 - `gguf` shows `PASS`.
 - The GPU line shows `WARN` on a CPU-only machine. That is normal.
