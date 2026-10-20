@@ -1,0 +1,32 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="320" viewBox="0 0 1280 320" role="img" aria-label="Vipera banner">
+  <title>Vipera — local AI gateway</title>
+  <defs>
+    <pattern id="grid" width="32" height="32" patternUnits="userSpaceOnUse"
+             patternTransform="rotate(45)">
+      <path d="M0 0 H32" stroke="#F1F5F9" stroke-opacity="0.04" stroke-width="1"/>
+      <path d="M0 0 V32" stroke="#F1F5F9" stroke-opacity="0.04" stroke-width="1"/>
+    </pattern>
+  </defs>
+
+  <rect width="1280" height="320" fill="#0B0F14"/>
+  <rect width="1280" height="320" fill="url(#grid)"/>
+
+  <!-- logo mark, 128x128, 64px padding, vertically centred -->
+  <g transform="translate(64, 96)">
+    <rect width="128" height="128" rx="24" fill="#0B0F14" stroke="#1E293B"/>
+    <g transform="scale(0.25)">
+      <path d="M136 140 L256 372 L376 140" fill="none" stroke="#F1F5F9" stroke-width="34"
+            stroke-linecap="round" stroke-linejoin="round"/>
+      <path d="M256 372 L256 402" fill="none" stroke="#F1F5F9" stroke-width="16"
+            stroke-linecap="round"/>
+      <path d="M256 402 C256 432 222 436 222 464 M256 402 C256 432 290 436 290 464"
+            fill="none" stroke="#22D3EE" stroke-width="12" stroke-linecap="round"/>
+    </g>
+  </g>
+
+  <text x="232" y="166" font-family="Inter, 'DejaVu Sans', sans-serif" font-size="72"
+        font-weight="600" letter-spacing="-1.5" fill="#F1F5F9">Vipera</text>
+  <path d="M234 186 H402" stroke="#22D3EE" stroke-width="2"/>
+  <text x="234" y="226" font-family="Inter, 'DejaVu Sans', sans-serif" font-size="24"
+        fill="#94A3B8">Local AI gateway · OpenAI-compatible · GGUF-native</text>
+</svg>

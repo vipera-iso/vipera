@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512" role="img" aria-label="Vipera logo">
+  <title>Vipera</title>
+  <rect width="512" height="512" rx="96" fill="#0B0F14"/>
+  <!-- V formed by two fangs -->
+  <path d="M136 140 L256 372 L376 140" fill="none" stroke="#F1F5F9" stroke-width="34"
+        stroke-linecap="round" stroke-linejoin="round"/>
+  <!-- snake tongue curl below the apex -->
+  <path d="M256 372 L256 402" fill="none" stroke="#F1F5F9" stroke-width="16"
+        stroke-linecap="round"/>
+  <path d="M256 402 C256 432 222 436 222 464 M256 402 C256 432 290 436 290 464"
+        fill="none" stroke="#22D3EE" stroke-width="12" stroke-linecap="round"/>
+</svg>
