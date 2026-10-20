@@ -2,7 +2,7 @@
 
 ```python
 # __init__.py
-__version__ = "1.1.0"
+__version__ = "1.2.0"
 
 # cli.py
 import typer
@@ -297,7 +297,10 @@ def run(
                 console.print(f"[{C_RED}] ✗ Benchmark error at ctx={c}: {result['error']}[/]")
                 continue
 
-            layers_total = int(m["meta"].get("n_layers") or 0) or max(p.gpu_layers, 1)
+            # Report the plan the engine actually loaded: a GPU load can fail
+            # and fall back to CPU, which would otherwise still print the
+            # optimistic planned layer count.
+            layers_total = int(m["meta"].get("n_layers") or 0) or max(engine.plan.gpu_layers, 1)
 
             gen_tok_str = str(result["gen_tok"])
             if not result.get("token_count_is_exact"):
@@ -305,7 +308,7 @@ def run(
 
             t.add_row(
                 str(c),
-                f"{p.gpu_layers}/{layers_total}",
+                f"{engine.plan.gpu_layers}/{layers_total}",
                 str(result["prompt_tok"]),
                 f"{result['ttft_ms']:.0f} ms",
                 f"{result['prompt_tps']:.1f}",
@@ -515,6 +518,7 @@ def _read_meta(path: Path, name: str | None = None) -> dict:
         "n_heads": 0,
         "n_kv_heads": 0,
         "head_dim": 0,
+        "layer_bytes": 0,
     }
 
     m = _QUANT_RE.search(name or path.name)
@@ -527,7 +531,8 @@ def _read_meta(path: Path, name: str | None = None) -> dict:
         # required merely to import this module.
         from vipera.gguf_analyzer import analyze_gguf
 
-        am = analyze_gguf(str(path))["metadata"]
+        analysis = analyze_gguf(str(path))
+        am = analysis["metadata"]
         meta["n_layers"] = int(am.get("n_layers") or 0)
         meta["n_params"] = int(am.get("n_params") or 0)
         meta["context_length"] = int(am.get("context_length") or 0)
@@ -538,6 +543,17 @@ def _read_meta(path: Path, name: str | None = None) -> dict:
         meta["n_heads"] = int(am.get("n_heads") or 0)
         meta["n_kv_heads"] = int(am.get("n_kv_heads") or 0)
         meta["head_dim"] = int(am.get("head_dim") or 0)
+        # Size of one repeating transformer layer, excluding the non-repeating
+        # tensors (token_embd, output.weight, ...). The planner budgets VRAM per
+        # layer from this; size_bytes/n_layers would charge those tensors to
+        # every layer and offload one or two layers fewer than actually fit.
+        per_layer = [
+            size
+            for layer, size in (analysis.get("layer_distribution") or {}).items()
+            if isinstance(layer, int)
+        ]
+        if per_layer:
+            meta["layer_bytes"] = int(sum(per_layer) / len(per_layer))
         if meta["quant"] == "?" and am.get("dominant_quant"):
             meta["quant"] = am["dominant_quant"]
     except Exception as exc:  # analyzer is best-effort, but never silent
@@ -2571,6 +2587,13 @@ class Plan:
 
 _VALID_PROFILES = ("auto", "cpu", "gpu", "lowmem")
 
+# llama.cpp allocates CUDA compute buffers for the GPU-resident layers on top of
+# their weights and KV. Measured on a GTX 1650 / 14B-Q4 / 8K f16: 11 layers
+# (2.37 GB) load, 12 layers (2.59 GB) fail to create the context. Keeping a
+# fixed slice free stops the planner from planning a split the GPU cannot run;
+# the engine's only fallback is CPU-only, which is much slower than 11 layers.
+_GPU_COMPUTE_RESERVE_GB = 0.3
+
 # Bytes per element for each supported kv_cache dtype.
 _KV_BYTES_PER_ELEM = {
     "f32": 4.0, "f16": 2.0, "q8_0": 1.0, "q4_0": 0.5, "q4_1": 0.5,
@@ -2645,7 +2668,8 @@ def plan(
             note="CPU ONLY (Low Memory Profile)",
         )
 
-    safe_vram = max(0.0, hw.vram_free_gb - 1.0)  # reserve 1 GB for OS/driver
+    # 1 GB for the OS/display driver, plus room for llama.cpp compute buffers.
+    safe_vram = max(0.0, hw.vram_free_gb - 1.0 - _GPU_COMPUTE_RESERVE_GB)
 
     # llama.cpp allocates the KV cache per layer: only the layers offloaded to
     # the GPU take their slice of KV with them, the rest stays in system RAM.
@@ -2655,7 +2679,15 @@ def plan(
     kv_cache_gb = _estimate_kv_cache_gb(meta, ctx, kv_cache)
     per_layer_kv_gb = kv_cache_gb / n_layers if n_layers else 0.0
 
-    layer_gb = model_size_gb / n_layers if n_layers else 0.4
+    # Repeating-layer weights, when the GGUF index is available. Embeddings and
+    # output.weight follow no layer to the GPU: on a 14B/Q4 model they are ~1 GB
+    # that size_bytes/n_layers wrongly charges to every layer, which under-
+    # offloads by a layer or two on a small card.
+    layer_bytes = int(meta.get("layer_bytes") or 0)
+    if layer_bytes > 0:
+        layer_gb = layer_bytes / 1024**3
+    else:
+        layer_gb = model_size_gb / n_layers if n_layers else 0.4
     layer_total_gb = layer_gb + per_layer_kv_gb
     gpu_layers = 0
 
@@ -3282,5 +3314,4 @@ def pick_model(title: str = "SELECT A MODEL") -> str:
         raise typer.Exit(1)
 
     return installed[choice - 1]["name"]
-
 ```
