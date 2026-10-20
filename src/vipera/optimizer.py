@@ -20,7 +20,16 @@ _TOOL_NAMES = {
 
 _QUALITY_ORDER = ("Q8_0", "Q6_K", "Q5_K_M", "Q4_K_M", "Q3_K_M", "Q2_K")
 
+# Bytes-per-weight from gguf's block table: bytes * 8 / elements. Keep these
+# exact (they drive --target-size math), not rounded to the nominal bit width.
 _QUANT_BPW = {
+    "NVFP4": 4.5,  # 36 B / 64 elems
+    "MXFP4": 4.25,  # 17 B / 32 elems
+    "TQ2_0": 2.0625,  # 66 B / 256 elems
+    "TQ1_0": 1.6875,  # 54 B / 256 elems
+    "Q1_0": 1.125,  # 18 B / 128 elems
+    # Q2_0 is not in gguf 0.19 yet; this is the nominal 2-bit estimate.
+    "Q2_0": 2.2,
     "Q8_0": 8.5,
     "Q6_K": 6.14,
     "Q5_K_M": 5.33,

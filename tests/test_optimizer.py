@@ -131,3 +131,29 @@ def test_default_and_unique_output_paths(tmp_path):
     unique = unique_output_path(default)
     assert unique.name == "model-vipera-q4_k_m-2.gguf"
     assert unique.exists() is False
+
+
+def test_size_estimate_uses_block_table_bpw_for_2026_quants():
+    # bytes-per-weight, not the nominal bit width: 36 B / 64 elems = 4.5.
+    nvfp4 = estimate_size_for_quant(
+        current_size_bytes=4_800_000_000, current_quant="Q4_K_M", target_quant="NVFP4"
+    )
+    assert nvfp4 == pytest.approx(4_800_000_000 * 4.5 / 4.58)
+
+    q1_0 = estimate_size_for_quant(
+        current_size_bytes=4_800_000_000, current_quant="Q4_K_M", target_quant="Q1_0"
+    )
+    assert q1_0 == pytest.approx(4_800_000_000 * 1.125 / 4.58)
+    assert q1_0 < 4_800_000_000 * 0.3
+
+
+def test_estimate_quant_from_nvfp4_current_size():
+    choice = estimate_quant_for_target(
+        current_size_bytes=4_800_000_000,
+        current_quant="NVFP4",
+        target_size_bytes=6_000_000_000,
+    )
+    # Target is larger than the file, so the current quant is kept and sized by
+    # the block-table bpw (4.5) rather than the generic Q4 fallback (4.58).
+    assert choice.quant == "NVFP4"
+    assert choice.target_bpw == pytest.approx(4.5)
