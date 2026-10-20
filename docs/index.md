@@ -22,6 +22,7 @@ details.
 | [benchmarks.md](benchmarks.md) | Reference measurements, method, and when placement actually helps. |
 | [comparison.md](comparison.md) | Row-by-row comparison with Ollama, `llama.cpp/server`, and LM Studio. |
 | [development.md](development.md) | Dev setup, tests, lint/type checks, CI, release process, demo GIF. |
+| [design/llama-server-backend.md](design/llama-server-backend.md) | Proposal (not implemented): subprocess `llama-server` backend, DFlash speculative decoding, draft validation, migration. |
 
 Supporting files in the repository root:
 
@@ -46,6 +47,9 @@ Supporting files in the repository root:
 
 **I want to change the code.**
 [development.md](development.md) → [architecture.md](architecture.md#module-map).
+
+**I want to know where speculative decoding is going.**
+[design/llama-server-backend.md](design/llama-server-backend.md).
 
 ## Documentation conventions
 
