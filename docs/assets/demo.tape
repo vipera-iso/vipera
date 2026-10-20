@@ -1,6 +1,8 @@
-# Regenerate docs/assets/demo.gif with: make assets
+# Regenerate docs/assets/demo.gif with `make demo` from the repository root.
 # Requires: vhs, ttyd, jq, and the qwen2.5-0.5b model registered locally
 # (vipera model search, or vipera model import <path>).
+# No `cd` here on purpose: vhs inherits the invoker's working directory, so the
+# tape works on any clone instead of one hard-coded home path.
 Output docs/assets/demo.gif
 Set Shell "bash"
 Set FontSize 16
@@ -12,11 +14,6 @@ Set TypingSpeed 35ms
 Set PlaybackSpeed 1.5
 Set Framerate 15
 Set CursorBlink false
-
-Hide
-Type "cd ~/vipera"
-Enter
-Show
 
 Type "vipera --version"
 Enter
