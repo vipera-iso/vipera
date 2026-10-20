@@ -1,0 +1,41 @@
+name: Release check
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  version:
+    name: Version metadata
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Check pyproject and vipera.__version__ agree
+        env:
+          PYTHONPATH: src
+        run: |
+          python - <<'PY'
+          import pathlib
+          import tomllib
+
+          import vipera
+
+          declared = tomllib.loads(
+              pathlib.Path("pyproject.toml").read_text()
+          )["project"]["version"]
+          package = vipera.__version__
+          if declared != package:
+              raise SystemExit(
+                  f"version drift: pyproject.toml={declared!r}, "
+                  f"vipera.__version__={package!r}"
+              )
+          print(f"version metadata OK: {declared}")
+          PY
