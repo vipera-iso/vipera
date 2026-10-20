@@ -4,7 +4,7 @@ on:
   push:
     branches: [main]
     paths:
-      - 'docs/demo.tape'
+      - 'docs/assets/demo.tape'
       - 'src/**'
   workflow_dispatch:
 
@@ -17,14 +17,14 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install vhs, ffmpeg, gifsicle
+      - name: Install vhs, ffmpeg, figlet, gifsicle
         run: |
           sudo mkdir -p /etc/apt/keyrings
           curl -fsSL https://repo.charm.sh/apt/gpg.key | sudo gpg --dearmor -o /etc/apt/keyrings/charm.gpg
           echo "deb [signed-by=/etc/apt/keyrings/charm.gpg] https://repo.charm.sh/apt/ * *" \
             | sudo tee /etc/apt/sources.list.d/charm.list
           sudo apt update
-          sudo apt install -y vhs ffmpeg gifsicle
+          sudo apt install -y vhs ffmpeg figlet gifsicle
 
       - name: Install JetBrains Mono Nerd Font
         run: |
@@ -39,22 +39,24 @@ jobs:
           python -m venv .venv
           .venv/bin/pip install -U pip
           .venv/bin/pip install -e ".[llama,gguf]"
+          # $GITHUB_PATH appends without clobbering the runner's system PATH
+          # (the env.PATH context is empty, so prefixing PATH with it drops
+          # /usr/bin and every system command — mkdir included — goes missing).
+          echo "${{ github.workspace }}/.venv/bin" >> "$GITHUB_PATH"
 
       - name: Record GIF
-        env:
-          PATH: ${{ github.workspace }}/.venv/bin:${{ env.PATH }}
         run: |
           mkdir -p ~/.vipera/models
-          # Import a small model so `vipera serve start` succeeds in the tape.
-          # CI does not ship a .gguf — the tape falls back gracefully to showing help.
-          vhs docs/demo.tape || true
+          # The tape needs a model registered as qwen2.5-0.5b-instruct-q4_k_m;
+          # CI does not download one yet, so recording here is best-effort.
+          vhs docs/assets/demo.tape || true
 
       - name: Compress if needed
         run: |
-          if [ -f docs/images/demo.gif ]; then
-            size_kb=$(du -k docs/images/demo.gif | cut -f1)
-            if [ "$size_kb" -gt 3500 ]; then
-              gifsicle -O3 --lossy=80 --colors 128 docs/images/demo.gif -o docs/images/demo.gif
+          if [ -f docs/assets/demo.gif ]; then
+            size_kb=$(du -k docs/assets/demo.gif | cut -f1)
+            if [ "$size_kb" -gt 1000 ]; then
+              gifsicle -O3 --lossy=80 --colors 128 docs/assets/demo.gif -o docs/assets/demo.gif
             fi
           fi
 
@@ -62,7 +64,7 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add docs/images/demo.gif
+          git add docs/assets/demo.gif
           if git diff --staged --quiet; then
             echo "No changes"
           else

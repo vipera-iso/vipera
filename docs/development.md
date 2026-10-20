@@ -136,25 +136,43 @@ gh release create vX.Y.Z --notes-from-tag
 
 ## Demo GIF
 
-The README embeds `docs/images/demo.gif`, recorded from `docs/demo.tape` with
-[VHS](https://github.com/charmbracelet/vhs).
+The README embeds `docs/assets/demo.gif`, recorded from
+`docs/assets/demo.tape` with [VHS](https://github.com/charmbracelet/vhs). The
+tape opens with a `figlet -f block` wordmark, so `figlet` has to be installed
+for the first frame to render.
 
 ```bash
 # Arch
-sudo pacman -S vhs ffmpeg gifsicle ttf-jetbrains-mono-nerd
+sudo pacman -S vhs ffmpeg figlet gifsicle ttf-jetbrains-mono-nerd
 fc-cache -f
 
+# Debian/Ubuntu (vhs itself needs the Charm apt repository)
+sudo apt install figlet
+
 # macOS
-brew install vhs ffmpeg gifsicle
+brew install vhs ffmpeg figlet gifsicle
 brew install --cask font-jetbrains-mono-nerd-font
 
-vhs docs/demo.tape
+make demo
 ```
 
-Target: under 15 seconds, under 3 MB, terminal width around 110 columns.
-`.github/workflows/vhs.yml` re-records and commits the GIF when `docs/demo.tape`
-or `src/**` changes on `main`, compressing with `gifsicle` when it exceeds
-3.5 MB.
+`make demo` runs the tape twice over: `vhs` records `docs/assets/demo-raw.mp4` at
+1800x1200 with a 32px font, then `ffmpeg` downscales it to 900x600 with lanczos
+and a 128-colour palette. Recording directly at 900x600 works but leaves grey
+fringes on every glyph; rendering at 2x and resampling is what makes the text
+crisp when the README shows it at 720px. Running `vhs docs/assets/demo.tape` by
+hand only produces the intermediate MP4. If a recording runs long enough that
+the GIF would pass 950 KiB, the target silently re-encodes at 96 colours and
+fails only if it still exceeds 1000 KB.
+
+Recording needs a model registered as `qwen2.5-0.5b-instruct-q4_k_m`;
+`vipera serve start` in the tape fails without one, and the GIF then stops
+before the request. Target: under 17 seconds, under 1 MB, terminal width
+around 110 columns.
+
+There is no CI job that re-records the GIF. `.github/workflows/vhs.yml` still
+lists the pre-move paths and has no model to load, so treat recording as a
+local, manual step.
 
 ## Changing the docs
 
