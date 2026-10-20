@@ -37,6 +37,10 @@ jobs:
       - run: pip install -e ".[dev]"
       - run: pytest -q
       - name: Smoke-test CLI
+        env:
+          # Windows runners default to cp1252; the CLI prints Unicode box
+          # drawing, so give Python a UTF-8 stream when output is piped.
+          PYTHONIOENCODING: utf-8
         run: |
           vipera --version
           vipera help
