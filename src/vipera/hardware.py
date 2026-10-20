@@ -20,8 +20,7 @@ def detect() -> HardwareInfo:
         import psutil
     except ImportError as exc:
         raise RuntimeError(
-            "psutil is required for hardware detection. "
-            "Install it with: pip install psutil"
+            "psutil is required for hardware detection. Install it with: pip install psutil"
         ) from exc
 
     cores = psutil.cpu_count(logical=False) or 1
@@ -55,9 +54,12 @@ def detect() -> HardwareInfo:
                 pynvml.nvmlShutdown()
 
     return HardwareInfo(
-        cpu_cores=cores, cpu_threads=threads,
-        ram_total_gb=ram_total, ram_free_gb=ram_free,
+        cpu_cores=cores,
+        cpu_threads=threads,
+        ram_total_gb=ram_total,
+        ram_free_gb=ram_free,
         gpu_name=gpu_name,
-        vram_total_gb=vram_total, vram_free_gb=vram_free,
+        vram_total_gb=vram_total,
+        vram_free_gb=vram_free,
         is_apple_silicon=is_apple_silicon,
     )

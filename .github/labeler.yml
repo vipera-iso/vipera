@@ -1,0 +1,24 @@
+core:
+  - changed-files:
+      - any-glob-to-any-file: "src/vipera/**"
+
+tests:
+  - changed-files:
+      - any-glob-to-any-file: "tests/**"
+
+docs:
+  - changed-files:
+      - any-glob-to-any-file:
+          - "docs/**"
+          - "*.md"
+
+assets:
+  - changed-files:
+      - any-glob-to-any-file: "docs/assets/**"
+
+ci:
+  - changed-files:
+      - any-glob-to-any-file:
+          - ".github/**"
+          - "Makefile"
+          - ".pre-commit-config.yaml"

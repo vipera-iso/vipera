@@ -1,8 +1,10 @@
+import struct
 import sys
 import types
 
 import pytest
 
+from vipera import gguf_analyzer as _analyzer
 from vipera.commands import model_cmd
 from vipera.gguf_analyzer import (
     GGUFAnalysisError,
@@ -130,9 +132,7 @@ def test_read_meta_records_size_of_one_repeating_layer(monkeypatch, tmp_path):
     }
     path = tmp_path / "model-q4_k_m.gguf"
     path.write_bytes(b"x" * 10)
-    monkeypatch.setattr(
-        "vipera.gguf_analyzer.analyze_gguf", lambda p: analysis
-    )
+    monkeypatch.setattr("vipera.gguf_analyzer.analyze_gguf", lambda p: analysis)
 
     meta = model_cmd._read_meta(path)
 
@@ -144,9 +144,7 @@ def test_read_meta_without_layer_info_leaves_layer_bytes_zero(monkeypatch, tmp_p
     analysis = {"metadata": {"n_layers": 2}, "layer_distribution": {}}
     path = tmp_path / "model.gguf"
     path.write_bytes(b"x")
-    monkeypatch.setattr(
-        "vipera.gguf_analyzer.analyze_gguf", lambda p: analysis
-    )
+    monkeypatch.setattr("vipera.gguf_analyzer.analyze_gguf", lambda p: analysis)
 
     assert model_cmd._read_meta(path)["layer_bytes"] == 0
 
@@ -198,3 +196,90 @@ def test_inspect_cli_renders_summary(monkeypatch, capsys, tmp_path):
     assert "llama" in output
     assert "Q2_K" in output
     assert "QUALITY WARNINGS" in output
+
+
+# --- 2026 GGUF quant types (35, 39, 40, 41, 42) -----------------------------
+#
+# These build a real GGUF v3 file instead of faking GGUFReader, so the mapping
+# is exercised through the same reader the CLI uses. gguf 0.19 knows 35/39/40/41
+# and rejects 42; both paths are covered.
+
+
+def _gguf_str(text: str) -> bytes:
+    raw = text.encode()
+    return struct.pack("<Q", len(raw)) + raw
+
+
+def _write_gguf(path, tensor_type: int, *, name="blk.0.attn_v.weight", block=None):
+    """Write a one-tensor GGUF v3 file with the given tensor type id."""
+    from gguf.constants import GGML_QUANT_SIZES, GGMLQuantizationType
+
+    block_elems, block_bytes = block or GGML_QUANT_SIZES[GGMLQuantizationType(tensor_type)]
+    dims = [block_elems, 4]
+
+    kv = b""
+    for key, value_type, value in (
+        ("general.architecture", 8, _gguf_str("llama")),
+        ("llama.block_count", 4, struct.pack("<I", 1)),
+    ):
+        kv += _gguf_str(key) + struct.pack("<I", value_type) + value
+
+    info = _gguf_str(name) + struct.pack("<I", len(dims))
+    info += b"".join(struct.pack("<Q", d) for d in dims)
+    info += struct.pack("<I", tensor_type) + struct.pack("<Q", 0)
+
+    header = b"GGUF" + struct.pack("<I", 3) + struct.pack("<Q", 1) + struct.pack("<Q", 2)
+    body = header + kv + info
+    body += b"\x00" * ((-len(body)) % 32)
+    path.write_bytes(body + b"\x00" * (4 * block_bytes))
+    return block_bytes
+
+
+@pytest.mark.parametrize(
+    ("type_id", "expected"),
+    [(35, "TQ2_0"), (39, "MXFP4"), (40, "NVFP4"), (41, "Q1_0"), (42, "Q2_0")],
+)
+def test_quant_id_names_cover_2026_types(type_id, expected):
+    assert _analyzer._quant_name(type_id) == expected
+
+
+def test_unknown_quant_rank_is_none_not_zero():
+    # A new 4-bit type must not be flagged as "below Q4_K" just because its id
+    # is missing from the table.
+    assert _analyzer._quant_rank("TYPE_99") is None
+    assert _analyzer._quant_rank("NVFP4") == pytest.approx(4.0)
+    assert _analyzer._quant_rank("Q1_0") == pytest.approx(1.0)
+
+
+@pytest.mark.parametrize(
+    ("type_id", "quant", "expected_bytes"),
+    [(40, "NVFP4", 4 * 36), (41, "Q1_0", 4 * 18)],
+)
+def test_analyze_reads_new_quant_types(tmp_path, type_id, quant, expected_bytes):
+    path = tmp_path / "model.gguf"
+    block_bytes = _write_gguf(path, type_id)
+
+    result = analyze_gguf(str(path))
+
+    tensor = result["tensor_map"][0]
+    assert tensor["quant"] == quant
+    assert tensor["n_bytes"] == expected_bytes == 4 * block_bytes
+    assert result["metadata"]["dominant_quant"] == quant
+    assert result["metadata"]["quant"] == quant
+    # attn_v at 4 bits or below is exactly what the warning is for.
+    assert result["warnings"] and result["warnings"][0]["quant"] == quant
+
+
+def test_analyze_reports_unsupported_quant_type_instead_of_crashing(tmp_path):
+    # Q2_0 (42) is not in gguf 0.19: the reader cannot size it. The analyzer
+    # must surface a GGUFAnalysisError, not a traceback or a bogus TYPE_42 row.
+    path = tmp_path / "model.gguf"
+    _write_gguf(path, 42, block=(128, 18))
+
+    with pytest.raises(GGUFAnalysisError, match="failed to read"):
+        analyze_gguf(str(path))
+
+
+def test_filename_quant_detects_nvfp4_and_tq2_0(tmp_path):
+    assert _analyzer._QUANT_RE.search("Model-NVFP4.gguf").group(1).upper() == "NVFP4"
+    assert _analyzer._QUANT_RE.search("Model-TQ2_0.gguf").group(1).upper() == "TQ2_0"

@@ -36,19 +36,25 @@ def _build(model: str) -> Engine:
 
     cfg = load_config()
     hw = detect()
-    p = plan(m["meta"], hw,
-             ctx=cfg.get("ctx", 8192),
-             kv_cache=cfg.get("kv_cache", "q8_0"),
-             n_batch=cfg.get("n_batch", 512))
+    p = plan(
+        m["meta"],
+        hw,
+        ctx=cfg.get("ctx", 8192),
+        kv_cache=cfg.get("kv_cache", "q8_0"),
+        n_batch=cfg.get("n_batch", 512),
+    )
     with console.status(f"[{C_ACCENT}] Loading {model}…"):
         return Engine(p, m["path"])
 
 
 def repl_loop(engine: Engine, typewriter: bool = False, chat_kwargs: dict | None = None):
-    console.print(Panel(
-        Text("  System Ready. Type 'exit' or Ctrl+C to quit.", style=C_SUCCESS),
-        border_style=C_ACCENT, box=box.ROUNDED,
-    ))
+    console.print(
+        Panel(
+            Text("  System Ready. Type 'exit' or Ctrl+C to quit.", style=C_SUCCESS),
+            border_style=C_ACCENT,
+            box=box.ROUNDED,
+        )
+    )
 
     history = [{"role": "system", "content": "You are a helpful assistant."}]
     kwargs = chat_kwargs or {}

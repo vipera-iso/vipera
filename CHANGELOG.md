@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **2026 GGUF quant types** — `model inspect` now names `TQ2_0` (35), `MXFP4`
+  (39), `NVFP4` (40), and `Q1_0` (41), and reserves `Q2_0` (42). Ids missing
+  from the static table are resolved through `gguf.GGMLQuantizationType`, an
+  unknown id no longer ranks as 0 (which produced a false "below Q4_K"
+  warning), and `--target-size` uses block-table bytes-per-weight instead of
+  nominal bit width.
+
+### Changed
+- A GGUF whose tensor type the installed `gguf` cannot size now fails with
+  `GGUFAnalysisError: failed to read ...` instead of a traceback.
+
 ## [1.2.0] - 2026-10-20
 
 ### Changed

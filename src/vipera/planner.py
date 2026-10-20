@@ -31,7 +31,11 @@ _GPU_COMPUTE_RESERVE_GB = 0.3
 
 # Bytes per element for each supported kv_cache dtype.
 _KV_BYTES_PER_ELEM = {
-    "f32": 4.0, "f16": 2.0, "q8_0": 1.0, "q4_0": 0.5, "q4_1": 0.5,
+    "f32": 4.0,
+    "f16": 2.0,
+    "q8_0": 1.0,
+    "q4_0": 0.5,
+    "q4_1": 0.5,
 }
 
 
@@ -77,9 +81,7 @@ def plan(
     n_batch: int = 512,
 ) -> Plan:
     if profile not in _VALID_PROFILES:
-        raise ValueError(
-            f"unknown profile '{profile}' (valid: {', '.join(_VALID_PROFILES)})"
-        )
+        raise ValueError(f"unknown profile '{profile}' (valid: {', '.join(_VALID_PROFILES)})")
 
     n_layers = int(meta.get("n_layers") or 32)
     size_bytes = int(meta.get("size_bytes") or 4_000_000_000)
@@ -154,11 +156,7 @@ def plan(
         flash_attn = kv_cache != "f16" or hw.vram_total_gb > 4
         offload_kqv = True
         n_batch = min(n_batch, 512)
-        note = (
-            "Full GPU"
-            if gpu_layers == n_layers
-            else f"Hybrid: {gpu_layers}/{n_layers} layers"
-        )
+        note = "Full GPU" if gpu_layers == n_layers else f"Hybrid: {gpu_layers}/{n_layers} layers"
 
     # mlock pins weights in RAM, so it is only safe when the machine can hold
     # the host-side weights AND the host-side KV cache with headroom. Checking

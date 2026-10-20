@@ -1,3 +1,8 @@
+---
+title: CLI reference
+description: Every Vipera command, flag, default, and side effect.
+---
+
 # CLI reference
 
 Vipera installs one entry point, `vipera` (mapped to `vipera.cli:app`). Every

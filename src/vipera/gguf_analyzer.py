@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any
 
 _QUANT_RE = re.compile(
-    r"(IQ\d+_\w+|Q\d+_K(?:_[A-Z]+)?|Q\d+_\d|BF16|F16|F32|Q\d+)",
+    r"(IQ\d+_\w+|Q\d+_K(?:_[A-Z]+)?|Q\d+_\d|NVFP4|MXFP4|TQ\d_0|BF16|F16|F32|Q\d+)",
     re.IGNORECASE,
 )
 
@@ -46,6 +46,13 @@ _QUANT_NAMES = {
     29: "IQ1_M",
     30: "BF16",
     34: "TQ1_0",
+    35: "TQ2_0",
+    39: "MXFP4",
+    40: "NVFP4",
+    41: "Q1_0",
+    # Not present in gguf 0.19 (the reader rejects such files); kept so a raw
+    # header dump can still label the id llama.cpp reserves for it.
+    42: "Q2_0",
 }
 
 # Rough bits-per-weight ordering. Only used to flag quality-sensitive tensors
@@ -76,14 +83,41 @@ _QUANT_RANK = {
     "IQ2_S": 2.0,
     "IQ1_S": 1.0,
     "IQ1_M": 1.0,
+    "Q2_0": 2.0,
+    "TQ2_0": 2.2,
+    "TQ1_0": 1.7,
+    "Q1_0": 1.0,
+    # 4-bit float formats; ranked with the other 4-bit types, below Q4_K.
+    "MXFP4": 4.0,
+    "NVFP4": 4.0,
 }
 
 _CRITICAL_TENSORS = ("ffn_down", "attn_v")
 _CRITICAL_THRESHOLD = "Q4_K"
+_CRITICAL_RANK = _QUANT_RANK[_CRITICAL_THRESHOLD]
+
+# Quant type ids the static table may lag behind: gguf grows a new type every
+# few releases, and labelling an unknown id as TYPE_nn turns into a bogus
+# quality warning because it ranks 0. Look the name up in gguf when possible.
+_GGUF_QUANT_TYPES: dict[int, str] | None = None
 
 
 class GGUFAnalysisError(RuntimeError):
     """Raised when a GGUF file cannot be inspected."""
+
+
+def _gguf_quant_names() -> dict[int, str]:
+    """Map id -> name from the optional `gguf` package, cached on first use."""
+    global _GGUF_QUANT_TYPES
+    if _GGUF_QUANT_TYPES is None:
+        try:
+            from gguf.constants import GGMLQuantizationType
+        except Exception:  # package missing, or an older layout
+            # Do not cache the failure: a later call (real gguf installed, or a
+            # test that stubs the module) should still be able to resolve ids.
+            return {}
+        _GGUF_QUANT_TYPES = {int(t): t.name for t in GGMLQuantizationType}
+    return _GGUF_QUANT_TYPES
 
 
 def _quant_name(tensor_type: Any) -> str:
@@ -91,10 +125,18 @@ def _quant_name(tensor_type: Any) -> str:
         value = int(tensor_type)
     except (TypeError, ValueError):
         return str(tensor_type)
-    return _QUANT_NAMES.get(value, f"TYPE_{value}")
+    name = _QUANT_NAMES.get(value)
+    if name:
+        return name
+    return _gguf_quant_names().get(value, f"TYPE_{value}")
 
 
-def _quant_rank(name: str) -> float:
+def _quant_rank(name: str) -> float | None:
+    """Rough bits-per-weight for a quant name; None when it is unknown.
+
+    Unknown must not rank as 0: that would flag every future 4-bit type as
+    "below Q4_K" and make the warning meaningless.
+    """
     if name in _QUANT_RANK:
         return _QUANT_RANK[name]
     if name.startswith("IQ4"):
@@ -105,7 +147,7 @@ def _quant_rank(name: str) -> float:
         return 2.0
     if name.startswith("IQ1"):
         return 1.0
-    return 0.0
+    return None
 
 
 def _classify_tensor(name: str) -> str:
@@ -252,9 +294,12 @@ def analyze_gguf(path: str) -> dict[str, Any]:
         if layer is not None:
             max_layer = max(max_layer, layer)
 
-        if any(key in tensor_name for key in _CRITICAL_TENSORS) and _quant_rank(
-            quant
-        ) < _quant_rank(_CRITICAL_THRESHOLD):
+        rank = _quant_rank(quant)
+        if (
+            any(key in tensor_name for key in _CRITICAL_TENSORS)
+            and rank is not None
+            and rank < _CRITICAL_RANK
+        ):
             warnings.append(
                 {
                     "tensor": tensor_name,

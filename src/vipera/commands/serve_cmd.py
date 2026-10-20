@@ -80,9 +80,14 @@ def _quick_bench(engine: Engine) -> None:
                 style=C_DIM,
             )
 
-            console.print(Panel(
-                bench_text, border_style=speed_color, box=box.ROUNDED, padding=(0, 1),
-            ))
+            console.print(
+                Panel(
+                    bench_text,
+                    border_style=speed_color,
+                    box=box.ROUNDED,
+                    padding=(0, 1),
+                )
+            )
             console.print()
 
         except Exception as e:
@@ -136,7 +141,10 @@ def start(
     hw = detect()
     try:
         p = plan(
-            m["meta"], hw, profile=profile, ctx=ctx,
+            m["meta"],
+            hw,
+            profile=profile,
+            ctx=ctx,
             kv_cache=cfg.get("kv_cache", "q8_0"),
             n_batch=cfg.get("n_batch", 512),
         )
@@ -166,13 +174,15 @@ def start(
         style=C_TEXT,
     )
 
-    console.print(Panel(
-        content,
-        title=Text(" VIPERA DAEMON · BOOT ", style=C_ACCENT),
-        border_style=C_ACCENT,
-        box=box.ROUNDED,
-        padding=(0, 1),
-    ))
+    console.print(
+        Panel(
+            content,
+            title=Text(" VIPERA DAEMON · BOOT ", style=C_ACCENT),
+            border_style=C_ACCENT,
+            box=box.ROUNDED,
+            padding=(0, 1),
+        )
+    )
 
     try:
         with console.status(f"[{C_ACCENT}] Loading model into memory…"):
@@ -192,6 +202,7 @@ def start(
         import uvicorn
 
         from vipera.server import build_app
+
         fastapi_app = build_app(engine, model)
 
         ready = Text()
@@ -276,9 +287,7 @@ def stop(
     except psutil.Error:
         cmdline = ""
     if "vipera" not in cmdline.lower():
-        console.print(
-            f"[{C_RED}] ✗ pid {pid} does not look like vipera; refusing to stop it.[/]"
-        )
+        console.print(f"[{C_RED}] ✗ pid {pid} does not look like vipera; refusing to stop it.[/]")
         raise typer.Exit(1)
 
     if not yes and not typer.confirm(f"Stop gateway on port {port} (pid {pid})?"):

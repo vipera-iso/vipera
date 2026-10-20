@@ -1,0 +1,31 @@
+name-template: "v$RESOLVED_VERSION"
+tag-template: "v$RESOLVED_VERSION"
+
+categories:
+  - title: "Added"
+    labels: ["feature", "enhancement"]
+  - title: "Fixed"
+    labels: ["fix", "bug"]
+  - title: "Changed"
+    labels: ["change", "dependencies", "ci"]
+  - title: "Documentation"
+    labels: ["docs"]
+
+change-template: "- $TITLE (#$NUMBER) @$AUTHOR"
+change-title-escapes: '\<*_&'
+
+version-resolver:
+  major:
+    labels: ["major"]
+  minor:
+    labels: ["feature", "enhancement"]
+  patch:
+    labels: ["fix", "bug", "docs", "ci", "dependencies"]
+  default: patch
+
+template: |
+  ## What changed
+
+  $CHANGES
+
+  **Full changelog:** https://github.com/vipera-iso/vipera/blob/main/CHANGELOG.md

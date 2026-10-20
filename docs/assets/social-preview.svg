@@ -1,0 +1,56 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="640" viewBox="0 0 1280 640" role="img" aria-label="Vipera social preview">
+  <title>Vipera — OpenAI-compatible local AI gateway</title>
+  <defs>
+    <pattern id="sgrid" width="32" height="32" patternUnits="userSpaceOnUse"
+             patternTransform="rotate(45)">
+      <path d="M0 0 H32" stroke="#F1F5F9" stroke-opacity="0.04" stroke-width="1"/>
+      <path d="M0 0 V32" stroke="#F1F5F9" stroke-opacity="0.04" stroke-width="1"/>
+    </pattern>
+    <linearGradient id="fade" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#22D3EE" stop-opacity="0.14"/>
+      <stop offset="1" stop-color="#22D3EE" stop-opacity="0"/>
+    </linearGradient>
+  </defs>
+
+  <rect width="1280" height="640" fill="#0B0F14"/>
+  <rect width="1280" height="640" fill="url(#sgrid)"/>
+  <rect x="0" y="0" width="1280" height="320" fill="url(#fade)"/>
+
+  <!-- brand block -->
+  <g transform="translate(64, 72)">
+    <rect width="128" height="128" rx="24" fill="#0B0F14" stroke="#1E293B"/>
+    <g transform="scale(0.25)">
+      <path d="M136 140 L256 372 L376 140" fill="none" stroke="#F1F5F9" stroke-width="34"
+            stroke-linecap="round" stroke-linejoin="round"/>
+      <path d="M256 372 L256 402" fill="none" stroke="#F1F5F9" stroke-width="16"
+            stroke-linecap="round"/>
+      <path d="M256 402 C256 432 222 436 222 464 M256 402 C256 432 290 436 290 464"
+            fill="none" stroke="#22D3EE" stroke-width="12" stroke-linecap="round"/>
+    </g>
+  </g>
+
+  <text x="232" y="150" font-family="Inter, 'DejaVu Sans', sans-serif" font-size="72"
+        font-weight="600" letter-spacing="-1.5" fill="#F1F5F9">Vipera</text>
+  <path d="M234 170 H402" stroke="#22D3EE" stroke-width="2"/>
+  <text x="234" y="210" font-family="Inter, 'DejaVu Sans', sans-serif" font-size="26"
+        fill="#94A3B8">A local AI gateway that plans before it runs.</text>
+
+  <text x="64" y="520" font-family="Inter, 'DejaVu Sans', sans-serif" font-size="28"
+        font-weight="600" fill="#F1F5F9">One .gguf in, an OpenAI-compatible server out.</text>
+  <text x="64" y="562" font-family="'JetBrainsMono NF', ui-monospace, monospace" font-size="20"
+        fill="#64748B">GGUF-native · SSE streaming · hardware-aware planner</text>
+
+  <!-- terminal mock, lower right -->
+  <g transform="translate(720, 392)">
+    <rect width="496" height="176" rx="16" fill="#111827" stroke="#1F2937"/>
+    <circle cx="26" cy="26" r="5" fill="#F87171"/>
+    <circle cx="46" cy="26" r="5" fill="#FBBF24"/>
+    <circle cx="66" cy="26" r="5" fill="#34D399"/>
+    <text x="28" y="76" font-family="'JetBrainsMono NF', ui-monospace, monospace"
+          font-size="19" fill="#22D3EE">$ vipera serve start</text>
+    <text x="28" y="112" font-family="'JetBrainsMono NF', ui-monospace, monospace"
+          font-size="19" fill="#E2E8F0">→ http://127.0.0.1:8686/v1</text>
+    <text x="28" y="148" font-family="'JetBrainsMono NF', ui-monospace, monospace"
+          font-size="19" fill="#64748B">POST /v1/chat/completions</text>
+  </g>
+</svg>

@@ -1,3 +1,8 @@
+---
+title: Architecture
+description: Module map, request flow, planner, engine fallback, concurrency model, and known gaps.
+---
+
 # Architecture
 
 Vipera is a thin, opinionated layer between a GGUF file and an OpenAI-compatible
@@ -150,6 +155,21 @@ partial output when the child fails.
 before being passed, so an older llama.cpp fails with a clear message instead
 of an unknown-argument error. `--dry-run` prints the plan and the exact commands
 without creating anything.
+
+### Quant type ids
+
+The analyzer labels every id the installed `gguf` package knows, including the
+2026 additions `TQ2_0` (35), `MXFP4` (39), `NVFP4` (40), and `Q1_0` (41), and
+reserves `Q2_0` (42), which `gguf` 0.19 cannot size yet. Unknown ids resolve
+through `gguf.GGMLQuantizationType` when available, so a future type is named
+instead of reported as `TYPE_nn`. An id the reader cannot size fails with
+`GGUFAnalysisError: failed to read ...` rather than a traceback: a half-parsed
+index must never reach the planner.
+
+Quality warnings fire only when the bytes-per-weight is known and below Q4_K; an
+unknown id is not assumed to be low quality. `--target-size` math uses the
+block-table bytes-per-weight (NVFP4 4.5, MXFP4 4.25, TQ2_0 2.0625, TQ1_0
+1.6875, Q1_0 1.125), not the nominal bit width.
 
 ## Engine
 

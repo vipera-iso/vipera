@@ -77,6 +77,9 @@ include = [
 line-length = 100
 target-version = "py311"
 src = ["src", "tests"]
+# fullcode.md is a generated dump of src/: formatting the fenced blocks would
+# rewrite the snapshot and make it drift from the generator.
+exclude = ["fullcode.md"]
 
 [tool.ruff.lint]
 select = ["E", "W", "F", "I", "B", "UP", "SIM", "RUF"]

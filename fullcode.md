@@ -31,10 +31,10 @@ app = typer.Typer(
     invoke_without_command=True,
 )
 
-app.add_typer(model_cmd.app,  name="model",  help="Manage GGUF models")
-app.add_typer(serve_cmd.app,  name="serve",  help="Start HTTP Gateway")
-app.add_typer(chat_cmd.app,   name="chat",   help="Chat with AI")
-app.add_typer(bench_cmd.app,  name="bench",  help="Benchmark performance")
+app.add_typer(model_cmd.app, name="model", help="Manage GGUF models")
+app.add_typer(serve_cmd.app, name="serve", help="Start HTTP Gateway")
+app.add_typer(chat_cmd.app, name="chat", help="Chat with AI")
+app.add_typer(bench_cmd.app, name="bench", help="Benchmark performance")
 app.add_typer(system_cmd.app, name="system", help="Diagnostics & Config")
 
 
@@ -44,38 +44,54 @@ def show_help():
     guide = Text()
 
     guide.append("  ▸ QUICK START\n", style=C_ACCENT)
-    guide.append("    • vipera                          Start gateway (default model)\n", style=C_TEXT)
-    guide.append("    • vipera -s                       Start gateway with model picker\n", style=C_TEXT)
-    guide.append("    • vipera model search             Search & download from HuggingFace\n", style=C_TEXT)
+    guide.append(
+        "    • vipera                          Start gateway (default model)\n", style=C_TEXT
+    )
+    guide.append(
+        "    • vipera -s                       Start gateway with model picker\n", style=C_TEXT
+    )
+    guide.append(
+        "    • vipera model search             Search & download from HuggingFace\n", style=C_TEXT
+    )
     guide.append("    • vipera chat repl                Chat in the terminal\n\n", style=C_TEXT)
 
     guide.append("  ▸ MODELS (vipera model ...)\n", style=C_ACCENT)
     guide.append("    • vipera model list               List installed models\n", style=C_TEXT)
     guide.append("    • vipera model import <path>      Import a local .gguf file\n", style=C_TEXT)
-    guide.append("    • vipera model inspect <path>     Analyze GGUF layout & quants\n", style=C_TEXT)
+    guide.append(
+        "    • vipera model inspect <path>     Analyze GGUF layout & quants\n", style=C_TEXT
+    )
     guide.append("    • vipera model imatrix <path>     Build an importance matrix\n", style=C_TEXT)
-    guide.append("    • vipera model quantize <path>    Quantize with llama-quantize\n", style=C_TEXT)
-    guide.append("    • vipera model optimize <path>    Inspect → imatrix → quantize\n", style=C_TEXT)
+    guide.append(
+        "    • vipera model quantize <path>    Quantize with llama-quantize\n", style=C_TEXT
+    )
+    guide.append(
+        "    • vipera model optimize <path>    Inspect → imatrix → quantize\n", style=C_TEXT
+    )
     guide.append("    • vipera model rm <name>          Remove a model\n\n", style=C_TEXT)
 
     guide.append("  ▸ INFERENCE (vipera chat / bench ...)\n", style=C_ACCENT)
     guide.append("    • vipera chat repl                Interactive chat\n", style=C_TEXT)
-    guide.append("    • vipera chat oneshot \"<prompt>\"  One-shot query\n", style=C_TEXT)
+    guide.append('    • vipera chat oneshot "<prompt>"  One-shot query\n', style=C_TEXT)
     guide.append("    • vipera bench run                Benchmark model\n\n", style=C_TEXT)
 
     guide.append("  ▸ SYSTEM (vipera system ...)\n", style=C_ACCENT)
-    guide.append("    • vipera system doctor            Hardware & library diagnostics\n", style=C_TEXT)
+    guide.append(
+        "    • vipera system doctor            Hardware & library diagnostics\n", style=C_TEXT
+    )
     guide.append("    • vipera system config            View/edit config\n\n", style=C_TEXT)
 
     guide.append("  💡 TIP: use `vipera -s` to switch the running model.\n", style=C_DIM)
 
-    console.print(Panel(
-        guide,
-        title=Text(" VIPERA MANUAL ", style=C_ACCENT),
-        border_style=C_ACCENT,
-        box=box.ROUNDED,
-        padding=(1, 2),
-    ))
+    console.print(
+        Panel(
+            guide,
+            title=Text(" VIPERA MANUAL ", style=C_ACCENT),
+            border_style=C_ACCENT,
+            box=box.ROUNDED,
+            padding=(1, 2),
+        )
+    )
 
 
 @app.callback()
@@ -97,15 +113,21 @@ def main(
 
     installed = list_models()
     if not installed:
-        console.print(Panel(
-            Text("  [ NO MODELS INSTALLED ]\n\n"
-                 "  Import a model first:\n"
-                 "  ► vipera model import <path_to_gguf> --name my-model\n\n"
-                 "  Or search Hugging Face:\n"
-                 "  ► vipera model search", style=C_RED),
-            title=Text(" WARNING ", style=C_RED),
-            border_style=C_RED, box=box.ROUNDED,
-        ))
+        console.print(
+            Panel(
+                Text(
+                    "  [ NO MODELS INSTALLED ]\n\n"
+                    "  Import a model first:\n"
+                    "  ► vipera model import <path_to_gguf> --name my-model\n\n"
+                    "  Or search Hugging Face:\n"
+                    "  ► vipera model search",
+                    style=C_RED,
+                ),
+                title=Text(" WARNING ", style=C_RED),
+                border_style=C_RED,
+                box=box.ROUNDED,
+            )
+        )
         raise typer.Exit(1)
 
     cfg = load_config()
@@ -185,7 +207,9 @@ def _run_bench(engine: Engine, prompt: str, max_tokens: int) -> dict:
             if usage:
                 final_usage = usage
             try:
-                delta = chunk["choices"][0]["delta"].get("content", "") if chunk.get("choices") else ""
+                delta = (
+                    chunk["choices"][0]["delta"].get("content", "") if chunk.get("choices") else ""
+                )
             except (KeyError, IndexError, TypeError):
                 delta = ""
             if delta:
@@ -275,7 +299,8 @@ def run(
 
     for c in ctx_list:
         p = plan(
-            m["meta"], hw,
+            m["meta"],
+            hw,
             ctx=c,
             kv_cache=cfg.get("kv_cache", "q8_0"),
             n_batch=cfg.get("n_batch", 512),
@@ -283,7 +308,9 @@ def run(
 
         engine = None
         try:
-            with console.status(f"[{C_ACCENT}] Loading model with ctx={c} (GPU: {p.gpu_layers} layers)…"):
+            with console.status(
+                f"[{C_ACCENT}] Loading model with ctx={c} (GPU: {p.gpu_layers} layers)…"
+            ):
                 try:
                     engine = Engine(p, m["path"])
                 except Exception as e:
@@ -367,19 +394,25 @@ def _build(model: str) -> Engine:
 
     cfg = load_config()
     hw = detect()
-    p = plan(m["meta"], hw,
-             ctx=cfg.get("ctx", 8192),
-             kv_cache=cfg.get("kv_cache", "q8_0"),
-             n_batch=cfg.get("n_batch", 512))
+    p = plan(
+        m["meta"],
+        hw,
+        ctx=cfg.get("ctx", 8192),
+        kv_cache=cfg.get("kv_cache", "q8_0"),
+        n_batch=cfg.get("n_batch", 512),
+    )
     with console.status(f"[{C_ACCENT}] Loading {model}…"):
         return Engine(p, m["path"])
 
 
 def repl_loop(engine: Engine, typewriter: bool = False, chat_kwargs: dict | None = None):
-    console.print(Panel(
-        Text("  System Ready. Type 'exit' or Ctrl+C to quit.", style=C_SUCCESS),
-        border_style=C_ACCENT, box=box.ROUNDED,
-    ))
+    console.print(
+        Panel(
+            Text("  System Ready. Type 'exit' or Ctrl+C to quit.", style=C_SUCCESS),
+            border_style=C_ACCENT,
+            box=box.ROUNDED,
+        )
+    )
 
     history = [{"role": "system", "content": "You are a helpful assistant."}]
     kwargs = chat_kwargs or {}
@@ -614,12 +647,14 @@ def import_model(
 def search_model():
     """Search and download GGUF models from Hugging Face."""
     ensure_dirs()
-    console.print(Panel(
-        "  Enter a keyword to search for GGUF models on Hugging Face.",
-        title="[ SEARCH HUB ]",
-        border_style=C_ACCENT,
-        box=box.ROUNDED,
-    ))
+    console.print(
+        Panel(
+            "  Enter a keyword to search for GGUF models on Hugging Face.",
+            title="[ SEARCH HUB ]",
+            border_style=C_ACCENT,
+            box=box.ROUNDED,
+        )
+    )
     query = Prompt.ask(f"[{C_ACCENT}]  ▸ Keyword[/]")
     if not query:
         return
@@ -695,7 +730,9 @@ def search_model():
         console.print(
             f"    [{C_DIM}]└─ {param_str}{meta['size_bytes'] / 1e9:.2f} GB  ·  {meta['quant']}[/]"
         )
-        console.print(f"\n[{C_ACCENT}] ▸ Just run [bold]vipera[/bold] and this model will be pre-selected.\n")
+        console.print(
+            f"\n[{C_ACCENT}] ▸ Just run [bold]vipera[/bold] and this model will be pre-selected.\n"
+        )
     except KeyboardInterrupt:
         console.print(f"\n[{C_YELLOW}] ⚠ Download cancelled.[/]")
     except Exception as e:
@@ -944,15 +981,12 @@ def quantize_cmd(
         raise typer.Exit(1) from e
 
     if prune_layers:
-        console.print(
-            f"[{C_YELLOW}] ⚠ Pruning layers can substantially reduce quality.[/]"
-        )
+        console.print(f"[{C_YELLOW}] ⚠ Pruning layers can substantially reduce quality.[/]")
     if not _run_tool(command, dry_run, cleanup=out):
         raise typer.Exit(1)
     if not dry_run:
         console.print(
-            f"[{C_GREEN}] ✓ quantized model:[/] {out} "
-            f"({_format_bytes(out.stat().st_size)})"
+            f"[{C_GREEN}] ✓ quantized model:[/] {out} ({_format_bytes(out.stat().st_size)})"
         )
 
 
@@ -1014,9 +1048,7 @@ def optimize_cmd(
 
     try:
         quantize_bin = find_llama_tool("quantize", bin_dir)
-        supports_prior = prior_weight != 1 and tool_supports_flag(
-            quantize_bin, "--prior-weight"
-        )
+        supports_prior = prior_weight != 1 and tool_supports_flag(quantize_bin, "--prior-weight")
     except OptimizerError as e:
         console.print(f"[{C_RED}] ✗ {e}[/]")
         raise typer.Exit(1) from e
@@ -1073,19 +1105,15 @@ def optimize_cmd(
         raise typer.Exit(1) from e
 
     if prune_layers:
-        console.print(
-            f"[{C_YELLOW}] ⚠ Pruning layers can substantially reduce quality.[/]"
-        )
+        console.print(f"[{C_YELLOW}] ⚠ Pruning layers can substantially reduce quality.[/]")
     console.print(
-        f"[{C_YELLOW}] ⚠ Optimizing an already-quantized model requantizes it; "
-        "quality can drop.[/]"
+        f"[{C_YELLOW}] ⚠ Optimizing an already-quantized model requantizes it; quality can drop.[/]"
     )
     if not _run_tool(command, dry_run, cleanup=out):
         raise typer.Exit(1)
     if not dry_run:
         console.print(
-            f"[{C_GREEN}] ✓ optimized model:[/] {out} "
-            f"({_format_bytes(out.stat().st_size)})"
+            f"[{C_GREEN}] ✓ optimized model:[/] {out} ({_format_bytes(out.stat().st_size)})"
         )
 
 
@@ -1111,7 +1139,9 @@ def list_cmd():
         ctx_val = meta.get("context_length") or 0
         ctx_str = f"{ctx_val:,}" if ctx_val else "?"
         t.add_row(
-            f"[{i + 1:02d}]", m["name"], size_str,
+            f"[{i + 1:02d}]",
+            m["name"],
+            size_str,
             meta.get("quant", "?"),
             f"{meta.get('n_layers', 0) or '?'}",
             ctx_str,
@@ -1169,7 +1199,9 @@ def recommend_quantization(
         return
 
     console.print(f"  [{C_YELLOW}]⚠ Found {len(warnings)} critical tensors quantized below Q4_K[/]")
-    console.print(f"  [{C_DIM}]To preserve quality, use mixed-precision for output & embeddings:[/]\n")
+    console.print(
+        f"  [{C_DIM}]To preserve quality, use mixed-precision for output & embeddings:[/]\n"
+    )
 
     console.print(f"  [{C_ACCENT}]Command to run:[/]")
     console.print(
@@ -1263,9 +1295,14 @@ def _quick_bench(engine: Engine) -> None:
                 style=C_DIM,
             )
 
-            console.print(Panel(
-                bench_text, border_style=speed_color, box=box.ROUNDED, padding=(0, 1),
-            ))
+            console.print(
+                Panel(
+                    bench_text,
+                    border_style=speed_color,
+                    box=box.ROUNDED,
+                    padding=(0, 1),
+                )
+            )
             console.print()
 
         except Exception as e:
@@ -1319,7 +1356,10 @@ def start(
     hw = detect()
     try:
         p = plan(
-            m["meta"], hw, profile=profile, ctx=ctx,
+            m["meta"],
+            hw,
+            profile=profile,
+            ctx=ctx,
             kv_cache=cfg.get("kv_cache", "q8_0"),
             n_batch=cfg.get("n_batch", 512),
         )
@@ -1349,13 +1389,15 @@ def start(
         style=C_TEXT,
     )
 
-    console.print(Panel(
-        content,
-        title=Text(" VIPERA DAEMON · BOOT ", style=C_ACCENT),
-        border_style=C_ACCENT,
-        box=box.ROUNDED,
-        padding=(0, 1),
-    ))
+    console.print(
+        Panel(
+            content,
+            title=Text(" VIPERA DAEMON · BOOT ", style=C_ACCENT),
+            border_style=C_ACCENT,
+            box=box.ROUNDED,
+            padding=(0, 1),
+        )
+    )
 
     try:
         with console.status(f"[{C_ACCENT}] Loading model into memory…"):
@@ -1375,6 +1417,7 @@ def start(
         import uvicorn
 
         from vipera.server import build_app
+
         fastapi_app = build_app(engine, model)
 
         ready = Text()
@@ -1459,9 +1502,7 @@ def stop(
     except psutil.Error:
         cmdline = ""
     if "vipera" not in cmdline.lower():
-        console.print(
-            f"[{C_RED}] ✗ pid {pid} does not look like vipera; refusing to stop it.[/]"
-        )
+        console.print(f"[{C_RED}] ✗ pid {pid} does not look like vipera; refusing to stop it.[/]")
         raise typer.Exit(1)
 
     if not yes and not typer.confirm(f"Stop gateway on port {port} (pid {pid})?"):
@@ -1543,6 +1584,7 @@ def doctor():
     llama_missing = False
     try:
         import llama_cpp  # noqa: F401
+
         row("llama-cpp-python", "installed")
     except ImportError:
         row("llama-cpp-python", "missing", "FAIL", C_RED)
@@ -1551,6 +1593,7 @@ def doctor():
     gguf_missing = False
     try:
         import gguf  # noqa: F401
+
         row("gguf", "installed")
     except ImportError:
         row("gguf", "missing", "WARN", C_YELLOW)
@@ -1563,16 +1606,13 @@ def doctor():
 
     if hw.is_apple_silicon:
         row("gpu", "Apple Silicon (Metal)", "PASS", C_GREEN)
-        row("unified memory",
-            f"{hw.ram_free_gb:.1f} GB free / {hw.ram_total_gb:.1f} GB total")
+        row("unified memory", f"{hw.ram_free_gb:.1f} GB free / {hw.ram_total_gb:.1f} GB total")
     elif hw.gpu_name != "None":
         row("gpu", hw.gpu_name, "PASS", C_GREEN)
-        row("vram",
-            f"{hw.vram_free_gb:.1f} GB free / {hw.vram_total_gb:.1f} GB total")
+        row("vram", f"{hw.vram_free_gb:.1f} GB free / {hw.vram_total_gb:.1f} GB total")
     else:
         row("gpu", "None (CPU Only)", "WARN", C_YELLOW)
-        row("ram available",
-            f"{hw.ram_free_gb:.1f} GB free / {hw.ram_total_gb:.1f} GB total")
+        row("ram available", f"{hw.ram_free_gb:.1f} GB free / {hw.ram_total_gb:.1f} GB total")
     end_sec()
 
     summary = Text("  SUMMARY   ", style=C_ACCENT)
@@ -1583,18 +1623,18 @@ def doctor():
     summary.append(f"[ {counters['fail']} FAIL ]\n", style=C_RED)
     content.append(summary)
 
-    console.print(Panel(
-        content,
-        title=Text(" VIPERA DIAGNOSTICS ", style=C_ACCENT),
-        border_style=C_ACCENT,
-        box=box.ROUNDED,
-        padding=(0, 1),
-    ))
+    console.print(
+        Panel(
+            content,
+            title=Text(" VIPERA DIAGNOSTICS ", style=C_ACCENT),
+            border_style=C_ACCENT,
+            box=box.ROUNDED,
+            padding=(0, 1),
+        )
+    )
 
     if llama_missing:
-        console.print(
-            f"[{C_YELLOW}] ⚠ llama-cpp-python is required to load models.[/]"
-        )
+        console.print(f"[{C_YELLOW}] ⚠ llama-cpp-python is required to load models.[/]")
         console.print(f"[{C_DIM}]   Install:[/] python -m pip install llama-cpp-python")
         console.print(f"[{C_DIM}]   Then restart the gateway.[/]\n")
 
@@ -1673,8 +1713,13 @@ _TRUE_STRINGS = {"1", "true", "yes", "on"}
 _FALSE_STRINGS = {"0", "false", "no", "off", ""}
 
 _TYPE_MAP = {
-    "port": int, "ctx": int, "n_batch": int, "max_tokens": int,
-    "temperature": float, "top_p": float, "repeat_penalty": float,
+    "port": int,
+    "ctx": int,
+    "n_batch": int,
+    "max_tokens": int,
+    "temperature": float,
+    "top_p": float,
+    "repeat_penalty": float,
     "flash_attn": bool,
 }
 
@@ -1758,13 +1803,34 @@ _KV_TYPES = {"f32": 0, "f16": 1, "q4_0": 2, "q4_1": 3, "q8_0": 8}
 # Sampling and tool-calling parameters accepted by
 # llama_cpp.Llama.create_chat_completion. Anything else is dropped so a typo in
 # an HTTP request cannot turn into a TypeError from the backend.
-_CHAT_PARAMS = frozenset({
-    "temperature", "top_p", "top_k", "min_p", "typical_p", "max_tokens",
-    "stop", "seed", "presence_penalty", "frequency_penalty", "repeat_penalty",
-    "tfs_z", "mirostat_mode", "mirostat_tau", "mirostat_eta", "logit_bias",
-    "logprobs", "top_logprobs", "grammar", "response_format",
-    "tools", "tool_choice", "functions", "function_call",
-})
+_CHAT_PARAMS = frozenset(
+    {
+        "temperature",
+        "top_p",
+        "top_k",
+        "min_p",
+        "typical_p",
+        "max_tokens",
+        "stop",
+        "seed",
+        "presence_penalty",
+        "frequency_penalty",
+        "repeat_penalty",
+        "tfs_z",
+        "mirostat_mode",
+        "mirostat_tau",
+        "mirostat_eta",
+        "logit_bias",
+        "logprobs",
+        "top_logprobs",
+        "grammar",
+        "response_format",
+        "tools",
+        "tool_choice",
+        "functions",
+        "function_call",
+    }
+)
 
 _DEFAULT_SAMPLING = {
     "temperature": 0.7,
@@ -1780,8 +1846,7 @@ class Engine:
             from llama_cpp import Llama
         except ImportError:
             raise RuntimeError(
-                "llama-cpp-python is not installed. "
-                "Install it with: pip install llama-cpp-python"
+                "llama-cpp-python is not installed. Install it with: pip install llama-cpp-python"
             ) from None
 
         self.plan = plan
@@ -1845,9 +1910,7 @@ class Engine:
             except Exception as exc:
                 last_exc = exc
 
-        raise RuntimeError(
-            f"Failed to initialize model even on CPU: {last_exc}"
-        ) from gpu_exc
+        raise RuntimeError(f"Failed to initialize model even on CPU: {last_exc}") from gpu_exc
 
     def _load(self, p: Plan):
         kv = _KV_TYPES.get(p.kv_cache)
@@ -1911,7 +1974,7 @@ from pathlib import Path
 from typing import Any
 
 _QUANT_RE = re.compile(
-    r"(IQ\d+_\w+|Q\d+_K(?:_[A-Z]+)?|Q\d+_\d|BF16|F16|F32|Q\d+)",
+    r"(IQ\d+_\w+|Q\d+_K(?:_[A-Z]+)?|Q\d+_\d|NVFP4|MXFP4|TQ\d_0|BF16|F16|F32|Q\d+)",
     re.IGNORECASE,
 )
 
@@ -1946,6 +2009,13 @@ _QUANT_NAMES = {
     29: "IQ1_M",
     30: "BF16",
     34: "TQ1_0",
+    35: "TQ2_0",
+    39: "MXFP4",
+    40: "NVFP4",
+    41: "Q1_0",
+    # Not present in gguf 0.19 (the reader rejects such files); kept so a raw
+    # header dump can still label the id llama.cpp reserves for it.
+    42: "Q2_0",
 }
 
 # Rough bits-per-weight ordering. Only used to flag quality-sensitive tensors
@@ -1976,14 +2046,41 @@ _QUANT_RANK = {
     "IQ2_S": 2.0,
     "IQ1_S": 1.0,
     "IQ1_M": 1.0,
+    "Q2_0": 2.0,
+    "TQ2_0": 2.2,
+    "TQ1_0": 1.7,
+    "Q1_0": 1.0,
+    # 4-bit float formats; ranked with the other 4-bit types, below Q4_K.
+    "MXFP4": 4.0,
+    "NVFP4": 4.0,
 }
 
 _CRITICAL_TENSORS = ("ffn_down", "attn_v")
 _CRITICAL_THRESHOLD = "Q4_K"
+_CRITICAL_RANK = _QUANT_RANK[_CRITICAL_THRESHOLD]
+
+# Quant type ids the static table may lag behind: gguf grows a new type every
+# few releases, and labelling an unknown id as TYPE_nn turns into a bogus
+# quality warning because it ranks 0. Look the name up in gguf when possible.
+_GGUF_QUANT_TYPES: dict[int, str] | None = None
 
 
 class GGUFAnalysisError(RuntimeError):
     """Raised when a GGUF file cannot be inspected."""
+
+
+def _gguf_quant_names() -> dict[int, str]:
+    """Map id -> name from the optional `gguf` package, cached on first use."""
+    global _GGUF_QUANT_TYPES
+    if _GGUF_QUANT_TYPES is None:
+        try:
+            from gguf.constants import GGMLQuantizationType
+        except Exception:  # package missing, or an older layout
+            # Do not cache the failure: a later call (real gguf installed, or a
+            # test that stubs the module) should still be able to resolve ids.
+            return {}
+        _GGUF_QUANT_TYPES = {int(t): t.name for t in GGMLQuantizationType}
+    return _GGUF_QUANT_TYPES
 
 
 def _quant_name(tensor_type: Any) -> str:
@@ -1991,10 +2088,18 @@ def _quant_name(tensor_type: Any) -> str:
         value = int(tensor_type)
     except (TypeError, ValueError):
         return str(tensor_type)
-    return _QUANT_NAMES.get(value, f"TYPE_{value}")
+    name = _QUANT_NAMES.get(value)
+    if name:
+        return name
+    return _gguf_quant_names().get(value, f"TYPE_{value}")
 
 
-def _quant_rank(name: str) -> float:
+def _quant_rank(name: str) -> float | None:
+    """Rough bits-per-weight for a quant name; None when it is unknown.
+
+    Unknown must not rank as 0: that would flag every future 4-bit type as
+    "below Q4_K" and make the warning meaningless.
+    """
     if name in _QUANT_RANK:
         return _QUANT_RANK[name]
     if name.startswith("IQ4"):
@@ -2005,7 +2110,7 @@ def _quant_rank(name: str) -> float:
         return 2.0
     if name.startswith("IQ1"):
         return 1.0
-    return 0.0
+    return None
 
 
 def _classify_tensor(name: str) -> str:
@@ -2152,9 +2257,12 @@ def analyze_gguf(path: str) -> dict[str, Any]:
         if layer is not None:
             max_layer = max(max_layer, layer)
 
-        if any(key in tensor_name for key in _CRITICAL_TENSORS) and _quant_rank(
-            quant
-        ) < _quant_rank(_CRITICAL_THRESHOLD):
+        rank = _quant_rank(quant)
+        if (
+            any(key in tensor_name for key in _CRITICAL_TENSORS)
+            and rank is not None
+            and rank < _CRITICAL_RANK
+        ):
             warnings.append(
                 {
                     "tensor": tensor_name,
@@ -2231,8 +2339,7 @@ def detect() -> HardwareInfo:
         import psutil
     except ImportError as exc:
         raise RuntimeError(
-            "psutil is required for hardware detection. "
-            "Install it with: pip install psutil"
+            "psutil is required for hardware detection. Install it with: pip install psutil"
         ) from exc
 
     cores = psutil.cpu_count(logical=False) or 1
@@ -2266,10 +2373,13 @@ def detect() -> HardwareInfo:
                 pynvml.nvmlShutdown()
 
     return HardwareInfo(
-        cpu_cores=cores, cpu_threads=threads,
-        ram_total_gb=ram_total, ram_free_gb=ram_free,
+        cpu_cores=cores,
+        cpu_threads=threads,
+        ram_total_gb=ram_total,
+        ram_free_gb=ram_free,
         gpu_name=gpu_name,
-        vram_total_gb=vram_total, vram_free_gb=vram_free,
+        vram_total_gb=vram_total,
+        vram_free_gb=vram_free,
         is_apple_silicon=is_apple_silicon,
     )
 
@@ -2296,7 +2406,16 @@ _TOOL_NAMES = {
 
 _QUALITY_ORDER = ("Q8_0", "Q6_K", "Q5_K_M", "Q4_K_M", "Q3_K_M", "Q2_K")
 
+# Bytes-per-weight from gguf's block table: bytes * 8 / elements. Keep these
+# exact (they drive --target-size math), not rounded to the nominal bit width.
 _QUANT_BPW = {
+    "NVFP4": 4.5,  # 36 B / 64 elems
+    "MXFP4": 4.25,  # 17 B / 32 elems
+    "TQ2_0": 2.0625,  # 66 B / 256 elems
+    "TQ1_0": 1.6875,  # 54 B / 256 elems
+    "Q1_0": 1.125,  # 18 B / 128 elems
+    # Q2_0 is not in gguf 0.19 yet; this is the nominal 2-bit estimate.
+    "Q2_0": 2.2,
     "Q8_0": 8.5,
     "Q6_K": 6.14,
     "Q5_K_M": 5.33,
@@ -2596,7 +2715,11 @@ _GPU_COMPUTE_RESERVE_GB = 0.3
 
 # Bytes per element for each supported kv_cache dtype.
 _KV_BYTES_PER_ELEM = {
-    "f32": 4.0, "f16": 2.0, "q8_0": 1.0, "q4_0": 0.5, "q4_1": 0.5,
+    "f32": 4.0,
+    "f16": 2.0,
+    "q8_0": 1.0,
+    "q4_0": 0.5,
+    "q4_1": 0.5,
 }
 
 
@@ -2642,9 +2765,7 @@ def plan(
     n_batch: int = 512,
 ) -> Plan:
     if profile not in _VALID_PROFILES:
-        raise ValueError(
-            f"unknown profile '{profile}' (valid: {', '.join(_VALID_PROFILES)})"
-        )
+        raise ValueError(f"unknown profile '{profile}' (valid: {', '.join(_VALID_PROFILES)})")
 
     n_layers = int(meta.get("n_layers") or 32)
     size_bytes = int(meta.get("size_bytes") or 4_000_000_000)
@@ -2719,11 +2840,7 @@ def plan(
         flash_attn = kv_cache != "f16" or hw.vram_total_gb > 4
         offload_kqv = True
         n_batch = min(n_batch, 512)
-        note = (
-            "Full GPU"
-            if gpu_layers == n_layers
-            else f"Hybrid: {gpu_layers}/{n_layers} layers"
-        )
+        note = "Full GPU" if gpu_layers == n_layers else f"Hybrid: {gpu_layers}/{n_layers} layers"
 
     # mlock pins weights in RAM, so it is only safe when the machine can hold
     # the host-side weights AND the host-side KV cache with headroom. Checking
@@ -2885,9 +3002,7 @@ def build_app(engine, model_name: str) -> FastAPI:
         if not req.messages:
             raise HTTPException(400, "messages must not be empty")
         if req.model and req.model != model_name:
-            raise HTTPException(
-                404, f"model '{req.model}' not loaded (active: '{model_name}')"
-            )
+            raise HTTPException(404, f"model '{req.model}' not loaded (active: '{model_name}')")
         if len(req.messages) > _MAX_MESSAGES:
             raise HTTPException(400, f"too many messages (max {_MAX_MESSAGES})")
         if sum(len(m.content or "") for m in req.messages) > _MAX_PROMPT_CHARS:
@@ -2908,6 +3023,7 @@ def build_app(engine, model_name: str) -> FastAPI:
         )
 
         if req.stream:
+
             async def _stream():
                 # The engine's stream is a SYNC generator. Iterating it inline
                 # would block the event loop for the whole generation, so pull
@@ -2926,9 +3042,7 @@ def build_app(engine, model_name: str) -> FastAPI:
                     try:
                         iterator = engine.chat(messages, stream=True, **kwargs)
                         while True:
-                            task = asyncio.create_task(
-                                asyncio.to_thread(next, iterator, _SENTINEL)
-                            )
+                            task = asyncio.create_task(asyncio.to_thread(next, iterator, _SENTINEL))
                             try:
                                 # shield: cancelling this request must not
                                 # cancel the task that wraps the worker thread.
@@ -2969,9 +3083,7 @@ def build_app(engine, model_name: str) -> FastAPI:
                         and req.stream_options.include_usage
                         and usage is not None
                     ):
-                        payload = json.dumps(
-                            {"choices": [], "usage": usage}, ensure_ascii=False
-                        )
+                        payload = json.dumps({"choices": [], "usage": usage}, ensure_ascii=False)
                         yield f"data: {payload}\n\n"
                     yield "data: [DONE]\n\n"
                 finally:
@@ -2988,9 +3100,7 @@ def build_app(engine, model_name: str) -> FastAPI:
         await lock.acquire()
         released = False
         try:
-            task = asyncio.create_task(
-                asyncio.to_thread(engine.chat, messages, False, **kwargs)
-            )
+            task = asyncio.create_task(asyncio.to_thread(engine.chat, messages, False, **kwargs))
             try:
                 return await asyncio.shield(task)
             except asyncio.CancelledError:
@@ -3021,19 +3131,19 @@ from vipera import __version__
 
 console = Console(highlight=False, soft_wrap=True)
 
-C_PRIMARY   = "#5B7C99"
-C_ACCENT    = "#8FB4CC"
+C_PRIMARY = "#5B7C99"
+C_ACCENT = "#8FB4CC"
 C_HIGHLIGHT = "#B8C7D3"
-C_TEXT      = "bold #E4E8EC"
-C_DIM       = "#6B7A87"
-C_BORDER    = "#3E5568"
+C_TEXT = "bold #E4E8EC"
+C_DIM = "#6B7A87"
+C_BORDER = "#3E5568"
 
-C_GREEN   = "#7BA05B"
-C_RED     = "#C25B5B"
-C_YELLOW  = "#D4A574"
+C_GREEN = "#7BA05B"
+C_RED = "#C25B5B"
+C_YELLOW = "#D4A574"
 C_SUCCESS = C_GREEN
-C_ERROR   = C_RED
-C_WARN    = C_YELLOW
+C_ERROR = C_RED
+C_WARN = C_YELLOW
 
 
 VIPERA_ART = r"""

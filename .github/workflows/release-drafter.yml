@@ -1,0 +1,20 @@
+name: Release drafter
+
+# Runs on the default branch only: release-drafter reads its config from there,
+# so running it on a PR that adds the config would always fail.
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  update_release_draft:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: release-drafter/release-drafter@v6
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

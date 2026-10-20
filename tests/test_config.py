@@ -33,11 +33,15 @@ def test_save_and_reload(isolated_home):
 
 
 def test_type_coercion(isolated_home):
-    (isolated_home / "config.json").write_text(json.dumps({
-        "port": "9999",
-        "temperature": "0.3",
-        "flash_attn": "false",
-    }))
+    (isolated_home / "config.json").write_text(
+        json.dumps(
+            {
+                "port": "9999",
+                "temperature": "0.3",
+                "flash_attn": "false",
+            }
+        )
+    )
     cfg = cfg_mod.load_config()
     assert cfg["port"] == 9999
     assert cfg["temperature"] == pytest.approx(0.3)
@@ -87,11 +91,22 @@ def test_coerce_strict_rejects_garbage_booleans(value):
         cfg_mod._coerce_strict({"flash_attn": value})
 
 
-@pytest.mark.parametrize("value, expected", [
-    (True, True), (False, False),
-    ("true", True), ("YES", True), ("on", True), ("1", True),
-    ("false", False), ("no", False), ("off", False), ("0", False),
-], ids=repr)
+@pytest.mark.parametrize(
+    "value, expected",
+    [
+        (True, True),
+        (False, False),
+        ("true", True),
+        ("YES", True),
+        ("on", True),
+        ("1", True),
+        ("false", False),
+        ("no", False),
+        ("off", False),
+        ("0", False),
+    ],
+    ids=repr,
+)
 def test_coerce_strict_parses_booleans(value, expected):
     assert cfg_mod._coerce_strict({"flash_attn": value})["flash_attn"] is expected
 

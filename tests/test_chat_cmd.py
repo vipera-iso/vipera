@@ -76,9 +76,15 @@ def test_build_wires_planner_and_engine(monkeypatch):
             seen["plan"] = plan
             seen["path"] = path
 
-    monkeypatch.setattr(chat_cmd, "get_model", lambda name: {
-        "name": name, "path": "/tmp/m.gguf", "meta": {"n_layers": 4},
-    })
+    monkeypatch.setattr(
+        chat_cmd,
+        "get_model",
+        lambda name: {
+            "name": name,
+            "path": "/tmp/m.gguf",
+            "meta": {"n_layers": 4},
+        },
+    )
     monkeypatch.setattr(chat_cmd, "load_config", lambda: dict(DEFAULT_CONFIG))
     monkeypatch.setattr(chat_cmd, "detect", lambda: types.SimpleNamespace())
     monkeypatch.setattr(chat_cmd, "plan", lambda *a, **kw: _plan())

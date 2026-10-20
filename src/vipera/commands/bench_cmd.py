@@ -52,7 +52,9 @@ def _run_bench(engine: Engine, prompt: str, max_tokens: int) -> dict:
             if usage:
                 final_usage = usage
             try:
-                delta = chunk["choices"][0]["delta"].get("content", "") if chunk.get("choices") else ""
+                delta = (
+                    chunk["choices"][0]["delta"].get("content", "") if chunk.get("choices") else ""
+                )
             except (KeyError, IndexError, TypeError):
                 delta = ""
             if delta:
@@ -142,7 +144,8 @@ def run(
 
     for c in ctx_list:
         p = plan(
-            m["meta"], hw,
+            m["meta"],
+            hw,
             ctx=c,
             kv_cache=cfg.get("kv_cache", "q8_0"),
             n_batch=cfg.get("n_batch", 512),
@@ -150,7 +153,9 @@ def run(
 
         engine = None
         try:
-            with console.status(f"[{C_ACCENT}] Loading model with ctx={c} (GPU: {p.gpu_layers} layers)…"):
+            with console.status(
+                f"[{C_ACCENT}] Loading model with ctx={c} (GPU: {p.gpu_layers} layers)…"
+            ):
                 try:
                     engine = Engine(p, m["path"])
                 except Exception as e:

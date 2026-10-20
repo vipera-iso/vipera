@@ -1,3 +1,8 @@
+---
+title: Development
+description: Dev setup, tests, lint and type checks, CI, and the release process.
+---
+
 # Development
 
 Vipera targets Python 3.11 and 3.12, uses a `src/` layout, `hatchling` for

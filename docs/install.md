@@ -1,3 +1,8 @@
+---
+title: Install
+description: Step-by-step installation, model download, troubleshooting, and uninstall.
+---
+
 # Install Vipera
 
 This guide is for getting Vipera running on a normal laptop or desktop. You do
