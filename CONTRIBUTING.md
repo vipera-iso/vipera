@@ -87,24 +87,34 @@ Open an issue with the
 
 ## Recording the demo GIF
 
-The README embeds `docs/images/demo.gif`. To regenerate:
+The README embeds `docs/assets/demo.gif`. To regenerate:
 
 ```bash
 # Arch
-sudo pacman -S vhs ffmpeg gifsicle ttf-jetbrains-mono-nerd
+sudo pacman -S vhs ffmpeg figlet gifsicle ttf-jetbrains-mono-nerd
 fc-cache -f
 
+# Debian/Ubuntu (vhs itself needs the Charm apt repository)
+sudo apt install figlet
+
 # macOS
-brew install vhs ffmpeg gifsicle
+brew install vhs ffmpeg figlet gifsicle
 brew install --cask font-jetbrains-mono-nerd-font
 
-# record
-vhs docs/demo.tape
+# record and downscale
+make demo
 ```
 
-Alternatively, the CI workflow `.github/workflows/vhs.yml` automatically re-records the demo GIF on pushes that touch `docs/demo.tape` or `src/**`.
+`figlet` draws the opening wordmark with the `block` font; without it the first
+frame shows only the typed command. `make demo` records at 1800x1200 and
+downscales to 900x600 with lanczos, which is what keeps the glyphs sharp at the
+README's display size; running `vhs` alone only writes the intermediate MP4.
 
-Target: **under 15 s**, **under 3 MB**, terminal width ~110 cols.
+Recording also needs a model registered as `qwen2.5-0.5b-instruct-q4_k_m`,
+so this is a local step — `.github/workflows/vhs.yml` is best-effort and does
+not download a model.
+
+Target: **under 17 s**, **under 1 MB**, terminal width ~110 cols.
 
 ## Release process (maintainers)
 
