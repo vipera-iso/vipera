@@ -128,6 +128,39 @@ The distribution name is **`vipera-ai`**; the import package and CLI remain
 `vipera`. The name `vipera` on PyPI belongs to an unrelated project, so it must
 not be used in install commands or publishing configuration.
 
+### PyPI trusted publisher (one-time, per repository)
+
+The workflow cannot publish until PyPI knows this repository. `vipera-ai` 1.2.0
+was uploaded with a project-scoped API token, so the project now exists and the
+publisher to add is a **normal** one (a *pending* publisher, added under the
+account's Publishing page, is only for a project that does not exist yet — and
+PyPI invalidates it if someone else registers the name first).
+
+1. Sign in to PyPI, open the `vipera-ai` project → **Publishing** →
+   **Add a new publisher**.
+2. Fill in exactly these values — every one is part of the OIDC claim set:
+
+   | Field | Value |
+   |---|---|
+   | Owner | `vipera-iso` |
+   | Repository name | `vipera` |
+   | Workflow name | `release.yml` |
+   | Environment name | `pypi` |
+
+   The project name is fixed by the page you are on; it is not a field here.
+
+3. Push a new tag. Do not re-run the 1.2.0 job: that version is already on PyPI,
+   so its upload would be rejected as an existing file. No secret is involved:
+   the job's `id-token: write` permission is exchanged for a short-lived upload
+   token.
+
+The failure this fixes is exact: `##[error]Trusted publishing exchange failure`
+followed by `invalid-publisher: valid token, but no corresponding publisher`.
+The action prints the claims it presented (`sub`, `workflow_ref`,
+`environment`) right below that error — compare them against the table above
+before changing anything. A `403 File already exists` is a different problem:
+the version was already uploaded, so bump it instead of re-running.
+
 After publishing, create the GitHub release:
 
 ```bash
