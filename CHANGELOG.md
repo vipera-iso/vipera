@@ -8,6 +8,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Hybrid-attention KV sizing** — models that mix attention with recurrent
+  layers (KDA/BCSA, Mamba, linear attention) are detected from their tensor
+  names, and the planner now sizes the KV cache from the attention layers only
+  instead of all layers. A 72-layer hybrid with 18 KV-bearing layers no longer
+  reserves ~4x its real KV; `model inspect` reports the split and `vipera serve`
+  shows it in the allocation panel. Models with no detectable attention layers
+  keep the conservative dense estimate.
 - **2026 GGUF quant types** — `model inspect` now names `TQ2_0` (35), `MXFP4`
   (39), `NVFP4` (40), and `Q1_0` (41), and reserves `Q2_0` (42). Ids missing
   from the static table are resolved through `gguf.GGMLQuantizationType`, an

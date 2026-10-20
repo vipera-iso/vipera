@@ -107,10 +107,12 @@ The algorithm, in order:
    engine's only fallback is CPU-only — far slower than 11 layers.
 5. **Layer placement.** llama.cpp allocates the KV cache per layer: only the
    offloaded layers keep their slice of KV in VRAM. So
-   `per_layer_kv = kv_gb / n_layers`,
+   `per_layer_kv = kv_gb / kv_layers`,
    `gpu_layers = min(n_layers, floor(safe / (layer_gb + per_layer_kv)))`.
    Subtracting the whole KV cache before offloading anything would report 0
-   layers for models that actually fit a useful hybrid split.
+   layers for models that actually fit a useful hybrid split. `kv_layers` is
+   every layer for a dense model and only the attention subset for a hybrid one
+   (see below); the host-side KV charge follows the same split.
    `layer_gb` is `meta["layer_bytes"]` when the GGUF index was read: the mean
    size of one repeating `blk.N` block, which excludes `token_embd` and
    `output.weight` because they never follow a layer to the GPU. Without that
@@ -131,6 +133,31 @@ The algorithm, in order:
 2048-context plan; the other profiles only influence the placement note. The
 planner does not emit MoE-specific flags (`--n-cpu-moe` or equivalents); MoE
 models are placed by the same per-layer arithmetic.
+
+### Hybrid attention
+
+Stacks that mix attention with recurrent layers (KDA/BCSA, Mamba, linear
+attention) keep a KV cache only on their attention layers; the others carry a
+fixed-size state that does not grow with context. Sizing KV with `n_layers`
+over-reserves a 72-layer hybrid by roughly 4x and makes the planner offload far
+too few layers.
+
+The analyzer derives the split from the tensor index, not from an architecture
+whitelist: a layer counts as KV-bearing when it has an `attn_k*` (including
+MLA's `attn_k_b`/`attn_kv_a_mqa`), `attn_v*`, or `attn_qkv*` tensor, and as
+recurrent when it has `ssm_`, `linear_attn`, `kda`, `mamba`, or `conv1d`.
+Recurrent wins when both match, which is the safe side: a state-only layer
+counted as KV over-reserves rather than under-reserves.
+`metadata.hybrid_attention` is true only when both groups are non-empty, which
+keeps dense models on the old path. If no layer is detected as KV-bearing at
+all, the split is treated as unknown and every layer keeps paying for KV — the
+conservative direction for a VRAM budget, since missing KV is an OOM while an
+over-estimate costs a layer or two of offload.
+
+The estimate covers K/V tensors only. The recurrent state itself (chunked
+`conv1d` windows, `A_log` decay, SSM widths) is not sized from the GGUF, so the
+plan remains an underestimate for those layers. Treat `Plan.kv_cache_gb` as a
+KV figure, not as total activation memory.
 
 ## GGUF optimization
 
@@ -170,6 +197,15 @@ Quality warnings fire only when the bytes-per-weight is known and below Q4_K; an
 unknown id is not assumed to be low quality. `--target-size` math uses the
 block-table bytes-per-weight (NVFP4 4.5, MXFP4 4.25, TQ2_0 2.0625, TQ1_0
 1.6875, Q1_0 1.125), not the nominal bit width.
+
+### Layer classification
+
+`layer_distribution` lists `blk.N` blocks only; token embeddings and
+`output.weight` are counted separately because they never follow a layer to the
+GPU. Tensor categories are matched by name: `attn_*` → attention, `ffn_*` →
+feed-forward, `ssm_*`/`linear_attn*`/`kda*`/`conv1d` → recurrent, `token_embd`
+and `output` → embeddings. The same attention markers feed the hybrid split
+described under [Hybrid attention](#hybrid-attention).
 
 ## Engine
 

@@ -8,6 +8,7 @@ from vipera import gguf_analyzer as _analyzer
 from vipera.commands import model_cmd
 from vipera.gguf_analyzer import (
     GGUFAnalysisError,
+    _attention_profile,
     analyze_gguf,
     analyze_gguf_structure,
 )
@@ -293,3 +294,102 @@ def test_analyze_reports_unsupported_quant_type_instead_of_crashing(tmp_path):
 def test_filename_quant_detects_nvfp4_and_tq2_0(tmp_path):
     assert _analyzer._QUANT_RE.search("Model-NVFP4.gguf").group(1).upper() == "NVFP4"
     assert _analyzer._QUANT_RE.search("Model-TQ2_0.gguf").group(1).upper() == "TQ2_0"
+
+
+# --- hybrid attention detection (KDA/BCSA/Mamba style) -----------------------
+
+
+def _write_gguf_multi(path, tensors, *, block_count):
+    """Write a GGUF v3 file holding several tensors: [(name, type_id, dims)]."""
+    GGML_QUANT_SIZES, GGMLQuantizationType = _gguf_quant_table()
+
+    infos, payload = b"", b""
+    for name, type_id, dims in tensors:
+        block_elems, block_bytes = GGML_QUANT_SIZES[GGMLQuantizationType(type_id)]
+        elements = 1
+        for dim in dims:
+            elements *= dim
+        infos += _gguf_str(name) + struct.pack("<I", len(dims))
+        infos += b"".join(struct.pack("<Q", dim) for dim in dims)
+        infos += struct.pack("<I", type_id) + struct.pack("<Q", len(payload))
+        payload += b"\x00" * (elements // block_elems * block_bytes)
+
+    kv = _gguf_str("general.architecture") + struct.pack("<I", 8) + _gguf_str("llama")
+    kv += _gguf_str("llama.block_count") + struct.pack("<I", 4) + struct.pack("<I", block_count)
+    header = b"GGUF" + struct.pack("<I", 3) + struct.pack("<Q", len(tensors))
+    header += struct.pack("<Q", 2)
+    body = header + kv + infos
+    body += b"\x00" * ((-len(body)) % 32)
+    path.write_bytes(body + payload)
+
+
+def test_detects_hybrid_attention_layers(tmp_path):
+    tensors = []
+    for layer in range(3):
+        # KDA/SSM layers: fixed-size state, no KV cache.
+        tensors.append((f"blk.{layer}.ssm_conv1d.weight", 0, [4, 16]))
+        tensors.append((f"blk.{layer}.ffn_down.weight", 0, [16, 16]))
+    # One real attention layer.
+    tensors += [
+        ("blk.3.attn_k.weight", 0, [16, 16]),
+        ("blk.3.attn_v.weight", 0, [16, 16]),
+        ("blk.3.ffn_down.weight", 0, [16, 16]),
+    ]
+    path = tmp_path / "hybrid.gguf"
+    _write_gguf_multi(path, tensors, block_count=4)
+
+    meta = analyze_gguf(str(path))["metadata"]
+
+    assert meta["hybrid_attention"] is True
+    assert meta["kv_layers"] == 1
+    assert meta["recurrent_layers"] == 3
+    assert meta["n_layers"] == 4
+
+
+def test_dense_model_is_not_marked_hybrid(tmp_path):
+    tensors = []
+    for layer in range(2):
+        tensors.append((f"blk.{layer}.attn_k.weight", 0, [16, 16]))
+        tensors.append((f"blk.{layer}.attn_v.weight", 0, [16, 16]))
+    path = tmp_path / "dense.gguf"
+    _write_gguf_multi(path, tensors, block_count=2)
+
+    meta = analyze_gguf(str(path))["metadata"]
+
+    assert meta["hybrid_attention"] is False
+    assert meta["kv_layers"] == 2
+    assert meta["recurrent_layers"] == 0
+
+
+def test_recurrent_only_model_falls_back_to_dense_kv_budget(tmp_path):
+    # No attention tensors at all: the split is not understood, so the planner
+    # must keep the conservative dense estimate rather than assume zero KV.
+    tensors = [("blk.0.ssm_conv1d.weight", 0, [4, 16])]
+    path = tmp_path / "recurrent.gguf"
+    _write_gguf_multi(path, tensors, block_count=1)
+
+    meta = analyze_gguf(str(path))["metadata"]
+
+    assert meta["hybrid_attention"] is False
+    assert meta["kv_layers"] == 1
+
+
+def test_attention_profile_handles_fused_and_mla_tensor_names():
+    # Fused QKV (Qwen3-Next style), MLA (DeepSeek attn_k_b/attn_kv_a_mqa) and
+    # KDA layers must land in the right bucket without an architecture table.
+    names = [
+        "blk.0.attn_qkv.weight",
+        "blk.0.ffn_down.weight",
+        "blk.1.attn_k_b.weight",
+        "blk.1.attn_kv_a_mqa.weight",
+        "blk.1.ffn_down.weight",
+        "blk.2.linear_attn.qkv.weight",
+        "blk.2.linear_attn.conv1d.weight",
+        "blk.2.ffn_down.weight",
+    ]
+
+    profile = _attention_profile(names, 3)
+
+    assert profile["hybrid_attention"] is True
+    assert profile["kv_layers"] == 2
+    assert profile["recurrent_layers"] == 1

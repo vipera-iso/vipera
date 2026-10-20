@@ -18,6 +18,10 @@ class Plan:
     # room for compute buffers. 0.0 means "not estimated" (callers skip the
     # preflight check), which keeps hand-built Plans in tests working.
     ram_estimate_gb: float = 0.0
+    # KV cache size this plan expects, and how many layers actually keep KV.
+    # 0.0 / 0 mean "not estimated" (hand-built Plans in tests stay valid).
+    kv_cache_gb: float = 0.0
+    kv_layers: int = 0
 
 
 _VALID_PROFILES = ("auto", "cpu", "gpu", "lowmem")
@@ -39,6 +43,20 @@ _KV_BYTES_PER_ELEM = {
 }
 
 
+def _kv_layer_count(meta: dict) -> int:
+    """Number of layers that carry a KV cache.
+
+    Dense models: every layer. Hybrid models report the attention subset in
+    ``kv_layers``; anything missing or nonsensical falls back to the full stack,
+    which is the conservative direction for a VRAM budget.
+    """
+    n_layers = int(meta.get("n_layers") or 0)
+    kv_layers = int(meta.get("kv_layers") or 0)
+    if kv_layers <= 0 or (n_layers > 0 and kv_layers > n_layers):
+        return n_layers
+    return kv_layers
+
+
 def _estimate_kv_cache_gb(meta: dict, ctx: int, kv_cache: str) -> float:
     """Estimate KV-cache size in GB for a given context and cache dtype.
 
@@ -46,10 +64,13 @@ def _estimate_kv_cache_gb(meta: dict, ctx: int, kv_cache: str) -> float:
     back to a no-GQA worst-case estimate from embedding_length, then to the
     legacy 1.5 GB @ 8k heuristic.
     """
-    n_layers = int(meta.get("n_layers") or 0)
+    # Hybrid stacks (KDA/BCSA/Mamba) keep a KV cache only on their attention
+    # layers: the recurrent layers carry a fixed-size state instead. Using
+    # n_layers here overestimates a 72-layer hybrid by roughly 4x.
+    kv_layers = _kv_layer_count(meta)
     bytes_per_elem = _KV_BYTES_PER_ELEM.get(kv_cache, 2.0)
 
-    if n_layers > 0:
+    if kv_layers > 0:
         n_heads = int(meta.get("n_heads") or 0)
         n_kv_heads = int(meta.get("n_kv_heads") or 0) or n_heads
         head_dim = int(meta.get("head_dim") or 0)
@@ -59,13 +80,13 @@ def _estimate_kv_cache_gb(meta: dict, ctx: int, kv_cache: str) -> float:
             head_dim = embed // n_heads
 
         if n_kv_heads > 0 and head_dim > 0:
-            # K + V, layers x kv_heads x head_dim x ctx x bytes
-            elems = 2 * n_layers * n_kv_heads * head_dim * ctx
+            # K + V, kv-bearing layers x kv_heads x head_dim x ctx x bytes
+            elems = 2 * kv_layers * n_kv_heads * head_dim * ctx
             return elems * bytes_per_elem / 1024**3
 
         if embed > 0:
             # No GQA info — assume n_kv_heads == n_heads (worst case)
-            elems = 2 * n_layers * embed * ctx
+            elems = 2 * kv_layers * embed * ctx
             return elems * bytes_per_elem / 1024**3
 
     # Last-resort heuristic (conservative for ~7-8B models only).
@@ -84,6 +105,7 @@ def plan(
         raise ValueError(f"unknown profile '{profile}' (valid: {', '.join(_VALID_PROFILES)})")
 
     n_layers = int(meta.get("n_layers") or 32)
+    kv_layers = _kv_layer_count(meta) or n_layers
     size_bytes = int(meta.get("size_bytes") or 4_000_000_000)
 
     cpu_threads = max(1, hw.cpu_cores - 1)
@@ -103,6 +125,7 @@ def plan(
             offload_kqv=False,
             use_mlock=False,
             note="CPU ONLY (Low Memory Profile)",
+            kv_layers=kv_layers,
         )
 
     # 1 GB for the OS/display driver, plus room for llama.cpp compute buffers.
@@ -114,7 +137,9 @@ def plan(
     # 14B/Q4 model on a 4 GB card look like it had 0.2 GB free (0 layers) even
     # though ~9 layers actually fit. Budget both weights and KV per layer.
     kv_cache_gb = _estimate_kv_cache_gb(meta, ctx, kv_cache)
-    per_layer_kv_gb = kv_cache_gb / n_layers if n_layers else 0.0
+    # Charge each KV-bearing layer, not each layer: on a hybrid stack most
+    # layers hold a fixed recurrent state and never pay for context.
+    per_layer_kv_gb = kv_cache_gb / kv_layers if kv_layers else 0.0
 
     # Repeating-layer weights, when the GGUF index is available. Embeddings and
     # output.weight follow no layer to the GPU: on a 14B/Q4 model they are ~1 GB
@@ -163,7 +188,7 @@ def plan(
     # against model size alone ignores a 5 GB KV cache (Q8_0 at 64K), which
     # turns an mlock into an OOM on a 15 GB / no-swap box.
     cpu_weights_gb = max(0.0, model_size_gb - layer_gb * gpu_layers)
-    cpu_kv_gb = per_layer_kv_gb * (n_layers - gpu_layers)
+    cpu_kv_gb = per_layer_kv_gb * max(0, kv_layers - gpu_layers)
     host_headroom_gb = hw.ram_free_gb - cpu_weights_gb - cpu_kv_gb
     # 3 GB of headroom leaves room for llama.cpp compute buffers; pinning with
     # less has OOM-killed this class of machine mid-load (no swap).
@@ -183,4 +208,6 @@ def plan(
         use_mlock=use_mlock,
         note=note,
         ram_estimate_gb=ram_estimate_gb,
+        kv_cache_gb=kv_cache_gb,
+        kv_layers=kv_layers,
     )

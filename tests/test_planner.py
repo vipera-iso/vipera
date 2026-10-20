@@ -249,3 +249,49 @@ def test_head_dim_derived_from_embedding_when_absent():
     meta = {"n_layers": 32, "n_kv_heads": 8, "n_heads": 32, "embedding_length": 4096}
     expected = 2 * 32 * 8 * 128 * 8192 * 1.0 / _GIB  # 4096 // 32 == 128
     assert _estimate_kv_cache_gb(meta, 8192, "q8_0") == pytest.approx(expected)
+
+
+# --- hybrid attention: KV footprint covers attention layers only ------------
+
+_HYBRID = {
+    "n_layers": 72,
+    "n_heads": 32,
+    "n_kv_heads": 8,
+    "head_dim": 128,
+    "size_bytes": 20 * _GIB,
+}
+
+
+def test_kv_estimate_counts_attention_layers_only():
+    hybrid = _estimate_kv_cache_gb({**_HYBRID, "kv_layers": 18}, 8192, "q8_0")
+    dense = _estimate_kv_cache_gb(_HYBRID, 8192, "q8_0")
+
+    # 18 of 72 layers keep a KV cache; the other 54 are recurrent and hold a
+    # fixed-size state that does not grow with context.
+    assert hybrid == pytest.approx(dense * 18 / 72)
+    per_layer = 2 * 8 * 128 * 8192 * 1.0 / _GIB
+    assert hybrid == pytest.approx(18 * per_layer)
+
+
+def test_hybrid_estimate_ignores_nonsense_layer_counts():
+    # More KV layers than layers: clamp instead of inflating the reservation.
+    assert _estimate_kv_cache_gb({**_HYBRID, "kv_layers": 200}, 8192, "q8_0") == (
+        pytest.approx(_estimate_kv_cache_gb(_HYBRID, 8192, "q8_0"))
+    )
+    assert _estimate_kv_cache_gb({**_HYBRID, "kv_layers": 0}, 8192, "q8_0") == (
+        pytest.approx(_estimate_kv_cache_gb(_HYBRID, 8192, "q8_0"))
+    )
+
+
+def test_plan_exposes_hybrid_kv_split():
+    hw = _hw(gpu_name="RTX 3050", vram_total_gb=8.0, vram_free_gb=7.6)
+    p = plan({**_HYBRID, "kv_layers": 18}, hw, ctx=8192, kv_cache="q8_0")
+
+    assert p.kv_layers == 18
+    assert p.kv_cache_gb == pytest.approx(0.28125, abs=1e-4)
+    assert p.kv_cache_gb < _estimate_kv_cache_gb(_HYBRID, 8192, "q8_0")
+
+
+def test_plan_kv_layers_defaults_to_all_layers():
+    p = plan({"n_layers": 32, "size_bytes": 4 * _GIB}, _hw())
+    assert p.kv_layers == 32

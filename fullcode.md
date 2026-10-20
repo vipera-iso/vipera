@@ -552,6 +552,9 @@ def _read_meta(path: Path, name: str | None = None) -> dict:
         "n_kv_heads": 0,
         "head_dim": 0,
         "layer_bytes": 0,
+        "hybrid_attention": False,
+        "kv_layers": 0,
+        "recurrent_layers": 0,
     }
 
     m = _QUANT_RE.search(name or path.name)
@@ -576,6 +579,11 @@ def _read_meta(path: Path, name: str | None = None) -> dict:
         meta["n_heads"] = int(am.get("n_heads") or 0)
         meta["n_kv_heads"] = int(am.get("n_kv_heads") or 0)
         meta["head_dim"] = int(am.get("head_dim") or 0)
+        # Hybrid stacks (KDA/BCSA/Mamba) keep KV only on attention layers; the
+        # planner needs the split to size the cache instead of assuming dense.
+        meta["hybrid_attention"] = bool(am.get("hybrid_attention"))
+        meta["kv_layers"] = int(am.get("kv_layers") or 0)
+        meta["recurrent_layers"] = int(am.get("recurrent_layers") or 0)
         # Size of one repeating transformer layer, excluding the non-repeating
         # tensors (token_embd, output.weight, ...). The planner budgets VRAM per
         # layer from this; size_bytes/n_layers would charge those tensors to
@@ -775,6 +783,13 @@ def inspect_model(
     )
     summary.add_row("quant (file name)", str(meta.get("quant") or "?"))
     summary.add_row("quant (dominant)", str(meta.get("dominant_quant") or "?"))
+    if meta.get("hybrid_attention"):
+        summary.add_row("attention", "hybrid")
+        summary.add_row(
+            "kv layers",
+            f"{meta.get('kv_layers', 0)}/{meta.get('n_layers', 0)}"
+            f" (recurrent: {meta.get('recurrent_layers', 0)})",
+        )
     summary.add_row("tensors", str(meta.get("tensor_count", 0)))
     summary.add_row("size", _format_bytes(int(meta.get("file_size_bytes", 0))))
     console.print(summary)
@@ -1380,10 +1395,16 @@ def start(
         "    ├─ layer offload " + "·" * 28 + f" {p.gpu_layers}/{n_layers_total}\n",
         style=C_TEXT,
     )
+    kv_suffix = f" · {p.kv_cache_gb:.2f} GB" if p.kv_cache_gb > 0 else ""
     content.append(
-        f"    ├─ kv cache ({p.kv_cache}) " + "·" * 24 + " [ OK ]\n",
+        f"    ├─ kv cache ({p.kv_cache}) " + "·" * 24 + f" [ OK ]{kv_suffix}\n",
         style=C_TEXT,
     )
+    if p.kv_layers and p.kv_layers < n_layers_total:
+        content.append(
+            "    ├─ hybrid attention " + "·" * 21 + f" {p.kv_layers}/{n_layers_total} kv layers\n",
+            style=C_TEXT,
+        )
     content.append(
         "    └─ flash attention " + "·" * 27 + f" [ {'ON' if p.flash_attn else 'OFF'} ]\n",
         style=C_TEXT,
@@ -2055,6 +2076,13 @@ _QUANT_RANK = {
     "NVFP4": 4.0,
 }
 
+# Tensor names that imply a layer keeps a KV cache, and names that imply a
+# recurrent/SSM layer with a fixed-size state instead. Hybrid stacks (KDA/BCSA,
+# Mamba, RWKV) mix both; the planner only needs the split.
+# `attn_k` also covers MLA/KDA-adjacent names: attn_k_b, attn_kv_a_mqa, attn_k_norm.
+_KV_TENSOR_MARKERS = ("attn_k", "attn_v", "attn_qkv")
+_RECURRENT_TENSOR_MARKERS = ("ssm_", "linear_attn", "kda", "mamba", "conv1d")
+
 _CRITICAL_TENSORS = ("ffn_down", "attn_v")
 _CRITICAL_THRESHOLD = "Q4_K"
 _CRITICAL_RANK = _QUANT_RANK[_CRITICAL_THRESHOLD]
@@ -2130,6 +2158,39 @@ def _classify_tensor(name: str) -> str:
 def _layer_index(name: str) -> int | None:
     match = re.match(r"blk\.(\d+)\.", name)
     return int(match.group(1)) if match else None
+
+
+def _attention_profile(tensor_names: list[str], n_layers: int | None) -> dict[str, Any]:
+    """Split layers into KV-cache layers and recurrent (state-only) layers.
+
+    Detection is name-based because GGUF metadata does not describe per-layer
+    attention type: KDA/Mamba layers carry `ssm_*` / `linear_attn` / `conv1d`
+    tensors, attention layers carry `attn_k`/`attn_v`/`attn_qkv`. A layer that
+    matches both counts as recurrent, since over-reserving KV is the safe side
+    of a memory budget.
+    """
+    kv_layers: set[int] = set()
+    recurrent_layers: set[int] = set()
+    for name in tensor_names:
+        layer = _layer_index(name)
+        if layer is None:
+            continue
+        lowered = name.lower()
+        if any(marker in lowered for marker in _RECURRENT_TENSOR_MARKERS):
+            recurrent_layers.add(layer)
+        elif any(marker in lowered for marker in _KV_TENSOR_MARKERS):
+            kv_layers.add(layer)
+
+    recurrent_layers -= kv_layers
+    total = int(n_layers or 0) or (max(kv_layers | recurrent_layers, default=-1) + 1)
+    hybrid = bool(recurrent_layers) and bool(kv_layers)
+    return {
+        "hybrid_attention": hybrid,
+        # Only shrink the budget when the split is actually understood; a
+        # partial match on a dense model must not reduce the KV estimate.
+        "kv_layers": len(kv_layers) if hybrid else total,
+        "recurrent_layers": len(recurrent_layers),
+    }
 
 
 def _field_value(fields: dict, key: str) -> Any:
@@ -2278,6 +2339,8 @@ def analyze_gguf(path: str) -> dict[str, Any]:
     if n_layers is None:
         n_layers = max_layer + 1
 
+    attention = _attention_profile([t["name"] for t in tensor_map], n_layers)
+
     filename_quant = None
     match = _QUANT_RE.search(model_path.name)
     if match:
@@ -2301,6 +2364,7 @@ def analyze_gguf(path: str) -> dict[str, Any]:
             "dominant_quant": dominant_quant,
             "tensor_count": len(tensor_map),
             "file_size_bytes": os.path.getsize(model_path),
+            **attention,
         },
         "tensor_map": tensor_map,
         "layer_distribution": dict(
@@ -2702,6 +2766,10 @@ class Plan:
     # room for compute buffers. 0.0 means "not estimated" (callers skip the
     # preflight check), which keeps hand-built Plans in tests working.
     ram_estimate_gb: float = 0.0
+    # KV cache size this plan expects, and how many layers actually keep KV.
+    # 0.0 / 0 mean "not estimated" (hand-built Plans in tests stay valid).
+    kv_cache_gb: float = 0.0
+    kv_layers: int = 0
 
 
 _VALID_PROFILES = ("auto", "cpu", "gpu", "lowmem")
@@ -2723,6 +2791,20 @@ _KV_BYTES_PER_ELEM = {
 }
 
 
+def _kv_layer_count(meta: dict) -> int:
+    """Number of layers that carry a KV cache.
+
+    Dense models: every layer. Hybrid models report the attention subset in
+    ``kv_layers``; anything missing or nonsensical falls back to the full stack,
+    which is the conservative direction for a VRAM budget.
+    """
+    n_layers = int(meta.get("n_layers") or 0)
+    kv_layers = int(meta.get("kv_layers") or 0)
+    if kv_layers <= 0 or (n_layers > 0 and kv_layers > n_layers):
+        return n_layers
+    return kv_layers
+
+
 def _estimate_kv_cache_gb(meta: dict, ctx: int, kv_cache: str) -> float:
     """Estimate KV-cache size in GB for a given context and cache dtype.
 
@@ -2730,10 +2812,13 @@ def _estimate_kv_cache_gb(meta: dict, ctx: int, kv_cache: str) -> float:
     back to a no-GQA worst-case estimate from embedding_length, then to the
     legacy 1.5 GB @ 8k heuristic.
     """
-    n_layers = int(meta.get("n_layers") or 0)
+    # Hybrid stacks (KDA/BCSA/Mamba) keep a KV cache only on their attention
+    # layers: the recurrent layers carry a fixed-size state instead. Using
+    # n_layers here overestimates a 72-layer hybrid by roughly 4x.
+    kv_layers = _kv_layer_count(meta)
     bytes_per_elem = _KV_BYTES_PER_ELEM.get(kv_cache, 2.0)
 
-    if n_layers > 0:
+    if kv_layers > 0:
         n_heads = int(meta.get("n_heads") or 0)
         n_kv_heads = int(meta.get("n_kv_heads") or 0) or n_heads
         head_dim = int(meta.get("head_dim") or 0)
@@ -2743,13 +2828,13 @@ def _estimate_kv_cache_gb(meta: dict, ctx: int, kv_cache: str) -> float:
             head_dim = embed // n_heads
 
         if n_kv_heads > 0 and head_dim > 0:
-            # K + V, layers x kv_heads x head_dim x ctx x bytes
-            elems = 2 * n_layers * n_kv_heads * head_dim * ctx
+            # K + V, kv-bearing layers x kv_heads x head_dim x ctx x bytes
+            elems = 2 * kv_layers * n_kv_heads * head_dim * ctx
             return elems * bytes_per_elem / 1024**3
 
         if embed > 0:
             # No GQA info — assume n_kv_heads == n_heads (worst case)
-            elems = 2 * n_layers * embed * ctx
+            elems = 2 * kv_layers * embed * ctx
             return elems * bytes_per_elem / 1024**3
 
     # Last-resort heuristic (conservative for ~7-8B models only).
@@ -2768,6 +2853,7 @@ def plan(
         raise ValueError(f"unknown profile '{profile}' (valid: {', '.join(_VALID_PROFILES)})")
 
     n_layers = int(meta.get("n_layers") or 32)
+    kv_layers = _kv_layer_count(meta) or n_layers
     size_bytes = int(meta.get("size_bytes") or 4_000_000_000)
 
     cpu_threads = max(1, hw.cpu_cores - 1)
@@ -2787,6 +2873,7 @@ def plan(
             offload_kqv=False,
             use_mlock=False,
             note="CPU ONLY (Low Memory Profile)",
+            kv_layers=kv_layers,
         )
 
     # 1 GB for the OS/display driver, plus room for llama.cpp compute buffers.
@@ -2798,7 +2885,9 @@ def plan(
     # 14B/Q4 model on a 4 GB card look like it had 0.2 GB free (0 layers) even
     # though ~9 layers actually fit. Budget both weights and KV per layer.
     kv_cache_gb = _estimate_kv_cache_gb(meta, ctx, kv_cache)
-    per_layer_kv_gb = kv_cache_gb / n_layers if n_layers else 0.0
+    # Charge each KV-bearing layer, not each layer: on a hybrid stack most
+    # layers hold a fixed recurrent state and never pay for context.
+    per_layer_kv_gb = kv_cache_gb / kv_layers if kv_layers else 0.0
 
     # Repeating-layer weights, when the GGUF index is available. Embeddings and
     # output.weight follow no layer to the GPU: on a 14B/Q4 model they are ~1 GB
@@ -2847,7 +2936,7 @@ def plan(
     # against model size alone ignores a 5 GB KV cache (Q8_0 at 64K), which
     # turns an mlock into an OOM on a 15 GB / no-swap box.
     cpu_weights_gb = max(0.0, model_size_gb - layer_gb * gpu_layers)
-    cpu_kv_gb = per_layer_kv_gb * (n_layers - gpu_layers)
+    cpu_kv_gb = per_layer_kv_gb * max(0, kv_layers - gpu_layers)
     host_headroom_gb = hw.ram_free_gb - cpu_weights_gb - cpu_kv_gb
     # 3 GB of headroom leaves room for llama.cpp compute buffers; pinning with
     # less has OOM-killed this class of machine mid-load (no swap).
@@ -2867,6 +2956,8 @@ def plan(
         use_mlock=use_mlock,
         note=note,
         ram_estimate_gb=ram_estimate_gb,
+        kv_cache_gb=kv_cache_gb,
+        kv_layers=kv_layers,
     )
 
 # registry.py
