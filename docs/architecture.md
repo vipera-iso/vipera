@@ -300,6 +300,11 @@ These are observable in the current code and worth knowing before filing a bug:
 - Tool/function calling, multimodal message content (arrays of parts), and the
   remaining OpenAI endpoints (`/v1/completions`, `/v1/embeddings`) are not
   implemented.
+- Speculative decoding is unavailable. DFlash is a `llama-server` feature
+  (`--spec-type draft-dflash`), and the in-process `llama_cpp.Llama` backend
+  cannot enable it; `draft_model=` would be classic speculative decoding, not
+  DFlash. A subprocess backend is proposed in
+  [design/llama-server-backend.md](design/llama-server-backend.md).
 - The `model` field of a chat request is accepted and ignored; the response
   `model` field comes from `llama.cpp`, not from the gateway alias.
 - No authentication, TLS, CORS, or rate limiting. The default bind address is
