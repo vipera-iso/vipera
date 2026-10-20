@@ -1186,7 +1186,13 @@ def rm_cmd(
         cfg["default_model"] = None
         save_config(cfg)
 
-    Path(m["path"]).unlink(missing_ok=True)
+    path = Path(m["path"])
+    if any(other["path"] == m["path"] for other in list_models()):
+        # Two aliases can share one file (`model search` for the same download
+        # twice); deleting it here would break the alias that remains.
+        console.print(f"[{C_DIM}]  Kept {path}: another alias still uses it.[/]")
+    else:
+        path.unlink(missing_ok=True)
 
     console.print(f"[{C_GREEN}] ✓ Removed: {name}[/]")
 
@@ -1266,6 +1272,15 @@ def _resolve_option(val, default):
 
 def _pid_file(port: int) -> Path:
     return VIPERA_HOME / f"serve-{port}.pid"
+
+
+_LOOPBACK_HOSTS = {"localhost", "::1"}
+
+
+def _is_loopback(host: str) -> bool:
+    """Only loopback binds keep the unauthenticated API on this machine."""
+    h = (host or "").strip().lower()
+    return h in _LOOPBACK_HOSTS or h.startswith("127.")
 
 
 def _quick_bench(engine: Engine) -> None:
@@ -1357,12 +1372,12 @@ def start(
         console.print(f"[{C_RED}] ✗ Model not found: {model}[/]")
         raise typer.Exit(1)
 
-    if host not in {"127.0.0.1", "localhost", "::1", "0.0.0.0"}:
+    if not _is_loopback(host):
         console.print(
             f"[{C_RED}] ⚠ WARNING: binding to {host} exposes the model to the "
             f"network with no authentication.[/]"
         )
-        console.print(f"[{C_DIM}]  Aborting in 5s — press Ctrl+C to stop now.[/]")
+        console.print(f"[{C_DIM}]  Serving in 5s — press Ctrl+C to abort now.[/]")
         try:
             time.sleep(5)
         except KeyboardInterrupt:
@@ -1705,6 +1720,8 @@ def config_cmd(
 import contextlib
 import json
 import os
+import shutil
+import sys
 from pathlib import Path
 
 VIPERA_HOME = Path(os.environ.get("VIPERA_HOME") or (Path.home() / ".vipera"))
@@ -1794,11 +1811,33 @@ def _coerce_strict(cfg: dict) -> dict:
     return cfg
 
 
+def quarantine_corrupt(path: Path, exc: Exception) -> Path:
+    """Keep an unreadable JSON file before anything overwrites it.
+
+    Loads fall back to defaults, so without this copy the next
+    ``system config``/``model import`` would silently erase the user's file.
+    """
+    backup = path.with_name(path.name + ".corrupt")
+    with contextlib.suppress(OSError):
+        shutil.copy2(path, backup)
+    print(
+        f"vipera: {path} is unreadable ({exc}); using defaults. Original kept at {backup}",
+        file=sys.stderr,
+    )
+    return backup
+
+
 def load_config() -> dict:
     ensure_dirs()
     if CONFIG_FILE.exists():
-        with contextlib.suppress(Exception):
-            return _coerce({**DEFAULT_CONFIG, **json.loads(CONFIG_FILE.read_text())})
+        try:
+            data = json.loads(CONFIG_FILE.read_text())
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+            quarantine_corrupt(CONFIG_FILE, exc)
+        else:
+            if isinstance(data, dict):
+                return _coerce({**DEFAULT_CONFIG, **data})
+            quarantine_corrupt(CONFIG_FILE, ValueError("not a JSON object"))
     return dict(DEFAULT_CONFIG)
 
 
@@ -2961,19 +3000,24 @@ def plan(
     )
 
 # registry.py
-import contextlib
 import json
 import os
 from datetime import UTC, datetime
 
-from vipera.config import REGISTRY_FILE, ensure_dirs
+from vipera.config import REGISTRY_FILE, ensure_dirs, quarantine_corrupt
 
 
 def _load() -> dict:
     ensure_dirs()
     if REGISTRY_FILE.exists():
-        with contextlib.suppress(Exception):
-            return json.loads(REGISTRY_FILE.read_text())
+        try:
+            data = json.loads(REGISTRY_FILE.read_text())
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+            quarantine_corrupt(REGISTRY_FILE, exc)
+        else:
+            if isinstance(data, dict):
+                return data
+            quarantine_corrupt(REGISTRY_FILE, ValueError("not a JSON object"))
     return {}
 
 
@@ -3516,3 +3560,79 @@ def pick_model(title: str = "SELECT A MODEL") -> str:
 
     return installed[choice - 1]["name"]
 ```
+
+---
+
+# Đề xuất v2: 5 layer tối ưu cho Vipera
+
+> ⚠️ **ĐỀ XUẤT, CHƯA TRIỂN KHAI.** v2 chỉnh ngày 2026-10-20 sau khi đối chiếu từng ý review với code thật. Chưa có dòng nào viết vào `src/`.
+
+## Kết quả đối chiếu ý kiến review
+
+| # | Ý kiến review | Kết luận |
+|---|---|---|
+| 1 | L2 nói planner "chỉ tính được f16/q8_0/q4_0" | **Đúng — tôi sai, sửa.** `planner._KV_BYTES_PER_ELEM` (`planner.py:37`) có **5** loại: f32/f16/q8_0/q4_0/q4_1; `engine._KV_TYPES` (`engine.py:9`) và `config._KV_CACHE_TYPES` (`config.py:29`) khớp đúng 5 loại |
+| 2 | 60 quant type của ik fork áp cho **weight**, không áp cho KV | **Đúng.** llama.cpp chỉ nhận 9 KV dtype (`common/arg.cpp:304-313`: f32, f16, bf16, q8_0, q4_0, q4_1, iq4_nl, q5_0, q5_1). Planner đã phủ 5/9 → mở thêm tối đa 4 loại, lợi ích nhỏ. **L2 phải viết lại** |
+| 3 | "−15% weight Hermes-4" là giả thuyết | **Đúng.** Chưa đo trên model này. Chuyển thành **tiêu chí nghiệm thu**: PPL/KL measured trên chính Hermes-4 trước khi chấp nhận con số |
+| 4 | "vipera bench đã có sẵn" cho L5 | **Đúng.** `bench run` chỉ đo speed (TTFT/prefill/gen). Perplexity + KL per-tensor là **code mới** = phần lớn nhất của L5 |
+| 5 | `bench_cmd._run_bench` gọi thẳng `engine.llm.tokenize` | **Đúng** (`bench_cmd.py:35`) → cần `Engine.tokenize()` wrapper cho backend llama-server |
+| 6 | `serve_cmd.start` đọc `engine.plan.gpu_layers/kv_cache_gb/kv_layers` | **Không đúng.** `serve_cmd.py:152` tự gọi `plan(m["meta"], hw, ...)` từ planner — **không phụ thuộc backend**. Nơi duy nhất đọc `engine.plan` là **`bench_cmd.py:175,183`** (dự phòng `or max(engine.plan.gpu_layers, 1)`) → fix ở bench_cmd; panel serve chạy nguyên |
+| 7 | server.py lock + `CancelledError` giả định sync generator | **Chấp nhận** — đọc tĩnh không chứng minh được; bắt buộc có test cancel-giữa-stream (test plan ở dưới) |
+| 8 | "Repo chưa thấy tests/" | **Không đúng.** `tests/` tồn tại với **13 file** (test_planner.py, test_engine.py, test_serve_cmd.py, …), `pytest -q` = **167 passed**. (Có thể nhìn từ `fullcode.md` — file này chỉ dump `src/` theo thiết kế.) → **mở rộng** bộ test có sẵn, không tạo mới từ đầu |
+| 9 | `vipera model quantize` đã ghi `*-vipera-<quant>.gguf` | **Đúng** (`optimizer.py:286`, `default_output_path`) → L1 dùng lại pipeline này để có rollback |
+| 10 | Fallback cuối của planner bỏ qua `kv_cache` | **Đúng** (`planner.py:92-93`) → fix thuộc scope L2, kèm test |
+
+## Bug nhận diện (thuộc scope L2)
+
+`planner.py:92-93` — fallback cuối cùng không nhân theo bytes/elem:
+
+```python
+# hiện tại: q4_0 vẫn trả 1.5GB @ 8k (đúng ra ~0.375GB) → under-offload 1-2 layer
+return (ctx / 8192.0) * 1.5
+# đề xuất (bytes_per_elem đã có từ planner.py:71):
+return (ctx / 8192.0) * 1.5 * (bytes_per_elem / 2.0)
+```
+
+## Các layer sau chỉnh
+
+### L5 — Đo lường (tách L5a/L5b)
+- **L5a (làm trước tiên)**: baseline speed + **perplexity trên model gốc** (trước khi đụng weight — không có mốc này thì L1 không chứng minh được gì). Đo bằng `llama-perplexity` (tools sẵn trong `~/dev/llama.cpp`, build ~1 phút) trên eval set nhỏ ~50 đoạn text; so **PPL tương đối giữa 2 bản cùng model** là đủ nhạy. Kết quả ghi thành script lặp lại được trong `tools/`, không đo tay.
+- **L5b**: hạ tầng đo lặp lại được cho từng layer + KL per-tensor so bản f16 reference (code mới — phần lớn nhất của L5).
+
+### L1 — File model (giả thuyết, có tiêu chí nghiệm thu)
+- **L1a**: so PPL/byte giữa các bản quant tải lại được của Hermes-4 (Q4_K_M vs Q5_K_M vs Q4_K_S vs IQ4_XS…) bằng pipeline sẵn có (`vipera model quantize`, output `*-vipera-<quant>.gguf`, giữ file gốc → rollback = xóa file vipera). **Không viết pipeline mới.**
+- **L1b (chỉ nếu L5a chứng minh mất chất lượng đáng kể)**: per-tensor search — nếu làm thì chọn `advanced-gguf-quantizer` (đang hoạt động 2026-08, per-tensor, có report); **bỏ** `llama-gguf-optimize` (stale 2025-01, deps nặng: optuna/h5py/astropy/datasets). YAGNI cho tới lúc đó.
+- Con số −15% chỉ được đưa vào README khi **đo được** trên máy này.
+
+### L3 — Backend llama-server (flag opt-in, độc lập L1)
+- Thêm `"backend": "inprocess"` vào `DEFAULT_CONFIG` (`config.py:14`) + validate với `_BACKENDS = {"inprocess", "server"}`; **flip default sau khi L1+L2 validated** → có đường lui bằng config, không cần `git revert`.
+- **Gap đã xác minh cần code**: (a) `Engine.tokenize()` wrapper (`bench_cmd.py:35`); (b) `bench_cmd.py:175,183` đọc `engine.plan` — backend server vẫn phải giữ plan trên Engine (plan chính là tập cờ sẽ truyền cho llama-server); (c) test cancel-giữa-stream cho `server.py` lock.
+- **Không cần**: panel của `serve_cmd` (tự tính plan từ metadata).
+
+### L2 — Planner (viết lại nội dung)
+Không phải "thêm 60 quant type". Nội dung thật:
+1. **Fix bug fallback** ở trên + test trong `tests/test_planner.py` (case GGUF thiếu `attention.head_count_kv`).
+2. Mở KV dtype còn thiếu (bf16/iq4_nl/q5_0/q5_1) — chỉ 4 loại, lợi ích vừa phải, làm sau fix bug.
+3. Ràng buộc theo backend đích (KV dtype llama-server hỗ trợ khác binding) — phụ thuộc L3 nên xếp sau.
+
+### L4 — Speculative (tách L4a/L4b, cả hai đều không làm trong vòng này)
+- **L4a — MTP**: llama.cpp **có** hỗ trợ (`llama-model.cpp:3087` `mtp_on_hybrid_qwen`, GLM5-Next, …). **Nhưng đã đo trên file thật**: Hermes-4 (443 tensors) và qwen15b (339 tensors) **không có tensor MTP/NextN/Medusa** → L4a chỉ khả thi nếu tải model có MTP head (Qwen3-Next, GLM-4.6). Điều kiện: đổi model.
+- **L4b — DFlash**: bị chặn bởi VRAM (cần ≥6GiB, máy hiện có 4GB).
+
+## Thứ tự (đã chốt theo review)
+**L5a → L1a → L3 (flag opt-in, KHÔNG block vào kết quả L1) → L2 → (L1b/L4 nếu có điều kiện)**
+
+## Test plan (mở rộng `tests/` có sẵn — 13 file, 167 test)
+| File | Case mới |
+|---|---|
+| `tests/test_planner.py` | fallback fix (q4_0 @8k ≈ 0.375GB), case thiếu metadata head |
+| `tests/test_engine.py` | `Engine.tokenize()` wrapper (mock backend) |
+| `tests/test_server.py` | cancel-giữa-stream không release lock sớm |
+| `tests/test_bench_cmd.py` | hiển thị plan với backend server |
+| `tests/test_config.py` | `_coerce` cho `backend` mới |
+
+## 4 câu hỏi — lựa chọn đề xuất của tôi
+1. **L5a**: eval set nhỏ ~50 dòng + PPL qua `llama-perplexity` (script lặp lại được), **chưa** cần harness đầy đủ — dựng harness khi L5b biết rõ cần đo gì.
+2. **L3**: flag trong **config** (`backend`, default `inprocess`) — `_coerce_strict` đã sẵn; env var sẽ tạo 2 nguồn sự thật.
+3. **L1**: dùng pipeline `vipera model quantize/optimize` sẵn có (L1a); repo tích hợp **chưa** chọn — nếu L1b cần thì `advanced-gguf-quantizer`.
+4. **L4**: tách L4a/L4b như trên — nhưng L4a ghi điều kiện "model có MTP head" (2 model hiện tại không có), L4b blocked. Kết luận: **không làm code L4 trong vòng này**.
