@@ -2,7 +2,7 @@
 
 ```python
 # __init__.py
-__version__ = "1.0.0"
+__version__ = "1.1.0"
 
 # cli.py
 import typer
@@ -229,7 +229,7 @@ def _run_bench(engine: Engine, prompt: str, max_tokens: int) -> dict:
 
 @app.command("run")
 def run(
-    model: str = typer.Argument(None, help="Model name (default: current default model)"),
+    model: str | None = typer.Argument(None, help="Model name (default: current default model)"),
     ctx: str = typer.Option("512,2048", "--ctx", help="Comma-separated context sizes"),
     max_tokens: int = typer.Option(128, "--max-tokens", help="Max tokens to generate"),
 ):
@@ -245,7 +245,17 @@ def run(
         raise typer.Exit(1)
 
     hw = detect()
-    ctx_list = [int(x) for x in ctx.split(",") if x.strip()]
+    try:
+        ctx_list = [int(x) for x in ctx.split(",") if x.strip()]
+    except ValueError as exc:
+        console.print(
+            f"[{C_RED}] ✗ --ctx must be comma-separated integers "
+            f"(example: 512,8192,65536), got: {ctx!r}[/]"
+        )
+        raise typer.Exit(1) from exc
+    if not ctx_list or any(c <= 0 for c in ctx_list):
+        console.print(f"[{C_RED}] ✗ --ctx values must be positive integers, got: {ctx!r}[/]")
+        raise typer.Exit(1)
 
     console.print(f"\n[{C_ACCENT}]▸ Benchmarking model:[/] [{C_TEXT}]{model}[/]")
     console.print(
@@ -400,7 +410,7 @@ def repl_loop(engine: Engine, typewriter: bool = False, chat_kwargs: dict | None
 
 @app.command("repl")
 def repl(
-    model: str = typer.Option(None, "--model", "-m", help="Model alias"),
+    model: str | None = typer.Option(None, "--model", "-m", help="Model alias"),
     typewriter: bool = typer.Option(
         False, "--typewriter", help="Animate output (slower, nicer for demos)"
     ),
@@ -420,7 +430,7 @@ def repl(
 @app.command("oneshot")
 def oneshot(
     prompt: str = typer.Argument(..., help="Prompt to send"),
-    model: str = typer.Option(None, "--model", "-m", help="Model alias"),
+    model: str | None = typer.Option(None, "--model", "-m", help="Model alias"),
     typewriter: bool = typer.Option(
         False, "--typewriter", help="Animate output (slower, nicer for demos)"
     ),
@@ -512,6 +522,9 @@ def _read_meta(path: Path, name: str | None = None) -> dict:
         meta["quant"] = m.group(1).upper()
 
     try:
+        # Imported here (not only at module level) so tests and callers can
+        # substitute the analyzer and so the optional gguf dependency is not
+        # required merely to import this module.
         from vipera.gguf_analyzer import analyze_gguf
 
         am = analyze_gguf(str(path))["metadata"]
@@ -527,8 +540,11 @@ def _read_meta(path: Path, name: str | None = None) -> dict:
         meta["head_dim"] = int(am.get("head_dim") or 0)
         if meta["quant"] == "?" and am.get("dominant_quant"):
             meta["quant"] = am["dominant_quant"]
-    except Exception:  # analyzer is best-effort
-        pass
+    except Exception as exc:  # analyzer is best-effort, but never silent
+        console.print(
+            f"[{C_YELLOW}] ⚠ Could not read GGUF metadata from {path.name}: {exc}[/]\n"
+            f"[{C_DIM}]  Planner will fall back to worst-case KV/architecture estimates.[/]"
+        )
 
     return meta
 
@@ -1149,15 +1165,18 @@ def recommend_quantization(
     )
 
 # commands/serve_cmd.py
+import os
 import socket
 import time
+from pathlib import Path
 
+import psutil
 import typer
 from rich import box
 from rich.panel import Panel
 from rich.text import Text
 
-from vipera.config import load_config
+from vipera.config import VIPERA_HOME, load_config
 from vipera.engine import Engine
 from vipera.hardware import detect
 from vipera.planner import plan
@@ -1171,7 +1190,6 @@ from vipera.ui import (
     C_SUCCESS,
     C_TEXT,
     C_YELLOW,
-    animated_loading_bar,
     console,
 )
 
@@ -1181,6 +1199,10 @@ def _resolve_option(val, default):
     if isinstance(val, typer.models.OptionInfo):
         return default
     return val if val is not None else default
+
+
+def _pid_file(port: int) -> Path:
+    return VIPERA_HOME / f"serve-{port}.pid"
 
 
 def _quick_bench(engine: Engine) -> None:
@@ -1239,11 +1261,16 @@ app = typer.Typer()
 
 @app.command("start")
 def start(
-    model: str = typer.Option(None, "--model", "-m"),
+    model: str | None = typer.Option(None, "--model", "-m"),
     host: str = typer.Option(None, "--host"),
     port: int = typer.Option(None, "--port", "-p"),
     profile: str = typer.Option("auto", "--profile"),
     ctx: int = typer.Option(None, "--ctx"),
+    bench: bool = typer.Option(
+        False,
+        "--bench",
+        help="Run a 20-token speed check before serving (delays readiness)",
+    ),
 ):
     """Start the HTTP Gateway."""
     cfg = load_config()
@@ -1252,6 +1279,7 @@ def start(
     port = _resolve_option(port, cfg["port"])
     profile = _resolve_option(profile, "auto")
     ctx = _resolve_option(ctx, cfg["ctx"])
+    bench = _resolve_option(bench, False)
 
     if not model:
         console.print(f"[{C_RED}] ✗ No model specified. Use --model <name>[/]")
@@ -1320,9 +1348,11 @@ def start(
         console.print(f"[{C_RED}] ✗ {e}[/]")
         raise typer.Exit(1) from e
 
-    animated_loading_bar("KERNEL INIT", 1.2)
-
-    if cfg.get("show_bench_on_start", True):
+    # The gateway is ready as soon as uvicorn binds. The old unconditional
+    # 20-token speed check ran here and cost minutes on slow hardware (a 0.2
+    # tok/s model needed ~100s before the first request could be served), and
+    # the loading bar added a fixed 1.2s sleep. The check is now opt-in.
+    if bench:
         _quick_bench(engine)
 
     try:
@@ -1348,6 +1378,7 @@ def start(
 
         console.print(Panel(ready, border_style=C_SUCCESS, box=box.ROUNDED, padding=(0, 1)))
 
+        _pid_file(port).write_text(str(os.getpid()))
         uvicorn.run(fastapi_app, host=host, port=port, log_level="warning")
 
     except ImportError:
@@ -1356,6 +1387,7 @@ def start(
 
         repl_loop(engine, chat_kwargs=_chat_kwargs(cfg))
     finally:
+        _pid_file(port).unlink(missing_ok=True)
         engine.close()
 
 
@@ -1371,6 +1403,68 @@ def status():
         console.print(f"[{C_GREEN}] ● ONLINE[/]  — http://{cfg['host']}:{cfg['port']}")
     else:
         console.print(f"[{C_RED}] ● OFFLINE[/] — port {cfg['port']}")
+
+
+@app.command("stop")
+def stop(
+    port: int = typer.Option(None, "--port", "-p", help="Gateway port (default: config)"),
+    force: bool = typer.Option(False, "--force", help="SIGKILL if SIGTERM is ignored"),
+    yes: bool = typer.Option(False, "--yes", "-y", help="Do not ask for confirmation"),
+):
+    """Stop a gateway started by `vipera serve start`."""
+    cfg = load_config()
+    port = _resolve_option(port, cfg["port"])
+    pid_file = _pid_file(port)
+
+    if not pid_file.exists():
+        console.print(
+            f"[{C_RED}] ● OFFLINE[/] — no pid file for port {port}. "
+            f"If it is still running, kill it manually."
+        )
+        raise typer.Exit(1)
+
+    try:
+        pid = int(pid_file.read_text().strip())
+    except (OSError, ValueError):
+        pid_file.unlink(missing_ok=True)
+        console.print(f"[{C_RED}] ✗ unreadable pid file for port {port}; removed.[/]")
+        raise typer.Exit(1) from None
+
+    try:
+        proc = psutil.Process(pid)
+    except psutil.NoSuchProcess:
+        pid_file.unlink(missing_ok=True)
+        console.print(f"[{C_YELLOW}] ⚠ stale pid file (pid {pid} is gone); removed.[/]")
+        raise typer.Exit(1) from None
+
+    # Guard against a recycled PID: only stop a process that looks like vipera.
+    try:
+        cmdline = " ".join(proc.cmdline())
+    except psutil.Error:
+        cmdline = ""
+    if "vipera" not in cmdline.lower():
+        console.print(
+            f"[{C_RED}] ✗ pid {pid} does not look like vipera; refusing to stop it.[/]"
+        )
+        raise typer.Exit(1)
+
+    if not yes and not typer.confirm(f"Stop gateway on port {port} (pid {pid})?"):
+        raise typer.Abort()
+
+    proc.terminate()
+    try:
+        proc.wait(timeout=10)
+    except psutil.TimeoutExpired:
+        if not force:
+            console.print(
+                f"[{C_YELLOW}] ⚠ pid {pid} did not stop within 10s; retry with --force.[/]"
+            )
+            raise typer.Exit(1) from None
+        proc.kill()
+        proc.wait(timeout=5)
+
+    pid_file.unlink(missing_ok=True)
+    console.print(f"[{C_GREEN}] ✓ STOPPED[/] — port {port} (pid {pid})")
 
 # commands/system_cmd.py
 import platform
@@ -1555,15 +1649,17 @@ DEFAULT_CONFIG = {
     "max_tokens": 2048,
     "top_p": 0.95,
     "repeat_penalty": 1.1,
-    "show_bench_on_start": True,
 }
 
 _KV_CACHE_TYPES = {"f32", "f16", "q4_0", "q4_1", "q8_0"}
 
+_TRUE_STRINGS = {"1", "true", "yes", "on"}
+_FALSE_STRINGS = {"0", "false", "no", "off", ""}
+
 _TYPE_MAP = {
     "port": int, "ctx": int, "n_batch": int, "max_tokens": int,
     "temperature": float, "top_p": float, "repeat_penalty": float,
-    "flash_attn": bool, "show_bench_on_start": bool,
+    "flash_attn": bool,
 }
 
 
@@ -1587,13 +1683,25 @@ def _coerce(cfg: dict) -> dict:
     return cfg
 
 
+def _parse_bool(value) -> bool:
+    """Strictly parse a boolean, rejecting anything that is not unambiguous."""
+    if isinstance(value, bool):
+        return value
+    s = str(value).strip().lower()
+    if s in _TRUE_STRINGS:
+        return True
+    if s in _FALSE_STRINGS:
+        return False
+    raise ValueError(f"expected a boolean, got '{value}'")
+
+
 def _coerce_strict(cfg: dict) -> dict:
     """Raise ValueError on any invalid typed value."""
     for k, cast in _TYPE_MAP.items():
         if k in cfg and cfg[k] is not None:
             try:
                 if cast is bool:
-                    cfg[k] = str(cfg[k]).lower() in ("1", "true", "yes", "on")
+                    cfg[k] = _parse_bool(cfg[k])
                 else:
                     cfg[k] = cast(cfg[k])
             except (ValueError, TypeError) as exc:
@@ -1614,16 +1722,40 @@ def load_config() -> dict:
 
 def save_config(cfg: dict) -> None:
     ensure_dirs()
-    CONFIG_FILE.write_text(json.dumps(cfg, indent=2))
+    # Write-then-rename so a crash mid-write cannot leave a truncated config
+    # that load_config() would silently replace with defaults.
+    tmp = CONFIG_FILE.with_suffix(CONFIG_FILE.suffix + ".tmp")
+    tmp.write_text(json.dumps(cfg, indent=2))
+    os.replace(tmp, CONFIG_FILE)
 
 # engine.py
 import gc
 from dataclasses import replace
 from typing import Any
 
+import psutil
+
 from vipera.planner import Plan
 
 _KV_TYPES = {"f32": 0, "f16": 1, "q4_0": 2, "q4_1": 3, "q8_0": 8}
+
+# Sampling and tool-calling parameters accepted by
+# llama_cpp.Llama.create_chat_completion. Anything else is dropped so a typo in
+# an HTTP request cannot turn into a TypeError from the backend.
+_CHAT_PARAMS = frozenset({
+    "temperature", "top_p", "top_k", "min_p", "typical_p", "max_tokens",
+    "stop", "seed", "presence_penalty", "frequency_penalty", "repeat_penalty",
+    "tfs_z", "mirostat_mode", "mirostat_tau", "mirostat_eta", "logit_bias",
+    "logprobs", "top_logprobs", "grammar", "response_format",
+    "tools", "tool_choice", "functions", "function_call",
+})
+
+_DEFAULT_SAMPLING = {
+    "temperature": 0.7,
+    "max_tokens": 2048,
+    "top_p": 0.95,
+    "repeat_penalty": 1.1,
+}
 
 
 class Engine:
@@ -1641,6 +1773,18 @@ class Engine:
         self._Llama = Llama
         self._closed = False
 
+        # An OOM here is an uncatchable SIGKILL, not a Python exception, so the
+        # GPU->CPU fallback below never gets a chance to run. Refuse up front
+        # when the planner's host-RAM estimate clearly exceeds what is free.
+        if plan.ram_estimate_gb > 0:
+            available_gb = psutil.virtual_memory().available / 1024**3
+            if plan.ram_estimate_gb > available_gb + 0.5:
+                raise RuntimeError(
+                    f"Not enough RAM for this plan: ~{plan.ram_estimate_gb:.1f} GB "
+                    f"needed on the host, {available_gb:.1f} GB available. "
+                    f"Lower --ctx, use kv_cache=q4_0, or close other applications."
+                )
+
         gpu_exc: Exception | None = None
         try:
             self.llm = self._load(plan)
@@ -1649,23 +1793,45 @@ class Engine:
             gpu_exc = exc
 
         print("\n[!] Warning: failed to load with GPU. Falling back to CPU...")
-        safe_plan = replace(
+
+        # Fall back in stages rather than jumping straight to f16/2048. Callers
+        # such as Hermes require a 64K context floor, and quantized KV is the
+        # only way that fits in RAM on this class of machine. Silently dropping
+        # to 2048 would load "successfully" and then be useless.
+        cpu_plan = replace(
             plan,
             gpu_layers=0,
-            flash_attn=False,
             offload_kqv=False,
-            kv_cache="f16",
-            n_batch=128,
-            context=min(plan.context, 2048),
+            n_batch=min(plan.n_batch, 128),
         )
+        reduced_plan = replace(cpu_plan, context=min(plan.context, 2048))
+        safe_plan = replace(reduced_plan, kv_cache="f16", flash_attn=False)
 
-        try:
-            self.llm = self._load(safe_plan)
-            self.plan = safe_plan
-        except Exception as exc:
-            raise RuntimeError(
-                f"Failed to initialize model even on CPU: {exc}"
-            ) from gpu_exc
+        attempts = [
+            (cpu_plan, f"CPU, ctx={cpu_plan.context}, kv={cpu_plan.kv_cache}"),
+            (reduced_plan, f"CPU, ctx={reduced_plan.context}, kv={reduced_plan.kv_cache}"),
+            (safe_plan, f"CPU safe mode, ctx={safe_plan.context}, kv={safe_plan.kv_cache}"),
+        ]
+
+        last_exc: Exception = gpu_exc
+        for i, (candidate, label) in enumerate(attempts):
+            if i > 0:
+                print(f"[!] Warning: fallback failed; retrying with {label}. ")
+                if candidate.context < plan.context:
+                    print(
+                        f"[!] Warning: requested ctx={plan.context} will NOT be met "
+                        f"(using {candidate.context})."
+                    )
+            try:
+                self.llm = self._load(candidate)
+                self.plan = candidate
+                return
+            except Exception as exc:
+                last_exc = exc
+
+        raise RuntimeError(
+            f"Failed to initialize model even on CPU: {last_exc}"
+        ) from gpu_exc
 
     def _load(self, p: Plan):
         kv = _KV_TYPES.get(p.kv_cache)
@@ -1695,14 +1861,16 @@ class Engine:
             return _do(False)
 
     def chat(self, messages: list[dict], stream: bool = False, **kw: Any):
-        return self.llm.create_chat_completion(
-            messages=messages,
-            stream=stream,
-            temperature=kw.get("temperature", 0.7),
-            max_tokens=kw.get("max_tokens", 2048),
-            top_p=kw.get("top_p", 0.95),
-            repeat_penalty=kw.get("repeat_penalty", 1.1),
-        )
+        """Run a chat completion, forwarding every supported OpenAI parameter.
+
+        Only keys in ``_CHAT_PARAMS`` reach llama.cpp. ``None`` values are
+        treated as "not set" so the backend keeps its own defaults for
+        optional knobs such as ``seed`` or ``logit_bias``.
+        """
+        params = {k: v for k, v in kw.items() if k in _CHAT_PARAMS and v is not None}
+        for key, default in _DEFAULT_SAMPLING.items():
+            params.setdefault(key, default)
+        return self.llm.create_chat_completion(messages=messages, stream=stream, **params)
 
     def close(self) -> None:
         if self._closed:
@@ -2395,6 +2563,10 @@ class Plan:
     offload_kqv: bool
     use_mlock: bool
     note: str
+    # Rough host-RAM requirement: CPU-resident weights + CPU-resident KV plus
+    # room for compute buffers. 0.0 means "not estimated" (callers skip the
+    # preflight check), which keeps hand-built Plans in tests working.
+    ram_estimate_gb: float = 0.0
 
 
 _VALID_PROFILES = ("auto", "cpu", "gpu", "lowmem")
@@ -2473,25 +2645,35 @@ def plan(
             note="CPU ONLY (Low Memory Profile)",
         )
 
-    use_mlock = (hw.ram_free_gb - model_size_gb) > 2.0
-
     safe_vram = max(0.0, hw.vram_free_gb - 1.0)  # reserve 1 GB for OS/driver
+
+    # llama.cpp allocates the KV cache per layer: only the layers offloaded to
+    # the GPU take their slice of KV with them, the rest stays in system RAM.
+    # Subtracting the FULL cache from VRAM before offloading anything made a
+    # 14B/Q4 model on a 4 GB card look like it had 0.2 GB free (0 layers) even
+    # though ~9 layers actually fit. Budget both weights and KV per layer.
     kv_cache_gb = _estimate_kv_cache_gb(meta, ctx, kv_cache)
-    usable_vram = max(0.0, safe_vram - kv_cache_gb)
+    per_layer_kv_gb = kv_cache_gb / n_layers if n_layers else 0.0
 
     layer_gb = model_size_gb / n_layers if n_layers else 0.4
+    layer_total_gb = layer_gb + per_layer_kv_gb
     gpu_layers = 0
 
     # profile=cpu forces no offload even when a GPU is present.
     want_gpu = has_gpu and profile != "cpu"
-    if want_gpu and usable_vram > 0 and layer_gb > 0:
-        gpu_layers = min(n_layers, int(usable_vram / layer_gb))
+    if want_gpu and safe_vram > 0 and layer_total_gb > 0:
+        gpu_layers = min(n_layers, int(safe_vram / layer_total_gb))
 
     if gpu_layers == 0:
-        flash_attn = False
         offload_kqv = False
         n_batch = min(n_batch, 128)
-        kv_cache = "f16"
+        # An explicit quantized KV request survives the CPU-only path:
+        # llama.cpp runs flash attention on the CPU backend too, and forcing
+        # f16 here would make a 64K-context KV for a 14B model ~10 GiB, which
+        # does not fit beside this gateway on a 15 GiB / no-swap box.
+        # flash_attn is required for KV quantization, so enable it whenever
+        # the cache is not f16.
+        flash_attn = kv_cache != "f16"
 
         if profile == "gpu":
             note = "CPU ONLY (GPU profile requested, no usable GPU)"
@@ -2501,7 +2683,8 @@ def plan(
         else:
             note = "CPU ONLY"
     else:
-        flash_attn = hw.vram_total_gb > 4
+        # Quantized KV requires flash attention, regardless of VRAM size.
+        flash_attn = kv_cache != "f16" or hw.vram_total_gb > 4
         offload_kqv = True
         n_batch = min(n_batch, 512)
         note = (
@@ -2509,6 +2692,20 @@ def plan(
             if gpu_layers == n_layers
             else f"Hybrid: {gpu_layers}/{n_layers} layers"
         )
+
+    # mlock pins weights in RAM, so it is only safe when the machine can hold
+    # the host-side weights AND the host-side KV cache with headroom. Checking
+    # against model size alone ignores a 5 GB KV cache (Q8_0 at 64K), which
+    # turns an mlock into an OOM on a 15 GB / no-swap box.
+    cpu_weights_gb = max(0.0, model_size_gb - layer_gb * gpu_layers)
+    cpu_kv_gb = per_layer_kv_gb * (n_layers - gpu_layers)
+    host_headroom_gb = hw.ram_free_gb - cpu_weights_gb - cpu_kv_gb
+    # 3 GB of headroom leaves room for llama.cpp compute buffers; pinning with
+    # less has OOM-killed this class of machine mid-load (no swap).
+    use_mlock = host_headroom_gb > 3.0
+    # llama.cpp needs more than weights+KV for compute buffers; 2 GB is a
+    # conservative placeholder, calibrated against a 14B/Q8_0/64K load.
+    ram_estimate_gb = cpu_weights_gb + cpu_kv_gb + 2.0
 
     return Plan(
         gpu_layers=gpu_layers,
@@ -2520,6 +2717,7 @@ def plan(
         offload_kqv=offload_kqv,
         use_mlock=use_mlock,
         note=note,
+        ram_estimate_gb=ram_estimate_gb,
     )
 
 # registry.py
@@ -2576,13 +2774,15 @@ def remove_model(name: str) -> bool:
 
 # server.py
 import asyncio
+import contextlib
 import json
 from typing import Literal
 
 from fastapi import FastAPI, HTTPException
-from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
+
+from vipera import __version__
 
 _MAX_TOKENS = 32_768
 _MAX_MESSAGES = 200
@@ -2593,21 +2793,48 @@ _SENTINEL = object()
 
 class Message(BaseModel):
     role: Literal["system", "user", "assistant", "tool"]
-    content: str
+    # Assistant tool-call turns legitimately have no text content.
+    content: str | None = None
+    name: str | None = None
+    tool_calls: list[dict] | None = None
+    tool_call_id: str | None = None
+
+    @model_validator(mode="after")
+    def _require_content_or_tool_calls(self):
+        if self.content is None and not self.tool_calls:
+            raise ValueError("content is required unless the message carries tool_calls")
+        return self
+
+
+class StreamOptions(BaseModel):
+    include_usage: bool = False
 
 
 class ChatRequest(BaseModel):
     model: str | None = None
     messages: list[Message] = Field(..., min_length=1)
     stream: bool = False
+    stream_options: StreamOptions | None = None
     temperature: float = 0.7
     max_tokens: int = 2048
     top_p: float = 0.95
     repeat_penalty: float = 1.1
+    top_k: int | None = Field(None, ge=0)
+    min_p: float | None = Field(None, ge=0.0, le=1.0)
+    presence_penalty: float | None = Field(None, ge=-2.0, le=2.0)
+    frequency_penalty: float | None = Field(None, ge=-2.0, le=2.0)
+    stop: str | list[str] | None = None
+    seed: int | None = Field(None, ge=0)
+    logit_bias: dict[str, float] | None = None
+    logprobs: bool | None = None
+    top_logprobs: int | None = Field(None, ge=0, le=20)
+    response_format: dict | None = None
+    tools: list[dict] | None = None
+    tool_choice: str | dict | None = None
 
 
 def build_app(engine, model_name: str) -> FastAPI:
-    app = FastAPI(title="Vipera Gateway", version="1.0.0")
+    app = FastAPI(title="Vipera Gateway", version=__version__)
     lock = asyncio.Lock()
 
     @app.get("/health")
@@ -2631,7 +2858,7 @@ def build_app(engine, model_name: str) -> FastAPI:
             )
         if len(req.messages) > _MAX_MESSAGES:
             raise HTTPException(400, f"too many messages (max {_MAX_MESSAGES})")
-        if sum(len(m.content) for m in req.messages) > _MAX_PROMPT_CHARS:
+        if sum(len(m.content or "") for m in req.messages) > _MAX_PROMPT_CHARS:
             raise HTTPException(400, "prompt too large")
         if not 0 < req.max_tokens <= _MAX_TOKENS:
             raise HTTPException(400, f"max_tokens must be in [1, {_MAX_TOKENS}]")
@@ -2640,39 +2867,107 @@ def build_app(engine, model_name: str) -> FastAPI:
         if not 0.0 < req.top_p <= 1.0:
             raise HTTPException(400, "top_p must be in (0, 1]")
 
-        messages = [m.model_dump() if hasattr(m, "model_dump") else m.dict() for m in req.messages]
-        kwargs = dict(
-            temperature=req.temperature,
-            max_tokens=req.max_tokens,
-            top_p=req.top_p,
-            repeat_penalty=req.repeat_penalty,
+        # exclude_none keeps unset optional knobs out of the llama.cpp call so
+        # the backend's own defaults apply (e.g. seed=None is not seed=0).
+        messages = [m.model_dump(exclude_none=True) for m in req.messages]
+        kwargs = req.model_dump(
+            exclude={"model", "messages", "stream", "stream_options"},
+            exclude_none=True,
         )
 
         if req.stream:
             async def _stream():
                 # The engine's stream is a SYNC generator. Iterating it inline
                 # would block the event loop for the whole generation, so pull
-                # each chunk in a worker thread instead. If the client
-                # disconnects, aclose() cancels us here; the pending to_thread
-                # call returns and the sync iterator is GC'd, which closes it.
-                async with lock:
-                    iterator = engine.chat(messages, stream=True, **kwargs)
+                # each chunk in a worker thread instead.
+                #
+                # The lock is acquired explicitly (not via `async with`) so a
+                # client disconnect cannot release it while a worker thread is
+                # still inside next(): cancellation would otherwise let the
+                # next request enter the engine concurrently with generation
+                # that is still running.
+                await lock.acquire()
+                released = False
+                iterator = None
+                usage = None
+                try:
                     try:
+                        iterator = engine.chat(messages, stream=True, **kwargs)
                         while True:
-                            chunk = await asyncio.to_thread(next, iterator, _SENTINEL)
+                            task = asyncio.create_task(
+                                asyncio.to_thread(next, iterator, _SENTINEL)
+                            )
+                            try:
+                                # shield: cancelling this request must not
+                                # cancel the task that wraps the worker thread.
+                                chunk = await asyncio.shield(task)
+                            except asyncio.CancelledError:
+                                # The worker is still inside next(); closing the
+                                # generator now would raise "already executing"
+                                # and release the lock too early. Wait for the
+                                # thread, then close and release.
+                                def _finish(_t, it=iterator):
+                                    with contextlib.suppress(Exception):
+                                        it.close()
+                                    lock.release()
+
+                                task.add_done_callback(_finish)
+                                released = True
+                                iterator = None
+                                raise
                             if chunk is _SENTINEL:
                                 break
+                            if isinstance(chunk, dict) and chunk.get("usage"):
+                                usage = chunk["usage"]
                             payload = json.dumps(chunk, ensure_ascii=False)
                             yield f"data: {payload}\n\n"
+                    except asyncio.CancelledError:
+                        raise
                     except Exception as exc:
+                        # engine.chat() itself may raise before the first
+                        # chunk; report that as an SSE error event instead of
+                        # aborting the response body mid-stream.
                         err = {"error": {"message": str(exc)}}
                         yield f"data: {json.dumps(err, ensure_ascii=False)}\n\n"
-                yield "data: [DONE]\n\n"
+                    # OpenAI emits a trailing choices:[] frame when the client
+                    # asks for usage. Only possible when the backend reported
+                    # any; llama-cpp-python 0.3.x does not, so it is omitted.
+                    if (
+                        req.stream_options is not None
+                        and req.stream_options.include_usage
+                        and usage is not None
+                    ):
+                        payload = json.dumps(
+                            {"choices": [], "usage": usage}, ensure_ascii=False
+                        )
+                        yield f"data: {payload}\n\n"
+                    yield "data: [DONE]\n\n"
+                finally:
+                    if iterator is not None:
+                        with contextlib.suppress(Exception):
+                            iterator.close()
+                    if not released:
+                        lock.release()
 
             return StreamingResponse(_stream(), media_type="text/event-stream")
 
-        async with lock:
-            return await run_in_threadpool(engine.chat, messages, stream=False, **kwargs)
+        # Same cancellation rule as the streaming path: do not hand the lock to
+        # another request until the in-flight worker thread has returned.
+        await lock.acquire()
+        released = False
+        try:
+            task = asyncio.create_task(
+                asyncio.to_thread(engine.chat, messages, False, **kwargs)
+            )
+            try:
+                return await asyncio.shield(task)
+            except asyncio.CancelledError:
+                task.add_done_callback(lambda _t: lock.release())
+                released = True
+                raise
+        finally:
+            if not released:
+                lock.release()
 
     return app
 
@@ -2806,13 +3101,26 @@ def animated_loading_bar(prefix: str = "INITIALIZING", duration: float = 1.2):
 
 
 def _wrap_block(text: str, width: int = 68) -> str:
+    """Wrap text without destroying the indentation of code blocks."""
     out = []
     for line in text.split("\n"):
         if not line:
             out.append(" " * width)
-        else:
-            for w in textwrap.wrap(line, width=width) or [""]:
-                out.append(f"{w:<{width}}")
+            continue
+        line = line.expandtabs(4)
+        stripped = line.lstrip()
+        indent = line[: len(line) - len(stripped)]
+        wrapper = textwrap.TextWrapper(
+            width=width,
+            initial_indent=indent,
+            subsequent_indent=indent,
+            replace_whitespace=False,
+            drop_whitespace=False,
+            break_long_words=True,
+            break_on_hyphens=False,
+        )
+        for w in wrapper.wrap(stripped) or [indent]:
+            out.append(f"{w:<{width}}")
     return "\n".join(out)
 
 
@@ -2876,7 +3184,7 @@ def typewriter_chat_stream(stream_generator, title_text: str = " AI "):
     tps = chunk_count / dt if dt > 0 else 0
     stat = Text("    ")
     stat.append("└─ ", style=C_BORDER)
-    stat.append(f"{chunk_count} chunks  ·  {tps:.1f} c/s  ·  {dt:.2f}s\n", style=C_DIM)
+    stat.append(f"{chunk_count} tokens  ·  {tps:.1f} tok/s  ·  {dt:.2f}s\n", style=C_DIM)
     console.print(stat)
     return full_response
 
@@ -2924,7 +3232,7 @@ def plain_chat_stream(stream_generator, title_text: str = " AI "):
     tps = chunk_count / dt if dt > 0 else 0
     stat = Text("    ")
     stat.append("└─ ", style=C_BORDER)
-    stat.append(f"{chunk_count} chunks  ·  {tps:.1f} c/s  ·  {dt:.2f}s\n", style=C_DIM)
+    stat.append(f"{chunk_count} tokens  ·  {tps:.1f} tok/s  ·  {dt:.2f}s\n", style=C_DIM)
     console.print(stat)
     return text
 
