@@ -1,13 +1,14 @@
 name: Release drafter
 
+# Runs on the default branch only: release-drafter reads its config from there,
+# so running it on a PR that adds the config would always fail.
 on:
   push:
     branches: [main]
-  pull_request:
-    types: [opened, reopened, synchronize]
+  workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
   pull-requests: write
 
 jobs:
