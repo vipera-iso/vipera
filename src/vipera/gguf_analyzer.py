@@ -92,6 +92,13 @@ _QUANT_RANK = {
     "NVFP4": 4.0,
 }
 
+# Tensor names that imply a layer keeps a KV cache, and names that imply a
+# recurrent/SSM layer with a fixed-size state instead. Hybrid stacks (KDA/BCSA,
+# Mamba, RWKV) mix both; the planner only needs the split.
+# `attn_k` also covers MLA/KDA-adjacent names: attn_k_b, attn_kv_a_mqa, attn_k_norm.
+_KV_TENSOR_MARKERS = ("attn_k", "attn_v", "attn_qkv")
+_RECURRENT_TENSOR_MARKERS = ("ssm_", "linear_attn", "kda", "mamba", "conv1d")
+
 _CRITICAL_TENSORS = ("ffn_down", "attn_v")
 _CRITICAL_THRESHOLD = "Q4_K"
 _CRITICAL_RANK = _QUANT_RANK[_CRITICAL_THRESHOLD]
@@ -167,6 +174,39 @@ def _classify_tensor(name: str) -> str:
 def _layer_index(name: str) -> int | None:
     match = re.match(r"blk\.(\d+)\.", name)
     return int(match.group(1)) if match else None
+
+
+def _attention_profile(tensor_names: list[str], n_layers: int | None) -> dict[str, Any]:
+    """Split layers into KV-cache layers and recurrent (state-only) layers.
+
+    Detection is name-based because GGUF metadata does not describe per-layer
+    attention type: KDA/Mamba layers carry `ssm_*` / `linear_attn` / `conv1d`
+    tensors, attention layers carry `attn_k`/`attn_v`/`attn_qkv`. A layer that
+    matches both counts as recurrent, since over-reserving KV is the safe side
+    of a memory budget.
+    """
+    kv_layers: set[int] = set()
+    recurrent_layers: set[int] = set()
+    for name in tensor_names:
+        layer = _layer_index(name)
+        if layer is None:
+            continue
+        lowered = name.lower()
+        if any(marker in lowered for marker in _RECURRENT_TENSOR_MARKERS):
+            recurrent_layers.add(layer)
+        elif any(marker in lowered for marker in _KV_TENSOR_MARKERS):
+            kv_layers.add(layer)
+
+    recurrent_layers -= kv_layers
+    total = int(n_layers or 0) or (max(kv_layers | recurrent_layers, default=-1) + 1)
+    hybrid = bool(recurrent_layers) and bool(kv_layers)
+    return {
+        "hybrid_attention": hybrid,
+        # Only shrink the budget when the split is actually understood; a
+        # partial match on a dense model must not reduce the KV estimate.
+        "kv_layers": len(kv_layers) if hybrid else total,
+        "recurrent_layers": len(recurrent_layers),
+    }
 
 
 def _field_value(fields: dict, key: str) -> Any:
@@ -315,6 +355,8 @@ def analyze_gguf(path: str) -> dict[str, Any]:
     if n_layers is None:
         n_layers = max_layer + 1
 
+    attention = _attention_profile([t["name"] for t in tensor_map], n_layers)
+
     filename_quant = None
     match = _QUANT_RE.search(model_path.name)
     if match:
@@ -338,6 +380,7 @@ def analyze_gguf(path: str) -> dict[str, Any]:
             "dominant_quant": dominant_quant,
             "tensor_count": len(tensor_map),
             "file_size_bytes": os.path.getsize(model_path),
+            **attention,
         },
         "tensor_map": tensor_map,
         "layer_distribution": dict(

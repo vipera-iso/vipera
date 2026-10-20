@@ -82,3 +82,33 @@ def test_rm_keeps_a_file_another_alias_still_references(isolated_home):
     rm_cmd("one", yes=True)
 
     assert not f.exists()  # last reference gone: the file is removed
+
+
+def test_read_meta_propagates_hybrid_attention_split(tmp_path, monkeypatch):
+    # The planner can only shrink the KV estimate if the hybrid layer split
+    # survives the model -> planner hand-off in _read_meta.
+    model = tmp_path / "hybrid.gguf"
+    model.write_bytes(b"")
+
+    def fake_analyze(_path):
+        return {
+            "metadata": {
+                "n_layers": 72,
+                "n_heads": 32,
+                "n_kv_heads": 8,
+                "head_dim": 128,
+                "hybrid_attention": True,
+                "kv_layers": 18,
+                "recurrent_layers": 54,
+            }
+        }
+
+    monkeypatch.setattr(gguf_analyzer, "analyze_gguf", fake_analyze)
+    meta = _read_meta(model, "hybrid.gguf")
+
+    assert meta["hybrid_attention"] is True
+    assert meta["kv_layers"] == 18
+    assert meta["recurrent_layers"] == 54
+    # 18 attention layers, not 72: the estimate must follow the split.
+    expected = 2 * 18 * 8 * 128 * 8192 * 1.0 / 1024**3
+    assert _estimate_kv_cache_gb(meta, 8192, "q8_0") == pytest.approx(expected)

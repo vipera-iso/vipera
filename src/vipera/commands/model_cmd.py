@@ -61,6 +61,9 @@ def _read_meta(path: Path, name: str | None = None) -> dict:
         "n_kv_heads": 0,
         "head_dim": 0,
         "layer_bytes": 0,
+        "hybrid_attention": False,
+        "kv_layers": 0,
+        "recurrent_layers": 0,
     }
 
     m = _QUANT_RE.search(name or path.name)
@@ -85,6 +88,11 @@ def _read_meta(path: Path, name: str | None = None) -> dict:
         meta["n_heads"] = int(am.get("n_heads") or 0)
         meta["n_kv_heads"] = int(am.get("n_kv_heads") or 0)
         meta["head_dim"] = int(am.get("head_dim") or 0)
+        # Hybrid stacks (KDA/BCSA/Mamba) keep KV only on attention layers; the
+        # planner needs the split to size the cache instead of assuming dense.
+        meta["hybrid_attention"] = bool(am.get("hybrid_attention"))
+        meta["kv_layers"] = int(am.get("kv_layers") or 0)
+        meta["recurrent_layers"] = int(am.get("recurrent_layers") or 0)
         # Size of one repeating transformer layer, excluding the non-repeating
         # tensors (token_embd, output.weight, ...). The planner budgets VRAM per
         # layer from this; size_bytes/n_layers would charge those tensors to
@@ -284,6 +292,13 @@ def inspect_model(
     )
     summary.add_row("quant (file name)", str(meta.get("quant") or "?"))
     summary.add_row("quant (dominant)", str(meta.get("dominant_quant") or "?"))
+    if meta.get("hybrid_attention"):
+        summary.add_row("attention", "hybrid")
+        summary.add_row(
+            "kv layers",
+            f"{meta.get('kv_layers', 0)}/{meta.get('n_layers', 0)}"
+            f" (recurrent: {meta.get('recurrent_layers', 0)})",
+        )
     summary.add_row("tensors", str(meta.get("tensor_count", 0)))
     summary.add_row("size", _format_bytes(int(meta.get("file_size_bytes", 0))))
     console.print(summary)

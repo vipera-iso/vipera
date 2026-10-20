@@ -174,10 +174,16 @@ def start(
         "    ├─ layer offload " + "·" * 28 + f" {p.gpu_layers}/{n_layers_total}\n",
         style=C_TEXT,
     )
+    kv_suffix = f" · {p.kv_cache_gb:.2f} GB" if p.kv_cache_gb > 0 else ""
     content.append(
-        f"    ├─ kv cache ({p.kv_cache}) " + "·" * 24 + " [ OK ]\n",
+        f"    ├─ kv cache ({p.kv_cache}) " + "·" * 24 + f" [ OK ]{kv_suffix}\n",
         style=C_TEXT,
     )
+    if p.kv_layers and p.kv_layers < n_layers_total:
+        content.append(
+            "    ├─ hybrid attention " + "·" * 21 + f" {p.kv_layers}/{n_layers_total} kv layers\n",
+            style=C_TEXT,
+        )
     content.append(
         "    └─ flash attention " + "·" * 27 + f" [ {'ON' if p.flash_attn else 'OFF'} ]\n",
         style=C_TEXT,
