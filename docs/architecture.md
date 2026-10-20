@@ -1,3 +1,8 @@
+---
+title: Architecture
+description: Module map, request flow, planner, engine fallback, concurrency model, and known gaps.
+---
+
 # Architecture
 
 Vipera is a thin, opinionated layer between a GGUF file and an OpenAI-compatible

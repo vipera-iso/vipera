@@ -1,3 +1,8 @@
+---
+title: HTTP API
+description: Endpoints, request and response schemas, SSE framing, and client examples.
+---
+
 # HTTP API
 
 Vipera serves the OpenAI Chat Completions protocol with server-sent events

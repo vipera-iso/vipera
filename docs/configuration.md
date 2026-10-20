@@ -1,3 +1,8 @@
+---
+title: Configuration
+description: config.json keys, storage layout, registry schema, and VIPERA_HOME.
+---
+
 # Configuration and storage
 
 Vipera keeps everything under one directory: `VIPERA_HOME`, which defaults to
