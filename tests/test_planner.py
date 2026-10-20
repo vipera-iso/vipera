@@ -239,10 +239,15 @@ def test_kv_estimate_can_exceed_legacy_heuristic():
     assert _estimate_kv_cache_gb(meta, 8192, "f16") > 1.5
 
 
-def test_kv_estimate_falls_back_to_legacy_heuristic():
-    # No metadata at all: exactly the pre-patch behaviour, still scaled by ctx.
-    assert _estimate_kv_cache_gb({}, 8192, "q8_0") == pytest.approx(1.5)
-    assert _estimate_kv_cache_gb({}, 4096, "q8_0") == pytest.approx(0.75)
+def test_kv_estimate_falls_back_to_dtype_scaled_heuristic():
+    # No metadata at all: the 1.5 GB @ 8k heuristic, scaled by ctx AND by the
+    # KV dtype (1.5 GB assumes f16). Before the fix a q4_0 plan inherited the
+    # f16 number, so the planner thought the KV cache was 4x its real size.
+    assert _estimate_kv_cache_gb({}, 8192, "f16") == pytest.approx(1.5)
+    assert _estimate_kv_cache_gb({}, 4096, "f16") == pytest.approx(0.75)
+    assert _estimate_kv_cache_gb({}, 8192, "q8_0") == pytest.approx(0.75)
+    assert _estimate_kv_cache_gb({}, 8192, "q4_0") == pytest.approx(0.375)
+    assert _estimate_kv_cache_gb({}, 8192, "f32") == pytest.approx(3.0)
 
 
 def test_head_dim_derived_from_embedding_when_absent():

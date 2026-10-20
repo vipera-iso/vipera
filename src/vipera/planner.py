@@ -89,8 +89,10 @@ def _estimate_kv_cache_gb(meta: dict, ctx: int, kv_cache: str) -> float:
             elems = 2 * kv_layers * embed * ctx
             return elems * bytes_per_elem / 1024**3
 
-    # Last-resort heuristic (conservative for ~7-8B models only).
-    return (ctx / 8192.0) * 1.5
+    # Last-resort heuristic (conservative for ~7-8B models), scaled by the KV
+    # dtype: 1.5 GB @ 8k assumes f16. Without the scale factor a q4_0 plan
+    # inherits the f16 number and under-offloads 1-2 layers.
+    return (ctx / 8192.0) * 1.5 * (bytes_per_elem / 2.0)
 
 
 def plan(
