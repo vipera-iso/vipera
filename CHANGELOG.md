@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- **Planner budgets VRAM from real per-layer sizes** — registering a model now
+  stores `layer_bytes` (mean size of one repeating `blk.N` block, read from the
+  GGUF index). `size_bytes / n_layers` charged the ~1 GB of `token_embd` +
+  `output.weight` to every layer, so a 14B/Q4 model on a 4 GB card now offloads
+  one or two more layers at the same VRAM headroom (11 vs 9 at 8K with 3.7 GB
+  free).
+- **VRAM plan keeps room for GPU compute buffers** — the planner reserves
+  0.3 GB on top of the 1 GB driver reserve. Sizing to the last byte of VRAM
+  produced a plan llama.cpp cannot create a context for, and the engine's only
+  fallback is CPU-only: on the GTX 1650, 11 offloaded layers load and 12 fail.
+- **Prompt-prefix reuse is now guaranteed by the dependency floor** —
+  `llama-cpp-python` is pinned to `>=0.3.36`, the release that keeps the KV
+  cache for a shared prompt prefix. On 0.5B, a 1230-token prompt cost 1.5 s
+  cold and 0.18 s for the +19-token follow-up turn.
+- **`vipera bench` reports the engine's actual placement** — a GPU load that
+  fell back to CPU no longer prints the planned layer count (16K/f16 on a
+  4 GB card falls back and now shows 0/40 rather than 9/40).
+
 ## [1.1.0] - 2026-10-20
 
 ### Added

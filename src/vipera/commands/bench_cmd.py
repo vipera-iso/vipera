@@ -164,7 +164,10 @@ def run(
                 console.print(f"[{C_RED}] ✗ Benchmark error at ctx={c}: {result['error']}[/]")
                 continue
 
-            layers_total = int(m["meta"].get("n_layers") or 0) or max(p.gpu_layers, 1)
+            # Report the plan the engine actually loaded: a GPU load can fail
+            # and fall back to CPU, which would otherwise still print the
+            # optimistic planned layer count.
+            layers_total = int(m["meta"].get("n_layers") or 0) or max(engine.plan.gpu_layers, 1)
 
             gen_tok_str = str(result["gen_tok"])
             if not result.get("token_count_is_exact"):
@@ -172,7 +175,7 @@ def run(
 
             t.add_row(
                 str(c),
-                f"{p.gpu_layers}/{layers_total}",
+                f"{engine.plan.gpu_layers}/{layers_total}",
                 str(result["prompt_tok"]),
                 f"{result['ttft_ms']:.0f} ms",
                 f"{result['prompt_tps']:.1f}",

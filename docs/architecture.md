@@ -95,15 +95,24 @@ The algorithm, in order:
    host-resident KV cache exceeds 3 GB. Pinning with less headroom leaves
    nothing for llama.cpp compute buffers and can trigger the OOM killer on a
    no-swap machine.
-4. **VRAM budget.** `safe = max(0, vram_free - 1.0)` reserves 1 GB for the
-   display/driver.
+4. **VRAM budget.** `safe = max(0, vram_free - 1.0 - 0.3)` reserves 1 GB for
+   the display/driver and 0.3 GB for llama.cpp's CUDA compute buffers. The
+   second reserve is measured: on a GTX 1650 with 3.7 GB free, 11 offloaded
+   layers of a 14B/Q4 model load, 12 fail to create the context, and the
+   engine's only fallback is CPU-only — far slower than 11 layers.
 5. **Layer placement.** llama.cpp allocates the KV cache per layer: only the
    offloaded layers keep their slice of KV in VRAM. So
-   `per_layer_kv = kv_gb / n_layers`, `layer_gb = size_gb / n_layers`, and
+   `per_layer_kv = kv_gb / n_layers`,
    `gpu_layers = min(n_layers, floor(safe / (layer_gb + per_layer_kv)))`.
    Subtracting the whole KV cache before offloading anything would report 0
-   layers for models that actually fit a useful hybrid split. Uniform layer
-   sizes remain a deliberate simplification.
+   layers for models that actually fit a useful hybrid split.
+   `layer_gb` is `meta["layer_bytes"]` when the GGUF index was read: the mean
+   size of one repeating `blk.N` block, which excludes `token_embd` and
+   `output.weight` because they never follow a layer to the GPU. Without that
+   field the planner falls back to `size_gb / n_layers`, which charges those
+   non-repeating tensors to every layer and offloads one or two layers fewer
+   than actually fit (on a 14B/Q4 model at 8K with 3.7 GB free: 9 instead of
+   11).
 6. **CPU-only path** (`gpu_layers == 0`): KQV offload off,
    `n_batch = min(n_batch, 128)`, and the requested KV type is kept. Flash
    attention is enabled whenever that type is quantized (llama.cpp requires
@@ -177,6 +186,23 @@ arguments are ignored.
 Supported KV cache names: `f32`→0, `f16`→1, `q4_0`→2, `q4_1`→3, `q8_0`→8. An
 unknown name maps to `None`, which lets `llama.cpp` use its default.
 
+### Prompt-prefix reuse
+
+`llama-cpp-python` 0.3.36 (the package floor) keeps the token ids it last
+evaluated. On the next `generate` it finds the longest common token prefix,
+removes only the KV entries past it, and decodes the remainder — so a follow-up
+turn that repeats the conversation prefills just the new tokens, not the whole
+system prompt. Measured on qwen2.5-0.5b: a 1230-token prompt took 1.5 s cold
+and 0.18 s when only 19 tokens were new.
+
+Two consequences for this codebase:
+
+- `chat()` must forward `messages` unmodified and in order. Pre-rendering,
+  reordering, or injecting per-request text into earlier turns changes the
+  token prefix and silently disables the reuse.
+- The cache belongs to the loaded engine: `serve stop`/`start`, a model, `ctx`,
+  or `kv_cache` change all start from an empty cache.
+
 ## Concurrency model
 
 - One process, one loaded model, one `Engine`.
@@ -230,6 +256,12 @@ These are observable in the current code and worth knowing before filing a bug:
   (flash attention is decided by the planner; `--profile` defaults to `auto`
   rather than the stored value). Per-request sampling parameters default to the
   values in `server.ChatRequest`, not to config.
+- The VRAM model assumes the KV cache stays per layer. On the GTX 1650 test
+  box, a 14B/Q4 model at 16K with f16 KV and flash attention off fails to
+  create the context above ~6 offloaded layers (`ValueError: Failed to create
+  llama_context`), while the planner picks 8-9; the engine then falls back to
+  CPU-only at ~2 t/s. The same model at 8K loads with 10 layers, so the
+  per-layer model is only validated for shorter contexts.
 - The planner does not emit MoE-specific offload flags despite the README's
   description of the flag set.
 - Expert-slab reordering (I/O-locality optimization) is not implemented. It

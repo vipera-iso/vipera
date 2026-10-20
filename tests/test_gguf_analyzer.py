@@ -111,6 +111,46 @@ def test_analyze_rejects_missing_file(tmp_path):
         analyze_gguf(str(tmp_path / "missing.gguf"))
 
 
+def test_read_meta_records_size_of_one_repeating_layer(monkeypatch, tmp_path):
+    """The planner budgets VRAM per layer from this, not from size/n_layers."""
+    analysis = {
+        "metadata": {
+            "n_layers": 2,
+            "n_params": 0,
+            "context_length": 2048,
+            "architecture": "llama",
+            "embedding_length": 128,
+            "n_heads": 4,
+            "n_kv_heads": 2,
+            "head_dim": 32,
+            "dominant_quant": "Q4_K_M",
+        },
+        # None groups token_embd/output.weight: never offloaded with a layer.
+        "layer_distribution": {None: 500, 0: 100, 1: 300},
+    }
+    path = tmp_path / "model-q4_k_m.gguf"
+    path.write_bytes(b"x" * 10)
+    monkeypatch.setattr(
+        "vipera.gguf_analyzer.analyze_gguf", lambda p: analysis
+    )
+
+    meta = model_cmd._read_meta(path)
+
+    assert meta["layer_bytes"] == 200  # mean of layers 0 and 1
+    assert meta["n_layers"] == 2
+
+
+def test_read_meta_without_layer_info_leaves_layer_bytes_zero(monkeypatch, tmp_path):
+    analysis = {"metadata": {"n_layers": 2}, "layer_distribution": {}}
+    path = tmp_path / "model.gguf"
+    path.write_bytes(b"x")
+    monkeypatch.setattr(
+        "vipera.gguf_analyzer.analyze_gguf", lambda p: analysis
+    )
+
+    assert model_cmd._read_meta(path)["layer_bytes"] == 0
+
+
 def test_inspect_cli_renders_summary(monkeypatch, capsys, tmp_path):
     result = {
         "path": str(tmp_path / "model.gguf"),

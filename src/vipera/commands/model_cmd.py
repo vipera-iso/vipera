@@ -60,6 +60,7 @@ def _read_meta(path: Path, name: str | None = None) -> dict:
         "n_heads": 0,
         "n_kv_heads": 0,
         "head_dim": 0,
+        "layer_bytes": 0,
     }
 
     m = _QUANT_RE.search(name or path.name)
@@ -72,7 +73,8 @@ def _read_meta(path: Path, name: str | None = None) -> dict:
         # required merely to import this module.
         from vipera.gguf_analyzer import analyze_gguf
 
-        am = analyze_gguf(str(path))["metadata"]
+        analysis = analyze_gguf(str(path))
+        am = analysis["metadata"]
         meta["n_layers"] = int(am.get("n_layers") or 0)
         meta["n_params"] = int(am.get("n_params") or 0)
         meta["context_length"] = int(am.get("context_length") or 0)
@@ -83,6 +85,17 @@ def _read_meta(path: Path, name: str | None = None) -> dict:
         meta["n_heads"] = int(am.get("n_heads") or 0)
         meta["n_kv_heads"] = int(am.get("n_kv_heads") or 0)
         meta["head_dim"] = int(am.get("head_dim") or 0)
+        # Size of one repeating transformer layer, excluding the non-repeating
+        # tensors (token_embd, output.weight, ...). The planner budgets VRAM per
+        # layer from this; size_bytes/n_layers would charge those tensors to
+        # every layer and offload one or two layers fewer than actually fit.
+        per_layer = [
+            size
+            for layer, size in (analysis.get("layer_distribution") or {}).items()
+            if isinstance(layer, int)
+        ]
+        if per_layer:
+            meta["layer_bytes"] = int(sum(per_layer) / len(per_layer))
         if meta["quant"] == "?" and am.get("dominant_quant"):
             meta["quant"] = am["dominant_quant"]
     except Exception as exc:  # analyzer is best-effort, but never silent

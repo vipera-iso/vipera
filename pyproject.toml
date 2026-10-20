@@ -38,7 +38,9 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-llama  = ["llama-cpp-python>=0.2.79"]
+# 0.3.36 is the first release that reuses the KV cache across a shared prompt
+# prefix, so a follow-up turn only prefills its new tokens.
+llama  = ["llama-cpp-python>=0.3.36"]
 gguf   = ["gguf>=0.10"]
 nvidia = ["nvidia-ml-py>=12"]
 dev   = [

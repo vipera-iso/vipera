@@ -67,10 +67,11 @@ def test_hybrid_offloads_layers_when_only_per_layer_kv_fits():
     hw = _hw(gpu_name="GTX 1650", vram_total_gb=4.0, vram_free_gb=3.7)
     p = plan(_HERMES_META, hw, ctx=65536, kv_cache="q4_0")
 
-    # safe_vram 2.7 GB; layer 0.225 GB + per-layer KV 0.0625 GB -> 9 layers.
-    assert p.gpu_layers == 9
+    # safe_vram 2.4 GB (1 GB driver + 0.3 GB compute buffers); layer 0.225 GB
+    # + per-layer KV 0.0625 GB -> 8 layers.
+    assert p.gpu_layers == 8
     assert p.offload_kqv is True
-    assert p.note == "Hybrid: 9/40 layers"
+    assert p.note == "Hybrid: 8/40 layers"
 
 
 def test_hybrid_offload_of_quantized_kv_requires_flash_attention():
@@ -90,6 +91,30 @@ def test_f16_kv_still_offloads_some_layers():
     # 10 GB KV / 40 layers = 0.25 GB per layer on top of 0.225 GB of weights:
     # 2.7 / 0.475 -> 5 layers.
     assert p.gpu_layers == 5
+
+
+def test_real_layer_bytes_offloads_more_than_size_divided_by_layers():
+    # The GGUF index reports ~0.18 GB per repeating layer for this model; the
+    # remaining ~1 GB is token_embd + output.weight, which never follow a layer
+    # to the GPU. size_bytes/n_layers charges that 1 GB to every layer, so the
+    # old arithmetic settled one layer lower.
+    hw = _hw(gpu_name="GTX 1650", vram_total_gb=4.0, vram_free_gb=3.7)
+    meta = dict(_HERMES_META, layer_bytes=int(0.1844 * _GIB))
+
+    measured = plan(meta, hw, ctx=8192, kv_cache="f16")
+    estimated = plan(_HERMES_META, hw, ctx=8192, kv_cache="f16")
+
+    # safe_vram 2.4 GB; 0.1844 + 0.03125 per layer -> 11 layers, versus 9 for
+    # the 0.225 GB/layer the old size/n_layers arithmetic assumed.
+    assert measured.gpu_layers == 11
+    assert estimated.gpu_layers == 9
+    assert measured.gpu_layers > estimated.gpu_layers
+
+
+def test_layer_bytes_zero_falls_back_to_size_estimate():
+    hw = _hw(gpu_name="GTX 1650", vram_total_gb=4.0, vram_free_gb=3.7)
+    meta = dict(_HERMES_META, layer_bytes=0)
+    assert plan(meta, hw, ctx=8192, kv_cache="f16").gpu_layers == 9
 
 
 def test_ram_estimate_reflects_q8_kv_at_64k():
