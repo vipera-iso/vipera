@@ -210,9 +210,19 @@ def _gguf_str(text: str) -> bytes:
     return struct.pack("<Q", len(raw)) + raw
 
 
+def _gguf_quant_table():
+    """Return `(GGML_QUANT_SIZES, GGMLQuantizationType)` from the gguf package.
+
+    `gguf` is an optional extra that CI does not install, so tests that build a
+    real GGUF file skip instead of failing at import time.
+    """
+    constants = pytest.importorskip("gguf.constants", reason="the gguf extra is not installed")
+    return constants.GGML_QUANT_SIZES, constants.GGMLQuantizationType
+
+
 def _write_gguf(path, tensor_type: int, *, name="blk.0.attn_v.weight", block=None):
     """Write a one-tensor GGUF v3 file with the given tensor type id."""
-    from gguf.constants import GGML_QUANT_SIZES, GGMLQuantizationType
+    GGML_QUANT_SIZES, GGMLQuantizationType = _gguf_quant_table()
 
     block_elems, block_bytes = block or GGML_QUANT_SIZES[GGMLQuantizationType(tensor_type)]
     dims = [block_elems, 4]
