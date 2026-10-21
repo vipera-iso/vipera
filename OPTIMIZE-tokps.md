@@ -8,6 +8,38 @@
 
 ---
 
+## Cập nhật 2026-10-22 — đã sửa code, đã đo lại
+
+Bốn việc dưới đây **đã vào `src/`** (kèm test) và số đo nằm ở
+`tools/gpu_results/REPORT.md` §G:
+
+| # | Thay đổi | Trước → sau | Bằng chứng |
+|---|---|---|---|
+| 1 | `cpu_threads = cores` (bỏ `cores - 1`) | +9% decode (ngl 10, q8_0), +19–21% ở f16 KV | §G2, median-3 |
+| 2 | Reserve VRAM theo card (`max(0.25, min(1.0, 0.07×vram_total))` + 0.9 GB khi FA off) thay cho 1.0 + 0.3 cố định | planner: 10 → 14 layer (Q4 8K q8_0); 8 → 13 (16K) | §G1 (14 load / 15 fail), §G3 |
+| 3 | **Placement ladder** trong `engine`/`server_backend`: `n, n-1, n-2, n/2` rồi mới CPU-only | hỏi 15 layer → load 13 (4.4 s), không còn rơi về 0 layer | §G4 |
+| 4 | P0.4 **mlock**: nâng `RLIMIT_MEMLOCK` bằng root rồi đo | 6.26 vs 6.25 t/s → **+0.2%, dưới gate 5% ⇒ mlock không phải đòn bẩy trên máy này** | §G5 |
+| 5 | Bỏ `meta["layer_bytes"]` khỏi budget: luôn dùng `size_bytes / n_layers` | Q3: planner hỏi 20 layer (trần 17) → rơi CPU; nay hỏi 17 → load ngay | §G7 |
+| 6 | P1.2 **Q3 làm model chính**: hardlink + registry alias `hermes-4-14b-q3km-imatrix`, set `default_model` | **17/40 layer, 6.57 t/s** @8K q8_0 (Q4 control 6.18) | §G6, median-3 |
+| 7 | P1.5 **`n_ubatch` 256/1024/2048** cho prefill | 512 → TTFT 4.52 s; 1024/2048 không load nổi ở 14 layer; cùng 12 layer thì TTFT trùng (4.659 vs 4.658 s) ⇒ **không có lợi ích, giữ 512** | §G8 |
+
+Kết quả pipeline thật (`vipera bench run --ctx 8192`, median-3): **4.65 → 6.25
+t/s**, TTFT 2.95 → 2.76 s, 10/40 → 14/40 layer. A/B chen kẽ trong cùng process
+(loại trừ drift nhiệt ~8%/batch): **4.655 → 5.762 t/s = +24%**. 16K: 5.48 t/s
+(trước: planner chọn 8 layer và thua CPU-only).
+
+Phát hiện thêm khi chuyển model (lý do phải sửa planner lần nữa): **một lần tạo
+context thất bại không trả lại VRAM** — sau 3 lần fail trên card 4 GB, rung 10
+layer bình thường cũng không load nổi, nên "hỏi quá" nguy hiểm hơn "hỏi thiếu".
+Vì vậy rung cuối của ladder là `n/4`, và budget dùng `size/n_layers` (không dùng
+`layer_bytes` — nó dự đoán cao hơn trần thật 3–6 layer).
+
+Còn lại của plan: P2.1 build `llama-server` với CUDA (máy không có `nvcc`),
+P2.3 `--spec-type ngram-*`, P3.2 tách lane 64K. P1.5 coi như **đóng bằng số đo
+âm tính** (giữ `n_batch`/`n_ubatch` 512).
+
+---
+
 ## 0. Phạm vi đọc
 
 | Nhóm | Đã đọc |
@@ -113,7 +145,7 @@ lưu JSON vào `tools/*_results/`, ghi **venv nào** chạy.
 
 | ID | Việc | Cách đo | Nghiệm thu / rủi ro |
 |---|---|---|---|
-| **P1.1** | ✅ **Sweep `-ngl`.** Đã viết `tools/sweep_gpu.py` (fresh engine/row, sample peak VRAM/RSS, **từ chối chạy** khi binding không có GPU backend) thay vì ép `bench_layers.py` | Q4 + Q3, `ngl 0…16`, 8K f16, 8K q8_0, 16K q8_0 | **ngl max thật: Q4 = 10 (VRAM 3476), Q3 = 13 (3624/3730); `ngl 14+` → fallback về 0 layer hoặc FAIL kèm RSS 40–55 GB.** Planner đúng ±1 layer ở Q4, **thiếu 3 layer ở Q3**, thiếu 4 ở 16K. `_GPU_COMPUTE_RESERVE_GB` giữ `0.3` (baseline CUDA context đã đo 1114 MiB ≈ phần planner trừ `1.0 + 0.3`) |
+| **P1.1** | ✅ **Sweep `-ngl`.** Đã viết `tools/sweep_gpu.py` (fresh engine/row, sample peak VRAM/RSS, **từ chối chạy** khi binding không có GPU backend) thay vì ép `bench_layers.py` | Q4 + Q3, `ngl 0…16`, 8K f16, 8K q8_0, 16K q8_0 | **ngl max thật: Q4 = 10 (VRAM 3476), Q3 = 13 (3624/3730); `ngl 14+` → fallback về 0 layer hoặc FAIL kèm RSS 40–55 GB.** Planner đúng ±1 layer ở Q4, **thiếu 3 layer ở Q3**, thiếu 4 ở 16K. `_GPU_COMPUTE_RESERVE_GB` giữ `0.3` (baseline CUDA context đã đo 1114 MiB ≈ phần planner trừ `1.0 + 0.3`). **2026-10-22:** trần đó là của **f16 KV + FA off**; với `q8_0` KV (FA on) trần thật là **14 layer** (Q4) / **17 layer** (Q3) — xem §G1 trong report. Reserve 1.3 GB đã bị thay bằng công thức hiệu chuẩn |
 | **P1.2** | **Đổi model serve chính sang `q8src-imbf-q3km.gguf` (7.32 GB)** rồi đo lại ngl sweep: layer nhỏ hơn (0.183 vs 0.225 GB) → **cùng VRAM nhét thêm 1–2 layer**, CPU đọc ít hơn 18% | so Q4 vs Q3 **trên GPU** (chưa ai đo — số cũ là CPU-only, F13) | **Đã đo trên GPU: Q3 13 layer / 5.03 t / RSS 7.4 GB vs Q4 10 layer / 4.97 / 9.2 GB.** Còn thiếu: đổi `default_model` + chạy lại PPL gate 0.4 |
 | **P1.3** | ✅ **`cpu_threads` 3 → so 3 / 4 / 8** (F7) + `n_threads_batch` riêng cho prefill (chưa làm) | 3×64 token mỗi giá trị, 8K f16, cả CPU-only lẫn `-ngl 12` | **Δ = +21% (CPU-only 4.78 vs 3.95) và +19% (ngl 12: 6.00 vs 5.05), cả hai median-3.** `threads 8` tệ hơn `threads 4`. → sửa `planner.py` `cores − 1` → `cores` + test **(chưa làm)** |
 | **P1.4** | **`-fa on` trên GPU với KV f16** ở 16K/32K/64K (F8: planner không bao giờ chọn `>4` → FA off) — trên GPU FA là đường **nhanh** và tiết VRAM compute buffer | `--fa on/off` × ctx | Giữ nếu ≥ +5% TTFT/decode; rủi ro: VRAM, đo bằng nvidia-smi |
@@ -191,8 +223,9 @@ Luôn kèm
 
 **Đòn bẩy đã hết ở tầng `-ngl`/`threads`:** để lên 7 t/s @8K chỉ còn
 P2.3 (`--spec-type ngram-*`, không tốn VRAM) và P1.5 (`n_batch` cho prefill).
-`threads = cores` (+19–21%, median-3) nên được **cộng thẳng** vào mọi hàng trên
-nếu planner được sửa.
+`threads = cores` (+19–21%, median-3) **đã được cộng vào** planner ngày
+2026-10-22, cùng với reserve VRAM hiệu chuẩn và placement ladder — đó là
+4.65 → 6.25 t/s, không phải một thí nghiệm riêng nữa.
 
 ---
 

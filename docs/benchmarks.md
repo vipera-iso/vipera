@@ -55,16 +55,45 @@ the `spills` case and load flags as the lever for the `fits` case.
 
 ### 14B dense on a 4 GB card (asymmetric hardware)
 
-| Config | GPU layers | TTFT | Decode |
-|---|---|---:|---:|
-| 64K context, q4_0 KV, flash attention on | 9/40 | 5.0 s | 0.13 t/s |
-| 8K context, q8_0 KV, flash attention on | 11/40 | 4.8 s | 2.86 t/s |
-| 8K context, f16 KV, flash attention off | 10/40 | 3.2 s | 4.00 t/s |
+Hermes-4-14B, CUDA `llama-cpp-python`, 45-token prompt, 64 tokens generated,
+median of 3, `vipera bench run --ctx 8192`:
 
-The last row is the useful one for interactive work: with f16 KV at 8K the KV
-cache fits in RAM, flash attention stays off, and the CPU-side layers run the
-normal attention path. Long context is the limit — at 16K this model does not
-create a GPU context on a 4 GB card at all and the engine falls back to CPU.
+| Model | Config | GPU layers | TTFT | Decode |
+|---|---|---:|---:|---:|
+| Q3_K_M + imatrix (6.8 GiB) | 8K, `q8_0` KV, FA on | **17/40** | 2.7 s | **6.57 t/s** |
+| Q3_K_M + imatrix | 16K, `q8_0` KV, FA on | 14/40 | 2.8 s | 6.20 t/s |
+| Q4_K_M (8.4 GiB) | 8K, `q8_0` KV, FA on | 14/40 | 2.76 s | 6.18–6.25 t/s |
+| Q4_K_M | 16K, `q8_0` KV, FA on | 13/40 | 2.83 s | 5.48 t/s |
+| Q4_K_M | 64K, q4_0 KV, FA on | 9/40 | 5.0 s | 0.13 t/s |
+
+The Q3 build (`q8src-imbf-q3km.gguf`) is the better default: its importance
+matrix keeps perplexity inside the eval-set error of Q4 (see the quantization
+section), it is 1.6 GiB smaller, and its smaller per-layer weights put three
+more layers on the card.
+
+8K is the interactive case and `q8_0` is the KV type to use there: it needs
+flash attention, which is also what makes 14 layers fit instead of 10 (the
+non-FA path materializes a KQ matrix per batch). Long context is the wall — at
+64K this model cannot be made fast on a 4 GB card regardless of flags.
+
+Three measured changes moved the 8K row from **4.55 t/s at 10/40** to **6.30
+t/s at 14/40**. That pair is measured as an interleaved A/B in one process
+(alternating old/new, three runs each, median reported) because this box drifts
+±10% between batches: absolute `bench run` medians for the new build ranged
+5.35–6.25 t/s over the session. The change set:
+
+1. `cpu_threads` is one per physical core instead of `cores - 1`.
+2. The VRAM reserve is calibrated (0.3 GB on this card instead of a flat
+   1.3 GB), so four more layers run on the GPU.
+3. A plan that does not fit now walks the offload down (`14 → 13 → 12 → 7`)
+   instead of dropping straight to CPU-only.
+
+Numbers above are from the CUDA virtualenv
+(`~/.venvs/vipera`, `vipera system doctor` → `gpu offload: compiled in`). The
+older rows in this section were produced in this environment's CPU-only
+sibling and reproduce differently; see the caveats. Raw runs, including the
+A/B that isolates each lever, are in
+[tools/gpu_results/REPORT.md §G](../tools/gpu_results/REPORT.md).
 
 ### Quantization: what an imatrix buys at Q4 and Q3
 
@@ -131,11 +160,13 @@ vipera bench run <model> --ctx 8192,16384 --max-tokens 64
 ## Caveats
 
 - One machine, one model family. Do not treat these as leaderboard numbers.
-- **`mlock` is unverifiable on this machine as configured.** `ulimit -l` is
-  8 MiB (soft = hard), unraisable without root, so every locked-memory path
-  warns and runs as mmap. Any row attributed to `mlock` here predates that
-  check or ran with the limit raised — the engine requests it, the kernel
-  refuses it, and nothing in the gateway says so.
+- **`mlock` does not buy throughput here, and the limit is not the reason.**
+  `ulimit -l` is 8 MiB (soft = hard), so every locked-memory path warns and
+  runs as mmap. Raising it (`ulimit -l unlimited` as root, 14B/Q4, 8K, median-3)
+  measured 6.26 t/s against 6.25 t/s without — no change beyond noise. The
+  earlier 16.0 → 22.9 t/s row attributed to `mlock` did not come from a working
+  lock on this box; do not quote `mlock` as a lever until it is re-measured
+  with the limit raised and interleaved against the control.
 - `llama.cpp` build and flags move throughput more than the gateway layer does.
 - Prompt-prefix reuse depends on `llama-cpp-python` 0.3.36+ and on the client
   resending an identical prefix; a cold process always pays full prefill.

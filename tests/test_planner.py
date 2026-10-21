@@ -29,7 +29,9 @@ def test_cpu_only_plan():
     assert p.kv_cache == "q8_0"
     assert p.flash_attn is True
     assert p.note.startswith("CPU ONLY")
-    assert p.cpu_threads == 7
+    # One thread per physical core: threads=cores measured +19-21% decode over
+    # threads=cores-1 (median-3), and threads=2*cores loses to SMT contention.
+    assert p.cpu_threads == 8
 
 
 def test_cpu_only_plan_keeps_f16_without_flash_attention():
@@ -71,11 +73,11 @@ def test_hybrid_offloads_layers_when_only_per_layer_kv_fits():
     hw = _hw(gpu_name="GTX 1650", vram_total_gb=4.0, vram_free_gb=3.7)
     p = plan(_HERMES_META, hw, ctx=65536, kv_cache="q4_0")
 
-    # safe_vram 2.4 GB (1 GB driver + 0.3 GB compute buffers); layer 0.225 GB
-    # + per-layer KV 0.0625 GB -> 8 layers.
-    assert p.gpu_layers == 8
+    # safe_vram 3.42 GB (0.28 GB card reserve); layer 0.225 GB
+    # + per-layer KV 0.0625 GB -> 11 layers.
+    assert p.gpu_layers == 11
     assert p.offload_kqv is True
-    assert p.note == "Hybrid: 8/40 layers"
+    assert p.note == "Hybrid: 11/40 layers"
 
 
 def test_hybrid_offload_of_quantized_kv_requires_flash_attention():
@@ -97,28 +99,34 @@ def test_f16_kv_still_offloads_some_layers():
     assert p.gpu_layers == 5
 
 
-def test_real_layer_bytes_offloads_more_than_size_divided_by_layers():
-    # The GGUF index reports ~0.18 GB per repeating layer for this model; the
-    # remaining ~1 GB is token_embd + output.weight, which never follow a layer
-    # to the GPU. size_bytes/n_layers charges that 1 GB to every layer, so the
-    # old arithmetic settled one layer lower.
+def test_no_flash_attention_costs_layers():
+    # Without FA llama.cpp allocates a full KQ matrix per batch, so the same card
+    # offloads fewer layers. Measured on the reference box: 14 layers with FA at
+    # 8K/q8_0, 10 without at 8K/f16.
+    hw = _hw(gpu_name="GTX 1650", vram_total_gb=4.0, vram_free_gb=3.64)
+    quantized = plan(_HERMES_META, hw, ctx=8192, kv_cache="q8_0")
+    full_precision = plan(_HERMES_META, hw, ctx=8192, kv_cache="f16")
+
+    assert quantized.flash_attn is True
+    assert full_precision.flash_attn is False
+    assert quantized.gpu_layers > full_precision.gpu_layers
+    # 13 vs 9: the FA reserve is worth more than the f16 cache is cheaper.
+    assert quantized.gpu_layers == 13
+    assert full_precision.gpu_layers == 9
+
+
+def test_layer_bytes_metadata_does_not_raise_the_offload():
+    # meta["layer_bytes"] is the mean size of a repeating blk.N block, which
+    # excludes token_embd/output.weight. Offloading on it measured optimistic on
+    # both files it was tried with: a Q4_K_M plan asked for 6 layers more than
+    # the card could create a context for, and a Q3_K_M plan for 3 more. A
+    # failed attempt keeps its VRAM, so the ladder then ended up CPU-only. The
+    # budget charges size_bytes/n_layers instead.
     hw = _hw(gpu_name="GTX 1650", vram_total_gb=4.0, vram_free_gb=3.7)
-    meta = dict(_HERMES_META, layer_bytes=int(0.1844 * _GIB))
+    lean = dict(_HERMES_META, layer_bytes=int(0.1844 * _GIB))
 
-    measured = plan(meta, hw, ctx=8192, kv_cache="f16")
-    estimated = plan(_HERMES_META, hw, ctx=8192, kv_cache="f16")
-
-    # safe_vram 2.4 GB; 0.1844 + 0.03125 per layer -> 11 layers, versus 9 for
-    # the 0.225 GB/layer the old size/n_layers arithmetic assumed.
-    assert measured.gpu_layers == 11
-    assert estimated.gpu_layers == 9
-    assert measured.gpu_layers > estimated.gpu_layers
-
-
-def test_layer_bytes_zero_falls_back_to_size_estimate():
-    hw = _hw(gpu_name="GTX 1650", vram_total_gb=4.0, vram_free_gb=3.7)
-    meta = dict(_HERMES_META, layer_bytes=0)
-    assert plan(meta, hw, ctx=8192, kv_cache="f16").gpu_layers == 9
+    assert plan(lean, hw, ctx=8192, kv_cache="f16").gpu_layers == 9
+    assert plan(_HERMES_META, hw, ctx=8192, kv_cache="f16").gpu_layers == 9
 
 
 def test_ram_estimate_reflects_q8_kv_at_64k():

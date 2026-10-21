@@ -24,10 +24,10 @@ import urllib.request
 from collections.abc import Iterator
 from dataclasses import replace
 from pathlib import Path
-from typing import Any
+from typing import Any, BinaryIO
 
 from vipera import config
-from vipera.engine import _CHAT_PARAMS, _DEFAULT_SAMPLING, check_host_ram
+from vipera.engine import _CHAT_PARAMS, _DEFAULT_SAMPLING, check_host_ram, load_attempts
 from vipera.optimizer import OptimizerError, find_llama_tool
 from vipera.planner import Plan
 
@@ -127,7 +127,7 @@ class ServerEngine:
         self._model_path = model_path
         self._closed = False
         self._proc: subprocess.Popen | None = None
-        self._log = None
+        self._log: BinaryIO | None = None
         self._port: int | None = None
         self._log_path: Path | None = None
 
@@ -139,28 +139,26 @@ class ServerEngine:
                 "the Python binding does not ship one."
             ) from exc
 
-        try:
-            self._start(plan)
-        except RuntimeError as exc:
-            if plan.gpu_layers == 0:
-                raise
-            # Same honest fallback as the in-process engine: a plan the planner
-            # believed in can still fail to allocate, and CPU-only is a real
-            # (slow) answer instead of a crash.
-            print(f"\n[!] Warning: llama-server failed to start ({exc}). Falling back to CPU...")
-            cpu_plan = replace(
-                plan,
-                gpu_layers=0,
-                offload_kqv=False,
-                n_batch=min(plan.n_batch, 128),
-            )
+        # Same staged fallback as the in-process engine: walk the offload down
+        # before giving up the placement entirely, because CPU-only is the
+        # slowest outcome and a one-layer-too-optimistic plan pays a few
+        # seconds for the retry instead of the whole run.
+        last_exc: Exception | None = None
+        for i, (candidate, label) in enumerate(load_attempts(plan)):
             try:
-                self._start(cpu_plan)
-                print(f"[!] Warning: serving CPU-only with ctx={cpu_plan.context}.")
-            except RuntimeError as cpu_exc:
-                raise RuntimeError(
-                    f"llama-server failed to start on GPU and CPU: {cpu_exc}"
-                ) from cpu_exc
+                self._start(candidate)
+                if i > 0:
+                    print(
+                        f"\n[!] Warning: llama-server failed to start with the planned "
+                        f"split; serving {label}."
+                    )
+                break
+            except RuntimeError as exc:
+                last_exc = exc
+        else:
+            raise RuntimeError(
+                f"llama-server failed to start on GPU and CPU: {last_exc}"
+            ) from last_exc
 
         atexit.register(self.close)
 

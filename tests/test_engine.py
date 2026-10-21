@@ -65,13 +65,28 @@ def test_insufficient_ram_is_refused_before_loading(fake_llama):
     assert fake_llama.calls == []
 
 
+def test_gpu_fallback_walks_the_offload_down_before_cpu(fake_llama):
+    # 9 layers planned, only 6 fit: the ladder is 9, 8, 7, then a quarter (2).
+    # Measured on the reference box, asking for 15 layers loads 13 instead of
+    # CPU-only, and the last rung is deliberately small: a failed attempt keeps
+    # its VRAM, so after three failures even a 10-layer rung failed.
+    fake_llama.fail_if = staticmethod(lambda kw: kw["n_gpu_layers"] > 6)
+
+    engine = Engine(_plan(note="Hybrid: 9/40 layers"), "model.gguf")
+
+    assert [c["n_gpu_layers"] for c in fake_llama.calls] == [9, 8, 7, 2]
+    assert engine.plan.gpu_layers == 2
+    # The note follows the split that actually loaded, not the planned one.
+    assert engine.plan.note == "Hybrid: 2/40 layers"
+
+
 def test_cpu_fallback_keeps_context_kv_and_flash_attention(fake_llama):
     fake_llama.fail_if = staticmethod(lambda kw: kw["n_gpu_layers"] > 0)
 
     engine = Engine(_plan(), "model.gguf")
 
-    assert len(fake_llama.calls) == 2
-    gpu, cpu = fake_llama.calls
+    assert [c["n_gpu_layers"] for c in fake_llama.calls] == [9, 8, 7, 2, 0]
+    gpu, cpu = fake_llama.calls[0], fake_llama.calls[-1]
 
     assert gpu["n_gpu_layers"] == 9
     assert cpu["n_gpu_layers"] == 0
@@ -90,12 +105,11 @@ def test_cpu_fallback_reduces_context_only_as_second_step(fake_llama, capsys):
 
     engine = Engine(_plan(), "model.gguf")
 
-    assert len(fake_llama.calls) == 3
-    assert fake_llama.calls[0]["n_ctx"] == 65536
-    assert fake_llama.calls[1]["n_ctx"] == 65536
-    assert fake_llama.calls[2]["n_ctx"] == 2048
+    # Every GPU rung and the full-context CPU rung keep 65536; only the second
+    # CPU stage (after the GPU ladder) drops it.
+    assert [c["n_ctx"] for c in fake_llama.calls] == [65536, 65536, 65536, 65536, 65536, 2048]
     # KV quantization survives the context reduction.
-    assert fake_llama.calls[2]["type_k"] == 8
+    assert fake_llama.calls[-1]["type_k"] == 8
     assert engine.plan.context == 2048
     assert "will NOT be met" in capsys.readouterr().out
 

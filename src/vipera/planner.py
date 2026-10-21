@@ -26,12 +26,19 @@ class Plan:
 
 _VALID_PROFILES = ("auto", "cpu", "gpu", "lowmem")
 
-# llama.cpp allocates CUDA compute buffers for the GPU-resident layers on top of
-# their weights and KV. Measured on a GTX 1650 / 14B-Q4 / 8K f16: 11 layers
-# (2.37 GB) load, 12 layers (2.59 GB) fail to create the context. Keeping a
-# fixed slice free stops the planner from planning a split the GPU cannot run;
-# the engine's only fallback is CPU-only, which is much slower than 11 layers.
-_GPU_COMPUTE_RESERVE_GB = 0.3
+# Room left on the card for the CUDA/driver context and llama.cpp's compute
+# buffers. This used to be a flat 1.0 GB (driver) + 0.3 GB (compute), which on a
+# 4 GB card gave away four layers: measured on a GTX 1650 with 3.64 GB free, a
+# 14B/Q4 model at 8K offloads 14 layers (3.37 GB of weights+KV) and 15 fail, so
+# the real reserve is ~0.3 GB. A flat 1.3 GB reserve measured 5.0 t/s where 14
+# layers measured 5.96 t/s. Scale it with the card instead: small cards get the
+# measured figure, big cards still keep ~1 GB for their larger compute buffers.
+_VRAM_RESERVE_BASE_GB = 0.3
+_VRAM_RESERVE_FRACTION = 0.07
+# Extra reserve when the plan cannot use flash attention. Without FA llama.cpp
+# allocates a full KQ matrix per batch instead of streaming it, which on the same
+# 4 GB card cuts the offload from 14 layers to 10 (0.9 GB of weights).
+_NO_FA_RESERVE_GB = 0.9
 
 # Bytes per element for each supported kv_cache dtype. The values for the
 # original five are the rounded ones the VRAM budget was measured against
@@ -123,7 +130,11 @@ def plan(
     kv_layers = _kv_layer_count(meta) or n_layers
     size_bytes = int(meta.get("size_bytes") or 4_000_000_000)
 
-    cpu_threads = max(1, hw.cpu_cores - 1)
+    # One thread per physical core. `cores - 1` used to leave a core idle: on a
+    # 4C/8T box, threads=4 measured +19-21% decode over threads=3 (median-3,
+    # both CPU-only and with 12 GPU layers), while threads=8 lost throughput to
+    # SMT contention.
+    cpu_threads = max(1, hw.cpu_cores)
     has_gpu = getattr(hw, "vram_total_gb", 0) > 0
 
     model_size_gb = size_bytes / 1024**3
@@ -143,8 +154,15 @@ def plan(
             kv_layers=kv_layers,
         )
 
-    # 1 GB for the OS/display driver, plus room for llama.cpp compute buffers.
-    safe_vram = max(0.0, hw.vram_free_gb - 1.0 - _GPU_COMPUTE_RESERVE_GB)
+    want_gpu = has_gpu and profile != "cpu"
+    # Flash attention is required by quantized KV, and on the GPU it is also the
+    # fast path. Decided before the VRAM budget because it changes how much
+    # scratch space llama.cpp needs on the card.
+    flash_attn_on_gpu = kv_cache in _FA_REQUIRED_KV or hw.vram_total_gb > 4
+    reserve_gb = max(_VRAM_RESERVE_BASE_GB, min(1.0, _VRAM_RESERVE_FRACTION * hw.vram_total_gb))
+    if want_gpu and not flash_attn_on_gpu:
+        reserve_gb += _NO_FA_RESERVE_GB
+    safe_vram = max(0.0, hw.vram_free_gb - reserve_gb)
 
     # llama.cpp allocates the KV cache per layer: only the layers offloaded to
     # the GPU take their slice of KV with them, the rest stays in system RAM.
@@ -156,20 +174,25 @@ def plan(
     # layers hold a fixed recurrent state and never pay for context.
     per_layer_kv_gb = kv_cache_gb / kv_layers if kv_layers else 0.0
 
-    # Repeating-layer weights, when the GGUF index is available. Embeddings and
-    # output.weight follow no layer to the GPU: on a 14B/Q4 model they are ~1 GB
-    # that size_bytes/n_layers wrongly charges to every layer, which under-
-    # offloads by a layer or two on a small card.
-    layer_bytes = int(meta.get("layer_bytes") or 0)
-    if layer_bytes > 0:
-        layer_gb = layer_bytes / 1024**3
-    else:
-        layer_gb = model_size_gb / n_layers if n_layers else 0.4
+    # Charge every layer the mean weight size (size_bytes / n_layers). An
+    # earlier version preferred meta["layer_bytes"] (the mean size of one
+    # repeating blk.N block, which excludes token_embd/output.weight) on the
+    # theory that those tensors never follow a layer to the GPU. Measured, that
+    # is optimistic: llama.cpp's per-layer CUDA compute buffer grows with the
+    # number of offloaded layers, and charging the embedding/output bytes to
+    # each layer happens to cover it.
+    #   Q4_K_M 9.00 GB, 8K q8_0: layer_bytes predicts 10+ layers too many (the
+    #                            budget below lands on 13); measured ceiling 14.
+    #                            With a 0.28 GB reserve it predicted 14 exactly,
+    #                            so the base reserve keeps a one-layer margin.
+    #   Q3_K_M 6.82 GB, 8K q8_0: layer_bytes predicts 20 against a measured 17.
+    # Over-estimating is the expensive direction: a failed context creation
+    # leaves its VRAM allocated, so the ladder can end up CPU-only.
+    layer_gb = model_size_gb / n_layers if n_layers else 0.4
     layer_total_gb = layer_gb + per_layer_kv_gb
     gpu_layers = 0
 
     # profile=cpu forces no offload even when a GPU is present.
-    want_gpu = has_gpu and profile != "cpu"
     if want_gpu and safe_vram > 0 and layer_total_gb > 0:
         gpu_layers = min(n_layers, int(safe_vram / layer_total_gb))
 
@@ -193,7 +216,7 @@ def plan(
             note = "CPU ONLY"
     else:
         # Quantized KV requires flash attention, regardless of VRAM size.
-        flash_attn = kv_cache in _FA_REQUIRED_KV or hw.vram_total_gb > 4
+        flash_attn = flash_attn_on_gpu
         offload_kqv = True
         n_batch = min(n_batch, 512)
         note = "Full GPU" if gpu_layers == n_layers else f"Hybrid: {gpu_layers}/{n_layers} layers"

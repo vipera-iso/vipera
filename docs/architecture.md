@@ -85,7 +85,7 @@ produces:
 | Field | Meaning |
 |---|---|
 | `gpu_layers` | Number of transformer layers offloaded to the GPU. |
-| `cpu_threads` | Worker threads passed to `llama.cpp` (`cores - 1`, minimum 1). |
+| `cpu_threads` | Worker threads passed to `llama.cpp` (one per physical core, minimum 1). |
 | `context` | `n_ctx`, possibly reduced on low-memory machines. |
 | `kv_cache` | KV cache type string, mapped to a `llama.cpp` enum in the engine. |
 | `flash_attn` | Whether flash attention is requested. |
@@ -97,16 +97,26 @@ produces:
 The algorithm, in order:
 
 1. **Metadata defaults.** Missing `n_layers` → 32; missing `size_bytes` → 4 GB.
-2. **Threads.** `cpu_threads = max(1, cpu_cores - 1)`.
+2. **Threads.** `cpu_threads = max(1, cpu_cores)` — one thread per physical
+   core. Leaving a core idle measured 19-21% slower than using it (14B, both
+   CPU-only and with 12 GPU layers, median-3); using every logical thread is
+   slower still, so SMT siblings are not used.
 3. **mlock.** Enabled only when free RAM minus the host-resident weights and
    host-resident KV cache exceeds 3 GB. Pinning with less headroom leaves
    nothing for llama.cpp compute buffers and can trigger the OOM killer on a
-   no-swap machine.
-4. **VRAM budget.** `safe = max(0, vram_free - 1.0 - 0.3)` reserves 1 GB for
-   the display/driver and 0.3 GB for llama.cpp's CUDA compute buffers. The
-   second reserve is measured: on a GTX 1650 with 3.7 GB free, 11 offloaded
-   layers of a 14B/Q4 model load, 12 fail to create the context, and the
-   engine's only fallback is CPU-only — far slower than 11 layers.
+   no-swap machine. (On the reference box the kernel refuses the lock anyway —
+   `ulimit -l` is 8 MiB — and raising that limit measured no gain; see
+   [benchmarks](benchmarks.md#caveats).)
+4. **VRAM budget.**
+   `safe = max(0, vram_free - max(0.25, min(1.0, 0.07 * vram_total)))`, plus
+   0.9 GB when the plan cannot use flash attention. The reserve covers the
+   CUDA/driver context and llama.cpp's compute buffers. It is calibrated from
+   measurement, not guessed: on a GTX 1650 with 3.64 GB free, a 14B/Q4 model at
+   8K/`q8_0` offloads 14 layers (3.37 GB of weights + KV) and 15 fail to create
+   the context, so the real reserve is ~0.3 GB. The flat 1.3 GB this used to
+   reserve left four layers on the CPU and measured 5.0 t/s against 6.0 t/s at
+   14 layers. It scales with the card so a 24 GB card is not over-reserved,
+   and it stays near the measured figure on small ones.
 5. **Layer placement.** llama.cpp allocates the KV cache per layer: only the
    offloaded layers keep their slice of KV in VRAM. So
    `per_layer_kv = kv_gb / kv_layers`,
@@ -115,21 +125,27 @@ The algorithm, in order:
    layers for models that actually fit a useful hybrid split. `kv_layers` is
    every layer for a dense model and only the attention subset for a hybrid one
    (see below); the host-side KV charge follows the same split.
-   `layer_gb` is `meta["layer_bytes"]` when the GGUF index was read: the mean
-   size of one repeating `blk.N` block, which excludes `token_embd` and
-   `output.weight` because they never follow a layer to the GPU. Without that
-   field the planner falls back to `size_gb / n_layers`, which charges those
-   non-repeating tensors to every layer and offloads one or two layers fewer
-   than actually fit (on a 14B/Q4 model at 8K with 3.7 GB free: 9 instead of
-   11).
+   `layer_gb` is `size_gb / n_layers`. `meta["layer_bytes"]` (the mean size of
+   one repeating `blk.N` block, excluding `token_embd`/`output.weight`) is
+   deliberately **not** used any more: charging only the repeating block was
+   optimistic on both files it was tried with, because llama.cpp's per-layer
+   CUDA compute buffer grows with the number of offloaded layers. Measured on
+   the reference card at 8K/`q8_0`: a Q4_K_M model has a 14-layer ceiling where
+   `layer_bytes` arithmetic asked for 20, and a Q3_K_M has a 17-layer ceiling
+   where it asked for 20. `size_gb / n_layers` lands on 14 and 17. Over-
+   estimating is the expensive direction: a failed context creation keeps its
+   VRAM, so three failures in a row left even a 10-layer attempt unable to
+   load.
 6. **CPU-only path** (`gpu_layers == 0`): KQV offload off,
    `n_batch = min(n_batch, 128)`, and the requested KV type is kept. Flash
    attention is enabled whenever that type is quantized (llama.cpp requires
    it), so a 64K context does not silently become a 10 GB f16 cache. If total
    RAM is under 8 GB the context is capped at 2048.
 7. **GPU path:** flash attention on when KV is quantized or total VRAM exceeds
-   4 GB; KQV offload on; `n_batch = min(n_batch, 512)`. The note distinguishes
-   full and hybrid offload.
+   4 GB (without it the KQ matrix is materialized per batch, which on a 4 GB
+   card cut the offload from 14 layers to 10); KQV offload on;
+   `n_batch = min(n_batch, 512)`. The note distinguishes full and hybrid
+   offload.
 
 `profile=cpu` forces zero offload and `profile=lowmem` returns a fixed
 2048-context plan; the other profiles only influence the placement note. The
@@ -226,13 +242,22 @@ Two retries exist, and they are independent:
 
 1. **mlock retry** (inside `_load`): if loading with `use_mlock` raises, retry
    once with `use_mlock=False`. Common on systems with a low `RLIMIT_MEMLOCK`.
-2. **GPU→CPU fallback** (in `__init__`), in stages: first retry on CPU with the
-   caller's `context` and `kv_cache` intact (`gpu_layers=0`, KQV offload off,
-   `n_batch` capped at 128); if that fails, retry at
-   `context=min(context, 2048)`; only as a last resort force `kv_cache="f16"`
+2. **Placement ladder** (`engine.load_attempts`), in stages: `n`, `n-1`, `n-2`,
+   `n/2` GPU layers, then CPU with the caller's `context` and `kv_cache` intact
+   (`gpu_layers=0`, KQV offload off, `n_batch` capped at 128), then
+   `context=min(context, 2048)`, and only as a last resort `kv_cache="f16"`
    with flash attention off. Every reduction prints a warning, and dropping
    below the requested context says so explicitly. The successful plan
-   replaces `self.plan`, so callers and status output describe what ran.
+   replaces `self.plan` (including its `note`), so callers and status output
+   describe what ran.
+
+The layer ladder exists because the old behaviour — any GPU failure jumps to
+CPU-only — is the worst outcome on asymmetric hardware: 3.9 t/s CPU-only where
+the last loadable split gave 5.0 t/s (14B/Q4, 8K, GTX 1650). Asking for 15
+layers where 14 fit now loads at 13 in ~4 s instead of serving from the CPU.
+A failed attempt does not hand its VRAM back before the next one, so the ladder
+is short and ends on a halving rung rather than walking down one layer at a
+time.
 
 If every load fails, the engine raises `RuntimeError`.
 
@@ -260,8 +285,9 @@ Differences from the in-process engine:
   releases.
 - The child's stdout/stderr go to `~/.vipera/logs/llama-server-<port>.log`; a
   failed start raises with the log tail instead of an opaque exception.
-- A GPU start failure retries once CPU-only (`gpu_layers=0`, KQV offload off,
-  `n_batch` capped at 128). The context and KV type are kept.
+- A GPU start failure walks the same placement ladder as the in-process engine
+  (`n`, `n-1`, `n-2`, `n/2` layers) before going CPU-only (`gpu_layers=0`, KQV
+  offload off, `n_batch` capped at 128). The context and KV type are kept.
 - `close()` terminates the child (SIGTERM, then SIGKILL after 10 s) and is
   registered with `atexit`; `serve stop` stops the gateway, which stops it.
 - `stream_options.include_usage` is forwarded when a caller asks for it, so
@@ -342,12 +368,11 @@ These are observable in the current code and worth knowing before filing a bug:
   (flash attention is decided by the planner; `--profile` defaults to `auto`
   rather than the stored value). Per-request sampling parameters default to the
   values in `server.ChatRequest`, not to config.
-- The VRAM model assumes the KV cache stays per layer. On the GTX 1650 test
-  box, a 14B/Q4 model at 16K with f16 KV and flash attention off fails to
-  create the context above ~6 offloaded layers (`ValueError: Failed to create
-  llama_context`), while the planner picks 8-9; the engine then falls back to
-  CPU-only at ~2 t/s. The same model at 8K loads with 10 layers, so the
-  per-layer model is only validated for shorter contexts.
+- The VRAM model assumes the KV cache stays per layer, and its reserve is
+  calibrated on one card. Verified for a 14B/Q4 at 8K/`q8_0` (14 layers load,
+  15 fail) and 16K/`q8_0` (13 load); the f16 non-FA path is covered by an extra
+  flat reserve rather than by a measured curve. An over-estimate is now
+  recoverable through the placement ladder, at the cost of a failed load.
 - The planner does not emit MoE-specific offload flags despite the README's
   description of the flag set.
 - Expert-slab reordering (I/O-locality optimization) is not implemented. It

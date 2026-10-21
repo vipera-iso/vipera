@@ -32,6 +32,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   nominal bit width.
 
 ### Changed
+- **Throughput: 4.55 → 6.3 t/s on the reference 14B** (8K, interleaved A/B,
+  median-3). Three measured changes: `cpu_threads` is now one per physical core
+  instead of `cores - 1` (+9%, and +19-21% at f16 KV); the VRAM reserve is
+  calibrated from the card instead of a flat 1.3 GB (0.3 GB here, which runs
+  four more layers on the GPU); and a plan that does not fit walks the offload
+  down instead of jumping to CPU-only, which was the slowest outcome (3.9 t/s
+  against 5.0 t/s at the last split that loaded).
+- **The offload budget no longer trusts `meta["layer_bytes"]`** — only the
+  repeating `blk.N` block size was charged per layer, which is optimistic by
+  3-6 layers because llama.cpp's per-layer compute buffer grows with `-ngl`
+  (measured: a Q3_K_M file has a 17-layer ceiling where the old arithmetic
+  asked for 20, and asking too much ends on the CPU). `size_bytes / n_layers`
+  lands on the measured ceiling for both files. The placement ladder's last
+  rung is a quarter of the plan rather than half, because a failed context
+  creation keeps its VRAM.
 - **Four more KV cache types** — `bf16`, `q5_0`, `q5_1`, and `iq4_nl` are
   accepted next to the original five, and the planner sizes them from their
   ggml block size instead of falling back to the f16 estimate.

@@ -94,6 +94,59 @@ def check_host_ram(plan: Plan) -> None:
         )
 
 
+def layer_ladder(layers: int) -> list[int]:
+    """Offload counts to try for a plan that asks for ``layers``, best first.
+
+    A split that is one or two layers too optimistic used to fall straight to
+    ``gpu_layers=0``, which is the slowest outcome on the box this was measured
+    on: 3.90 t/s CPU-only against 4.97 t/s at the last split that loaded
+    (14B/Q4, 8K, GTX 1650). Each rung costs one failed context creation (~2 s
+    for a 14B at 8K), and a failed attempt does not hand its VRAM back before
+    the next one: after three failures on a 4 GB card even a 10-layer rung
+    failed, which is how asking for 20 layers ended up on the CPU. The ladder is
+    therefore short and its last rung is a quarter of the plan, not half — it
+    exists to land anywhere other than CPU-only.
+    """
+    if layers <= 0:
+        return []
+    steps = (layers, layers - 1, layers - 2, max(2, layers // 4))
+    return [n for n in dict.fromkeys(steps) if 0 < n <= layers]
+
+
+def with_gpu_layers(plan: Plan, layers: int) -> Plan:
+    """Same plan at a different offload depth, with a truthful note."""
+    note = plan.note
+    if note.startswith("Hybrid: "):
+        total = note.split("/", 1)[1].split()[0]
+        note = f"Hybrid: {layers}/{total} layers"
+    return replace(plan, gpu_layers=layers, note=note)
+
+
+def load_attempts(plan: Plan) -> list[tuple[Plan, str]]:
+    """Candidate plans for loading, most offload first, ending CPU-only."""
+    attempts: list[tuple[Plan, str]] = [(plan, "planned split")]
+    hybrid_total = (
+        plan.note.split("/", 1)[1].split()[0] if plan.note.startswith("Hybrid: ") else None
+    )
+    for layers in layer_ladder(plan.gpu_layers)[1:]:
+        label = f"GPU, {layers}/{hybrid_total} layers" if hybrid_total else f"GPU, {layers}"
+        attempts.append((with_gpu_layers(plan, layers), label))
+
+    # CPU stages: keep the caller's context and KV type first, then reduce.
+    cpu_plan = replace(
+        plan,
+        gpu_layers=0,
+        offload_kqv=False,
+        n_batch=min(plan.n_batch, 128),
+    )
+    reduced_plan = replace(cpu_plan, context=min(plan.context, 2048))
+    safe_plan = replace(reduced_plan, kv_cache="f16", flash_attn=False)
+    attempts.append((cpu_plan, f"CPU, ctx={cpu_plan.context}, kv={cpu_plan.kv_cache}"))
+    attempts.append((reduced_plan, f"CPU, ctx={reduced_plan.context}, kv={reduced_plan.kv_cache}"))
+    attempts.append((safe_plan, f"CPU safe mode, ctx={safe_plan.context}, kv={safe_plan.kv_cache}"))
+    return attempts
+
+
 def create_engine(plan: Plan, model_path: str, backend: str = "inprocess") -> ChatEngine:
     """Build the engine selected by the ``backend`` config key."""
     if backend == "server":
@@ -119,51 +172,29 @@ class Engine:
 
         check_host_ram(plan)
 
-        gpu_exc: Exception | None = None
-        try:
-            self.llm = self._load(plan)
-            return
-        except Exception as exc:  # need to try CPU fallback
-            gpu_exc = exc
-
-        print("\n[!] Warning: failed to load with GPU. Falling back to CPU...")
-
-        # Fall back in stages rather than jumping straight to f16/2048. Callers
-        # such as Hermes require a 64K context floor, and quantized KV is the
-        # only way that fits in RAM on this class of machine. Silently dropping
-        # to 2048 would load "successfully" and then be useless.
-        cpu_plan = replace(
-            plan,
-            gpu_layers=0,
-            offload_kqv=False,
-            n_batch=min(plan.n_batch, 128),
-        )
-        reduced_plan = replace(cpu_plan, context=min(plan.context, 2048))
-        safe_plan = replace(reduced_plan, kv_cache="f16", flash_attn=False)
-
-        attempts = [
-            (cpu_plan, f"CPU, ctx={cpu_plan.context}, kv={cpu_plan.kv_cache}"),
-            (reduced_plan, f"CPU, ctx={reduced_plan.context}, kv={reduced_plan.kv_cache}"),
-            (safe_plan, f"CPU safe mode, ctx={safe_plan.context}, kv={safe_plan.kv_cache}"),
-        ]
-
-        last_exc: Exception = gpu_exc
+        # Stage the fallback instead of jumping straight to CPU-only: first walk
+        # the offload down one layer at a time, then give up the placement, then
+        # the context and finally the KV type. Callers such as Hermes require a
+        # 64K context floor, and quantized KV is the only way that fits in RAM on
+        # this class of machine, so dropping to 2048 must stay the last resort.
+        attempts = load_attempts(plan)
+        last_exc: Exception | None = None
         for i, (candidate, label) in enumerate(attempts):
-            if i > 0:
-                print(f"[!] Warning: fallback failed; retrying with {label}. ")
-                if candidate.context < plan.context:
+            try:
+                self.llm = self._load(candidate)
+                self.plan = candidate
+                if i > 0:
+                    print(f"\n[!] Warning: failed to load with GPU. Falling back to {label}...")
+                if i > 0 and candidate.context < plan.context:
                     print(
                         f"[!] Warning: requested ctx={plan.context} will NOT be met "
                         f"(using {candidate.context})."
                     )
-            try:
-                self.llm = self._load(candidate)
-                self.plan = candidate
                 return
-            except Exception as exc:
+            except Exception as exc:  # try the next rung
                 last_exc = exc
 
-        raise RuntimeError(f"Failed to initialize model even on CPU: {last_exc}") from gpu_exc
+        raise RuntimeError(f"Failed to initialize model even on CPU: {last_exc}") from last_exc
 
     def _load(self, p: Plan):
         kv = _KV_TYPES.get(p.kv_cache)

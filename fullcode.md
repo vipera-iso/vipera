@@ -2000,6 +2000,59 @@ def check_host_ram(plan: Plan) -> None:
         )
 
 
+def layer_ladder(layers: int) -> list[int]:
+    """Offload counts to try for a plan that asks for ``layers``, best first.
+
+    A split that is one or two layers too optimistic used to fall straight to
+    ``gpu_layers=0``, which is the slowest outcome on the box this was measured
+    on: 3.90 t/s CPU-only against 4.97 t/s at the last split that loaded
+    (14B/Q4, 8K, GTX 1650). Each rung costs one failed context creation (~2 s
+    for a 14B at 8K), and a failed attempt does not hand its VRAM back before
+    the next one: after three failures on a 4 GB card even a 10-layer rung
+    failed, which is how asking for 20 layers ended up on the CPU. The ladder is
+    therefore short and its last rung is a quarter of the plan, not half — it
+    exists to land anywhere other than CPU-only.
+    """
+    if layers <= 0:
+        return []
+    steps = (layers, layers - 1, layers - 2, max(2, layers // 4))
+    return [n for n in dict.fromkeys(steps) if 0 < n <= layers]
+
+
+def with_gpu_layers(plan: Plan, layers: int) -> Plan:
+    """Same plan at a different offload depth, with a truthful note."""
+    note = plan.note
+    if note.startswith("Hybrid: "):
+        total = note.split("/", 1)[1].split()[0]
+        note = f"Hybrid: {layers}/{total} layers"
+    return replace(plan, gpu_layers=layers, note=note)
+
+
+def load_attempts(plan: Plan) -> list[tuple[Plan, str]]:
+    """Candidate plans for loading, most offload first, ending CPU-only."""
+    attempts: list[tuple[Plan, str]] = [(plan, "planned split")]
+    hybrid_total = (
+        plan.note.split("/", 1)[1].split()[0] if plan.note.startswith("Hybrid: ") else None
+    )
+    for layers in layer_ladder(plan.gpu_layers)[1:]:
+        label = f"GPU, {layers}/{hybrid_total} layers" if hybrid_total else f"GPU, {layers}"
+        attempts.append((with_gpu_layers(plan, layers), label))
+
+    # CPU stages: keep the caller's context and KV type first, then reduce.
+    cpu_plan = replace(
+        plan,
+        gpu_layers=0,
+        offload_kqv=False,
+        n_batch=min(plan.n_batch, 128),
+    )
+    reduced_plan = replace(cpu_plan, context=min(plan.context, 2048))
+    safe_plan = replace(reduced_plan, kv_cache="f16", flash_attn=False)
+    attempts.append((cpu_plan, f"CPU, ctx={cpu_plan.context}, kv={cpu_plan.kv_cache}"))
+    attempts.append((reduced_plan, f"CPU, ctx={reduced_plan.context}, kv={reduced_plan.kv_cache}"))
+    attempts.append((safe_plan, f"CPU safe mode, ctx={safe_plan.context}, kv={safe_plan.kv_cache}"))
+    return attempts
+
+
 def create_engine(plan: Plan, model_path: str, backend: str = "inprocess") -> ChatEngine:
     """Build the engine selected by the ``backend`` config key."""
     if backend == "server":
@@ -2025,51 +2078,29 @@ class Engine:
 
         check_host_ram(plan)
 
-        gpu_exc: Exception | None = None
-        try:
-            self.llm = self._load(plan)
-            return
-        except Exception as exc:  # need to try CPU fallback
-            gpu_exc = exc
-
-        print("\n[!] Warning: failed to load with GPU. Falling back to CPU...")
-
-        # Fall back in stages rather than jumping straight to f16/2048. Callers
-        # such as Hermes require a 64K context floor, and quantized KV is the
-        # only way that fits in RAM on this class of machine. Silently dropping
-        # to 2048 would load "successfully" and then be useless.
-        cpu_plan = replace(
-            plan,
-            gpu_layers=0,
-            offload_kqv=False,
-            n_batch=min(plan.n_batch, 128),
-        )
-        reduced_plan = replace(cpu_plan, context=min(plan.context, 2048))
-        safe_plan = replace(reduced_plan, kv_cache="f16", flash_attn=False)
-
-        attempts = [
-            (cpu_plan, f"CPU, ctx={cpu_plan.context}, kv={cpu_plan.kv_cache}"),
-            (reduced_plan, f"CPU, ctx={reduced_plan.context}, kv={reduced_plan.kv_cache}"),
-            (safe_plan, f"CPU safe mode, ctx={safe_plan.context}, kv={safe_plan.kv_cache}"),
-        ]
-
-        last_exc: Exception = gpu_exc
+        # Stage the fallback instead of jumping straight to CPU-only: first walk
+        # the offload down one layer at a time, then give up the placement, then
+        # the context and finally the KV type. Callers such as Hermes require a
+        # 64K context floor, and quantized KV is the only way that fits in RAM on
+        # this class of machine, so dropping to 2048 must stay the last resort.
+        attempts = load_attempts(plan)
+        last_exc: Exception | None = None
         for i, (candidate, label) in enumerate(attempts):
-            if i > 0:
-                print(f"[!] Warning: fallback failed; retrying with {label}. ")
-                if candidate.context < plan.context:
+            try:
+                self.llm = self._load(candidate)
+                self.plan = candidate
+                if i > 0:
+                    print(f"\n[!] Warning: failed to load with GPU. Falling back to {label}...")
+                if i > 0 and candidate.context < plan.context:
                     print(
                         f"[!] Warning: requested ctx={plan.context} will NOT be met "
                         f"(using {candidate.context})."
                     )
-            try:
-                self.llm = self._load(candidate)
-                self.plan = candidate
                 return
-            except Exception as exc:
+            except Exception as exc:  # try the next rung
                 last_exc = exc
 
-        raise RuntimeError(f"Failed to initialize model even on CPU: {last_exc}") from gpu_exc
+        raise RuntimeError(f"Failed to initialize model even on CPU: {last_exc}") from last_exc
 
     def _load(self, p: Plan):
         kv = _KV_TYPES.get(p.kv_cache)
@@ -2922,12 +2953,19 @@ class Plan:
 
 _VALID_PROFILES = ("auto", "cpu", "gpu", "lowmem")
 
-# llama.cpp allocates CUDA compute buffers for the GPU-resident layers on top of
-# their weights and KV. Measured on a GTX 1650 / 14B-Q4 / 8K f16: 11 layers
-# (2.37 GB) load, 12 layers (2.59 GB) fail to create the context. Keeping a
-# fixed slice free stops the planner from planning a split the GPU cannot run;
-# the engine's only fallback is CPU-only, which is much slower than 11 layers.
-_GPU_COMPUTE_RESERVE_GB = 0.3
+# Room left on the card for the CUDA/driver context and llama.cpp's compute
+# buffers. This used to be a flat 1.0 GB (driver) + 0.3 GB (compute), which on a
+# 4 GB card gave away four layers: measured on a GTX 1650 with 3.64 GB free, a
+# 14B/Q4 model at 8K offloads 14 layers (3.37 GB of weights+KV) and 15 fail, so
+# the real reserve is ~0.3 GB. A flat 1.3 GB reserve measured 5.0 t/s where 14
+# layers measured 5.96 t/s. Scale it with the card instead: small cards get the
+# measured figure, big cards still keep ~1 GB for their larger compute buffers.
+_VRAM_RESERVE_BASE_GB = 0.3
+_VRAM_RESERVE_FRACTION = 0.07
+# Extra reserve when the plan cannot use flash attention. Without FA llama.cpp
+# allocates a full KQ matrix per batch instead of streaming it, which on the same
+# 4 GB card cuts the offload from 14 layers to 10 (0.9 GB of weights).
+_NO_FA_RESERVE_GB = 0.9
 
 # Bytes per element for each supported kv_cache dtype. The values for the
 # original five are the rounded ones the VRAM budget was measured against
@@ -3019,7 +3057,11 @@ def plan(
     kv_layers = _kv_layer_count(meta) or n_layers
     size_bytes = int(meta.get("size_bytes") or 4_000_000_000)
 
-    cpu_threads = max(1, hw.cpu_cores - 1)
+    # One thread per physical core. `cores - 1` used to leave a core idle: on a
+    # 4C/8T box, threads=4 measured +19-21% decode over threads=3 (median-3,
+    # both CPU-only and with 12 GPU layers), while threads=8 lost throughput to
+    # SMT contention.
+    cpu_threads = max(1, hw.cpu_cores)
     has_gpu = getattr(hw, "vram_total_gb", 0) > 0
 
     model_size_gb = size_bytes / 1024**3
@@ -3039,8 +3081,15 @@ def plan(
             kv_layers=kv_layers,
         )
 
-    # 1 GB for the OS/display driver, plus room for llama.cpp compute buffers.
-    safe_vram = max(0.0, hw.vram_free_gb - 1.0 - _GPU_COMPUTE_RESERVE_GB)
+    want_gpu = has_gpu and profile != "cpu"
+    # Flash attention is required by quantized KV, and on the GPU it is also the
+    # fast path. Decided before the VRAM budget because it changes how much
+    # scratch space llama.cpp needs on the card.
+    flash_attn_on_gpu = kv_cache in _FA_REQUIRED_KV or hw.vram_total_gb > 4
+    reserve_gb = max(_VRAM_RESERVE_BASE_GB, min(1.0, _VRAM_RESERVE_FRACTION * hw.vram_total_gb))
+    if want_gpu and not flash_attn_on_gpu:
+        reserve_gb += _NO_FA_RESERVE_GB
+    safe_vram = max(0.0, hw.vram_free_gb - reserve_gb)
 
     # llama.cpp allocates the KV cache per layer: only the layers offloaded to
     # the GPU take their slice of KV with them, the rest stays in system RAM.
@@ -3052,20 +3101,25 @@ def plan(
     # layers hold a fixed recurrent state and never pay for context.
     per_layer_kv_gb = kv_cache_gb / kv_layers if kv_layers else 0.0
 
-    # Repeating-layer weights, when the GGUF index is available. Embeddings and
-    # output.weight follow no layer to the GPU: on a 14B/Q4 model they are ~1 GB
-    # that size_bytes/n_layers wrongly charges to every layer, which under-
-    # offloads by a layer or two on a small card.
-    layer_bytes = int(meta.get("layer_bytes") or 0)
-    if layer_bytes > 0:
-        layer_gb = layer_bytes / 1024**3
-    else:
-        layer_gb = model_size_gb / n_layers if n_layers else 0.4
+    # Charge every layer the mean weight size (size_bytes / n_layers). An
+    # earlier version preferred meta["layer_bytes"] (the mean size of one
+    # repeating blk.N block, which excludes token_embd/output.weight) on the
+    # theory that those tensors never follow a layer to the GPU. Measured, that
+    # is optimistic: llama.cpp's per-layer CUDA compute buffer grows with the
+    # number of offloaded layers, and charging the embedding/output bytes to
+    # each layer happens to cover it.
+    #   Q4_K_M 9.00 GB, 8K q8_0: layer_bytes predicts 10+ layers too many (the
+    #                            budget below lands on 13); measured ceiling 14.
+    #                            With a 0.28 GB reserve it predicted 14 exactly,
+    #                            so the base reserve keeps a one-layer margin.
+    #   Q3_K_M 6.82 GB, 8K q8_0: layer_bytes predicts 20 against a measured 17.
+    # Over-estimating is the expensive direction: a failed context creation
+    # leaves its VRAM allocated, so the ladder can end up CPU-only.
+    layer_gb = model_size_gb / n_layers if n_layers else 0.4
     layer_total_gb = layer_gb + per_layer_kv_gb
     gpu_layers = 0
 
     # profile=cpu forces no offload even when a GPU is present.
-    want_gpu = has_gpu and profile != "cpu"
     if want_gpu and safe_vram > 0 and layer_total_gb > 0:
         gpu_layers = min(n_layers, int(safe_vram / layer_total_gb))
 
@@ -3089,7 +3143,7 @@ def plan(
             note = "CPU ONLY"
     else:
         # Quantized KV requires flash attention, regardless of VRAM size.
-        flash_attn = kv_cache in _FA_REQUIRED_KV or hw.vram_total_gb > 4
+        flash_attn = flash_attn_on_gpu
         offload_kqv = True
         n_batch = min(n_batch, 512)
         note = "Full GPU" if gpu_layers == n_layers else f"Hybrid: {gpu_layers}/{n_layers} layers"
@@ -3404,10 +3458,10 @@ import urllib.request
 from collections.abc import Iterator
 from dataclasses import replace
 from pathlib import Path
-from typing import Any
+from typing import Any, BinaryIO
 
 from vipera import config
-from vipera.engine import _CHAT_PARAMS, _DEFAULT_SAMPLING, check_host_ram
+from vipera.engine import _CHAT_PARAMS, _DEFAULT_SAMPLING, check_host_ram, load_attempts
 from vipera.optimizer import OptimizerError, find_llama_tool
 from vipera.planner import Plan
 
@@ -3507,7 +3561,7 @@ class ServerEngine:
         self._model_path = model_path
         self._closed = False
         self._proc: subprocess.Popen | None = None
-        self._log = None
+        self._log: BinaryIO | None = None
         self._port: int | None = None
         self._log_path: Path | None = None
 
@@ -3519,28 +3573,26 @@ class ServerEngine:
                 "the Python binding does not ship one."
             ) from exc
 
-        try:
-            self._start(plan)
-        except RuntimeError as exc:
-            if plan.gpu_layers == 0:
-                raise
-            # Same honest fallback as the in-process engine: a plan the planner
-            # believed in can still fail to allocate, and CPU-only is a real
-            # (slow) answer instead of a crash.
-            print(f"\n[!] Warning: llama-server failed to start ({exc}). Falling back to CPU...")
-            cpu_plan = replace(
-                plan,
-                gpu_layers=0,
-                offload_kqv=False,
-                n_batch=min(plan.n_batch, 128),
-            )
+        # Same staged fallback as the in-process engine: walk the offload down
+        # before giving up the placement entirely, because CPU-only is the
+        # slowest outcome and a one-layer-too-optimistic plan pays a few
+        # seconds for the retry instead of the whole run.
+        last_exc: Exception | None = None
+        for i, (candidate, label) in enumerate(load_attempts(plan)):
             try:
-                self._start(cpu_plan)
-                print(f"[!] Warning: serving CPU-only with ctx={cpu_plan.context}.")
-            except RuntimeError as cpu_exc:
-                raise RuntimeError(
-                    f"llama-server failed to start on GPU and CPU: {cpu_exc}"
-                ) from cpu_exc
+                self._start(candidate)
+                if i > 0:
+                    print(
+                        f"\n[!] Warning: llama-server failed to start with the planned "
+                        f"split; serving {label}."
+                    )
+                break
+            except RuntimeError as exc:
+                last_exc = exc
+        else:
+            raise RuntimeError(
+                f"llama-server failed to start on GPU and CPU: {last_exc}"
+            ) from last_exc
 
         atexit.register(self.close)
 
@@ -4022,6 +4074,7 @@ def pick_model(title: str = "SELECT A MODEL") -> str:
         raise typer.Exit(1)
 
     return installed[choice - 1]["name"]
+
 ```
 
 ---

@@ -135,7 +135,9 @@ def test_supports_load_mode_reads_the_binary_help(monkeypatch):
             self.stderr = ""
 
     monkeypatch.setattr(
-        sb.subprocess, "run", lambda *a, **kw: _Result("  -lm, --load-mode MODE  model loading mode")
+        sb.subprocess,
+        "run",
+        lambda *a, **kw: _Result("  -lm, --load-mode MODE  model loading mode"),
     )
     assert sb._supports_load_mode("/bin/llama-server") is True
 
@@ -285,8 +287,28 @@ def test_gpu_start_failure_falls_back_to_cpu(monkeypatch):
 
     engine = sb.ServerEngine(_plan(gpu_layers=7), "/m.gguf")
 
-    assert attempts == [7, 0]
+    # Walk the offload down (7, 6, 5, halved 3) before giving up the placement:
+    # CPU-only measured 3.9 t/s where the last loadable split gave 5.0.
+    assert attempts == [7, 6, 5, 2, 0]
     assert engine.plan.gpu_layers == 0
+
+
+def test_gpu_start_failure_stops_at_the_last_split_that_starts(monkeypatch):
+    monkeypatch.setattr(sb, "find_llama_tool", lambda tool: "/bin/llama-server")
+    attempts = []
+
+    def fake_start(self, plan):
+        attempts.append(plan.gpu_layers)
+        if plan.gpu_layers > 5:
+            raise RuntimeError("Failed to create llama_context")
+        self.plan = plan
+
+    monkeypatch.setattr(sb.ServerEngine, "_start", fake_start)
+
+    engine = sb.ServerEngine(_plan(gpu_layers=7, note="Hybrid: 7/40 layers"), "/m.gguf")
+
+    assert attempts == [7, 6, 5]
+    assert engine.plan.gpu_layers == 5
 
 
 def test_placement_is_corrected_when_llama_server_ignores_gpu_layers(monkeypatch, capsys):
@@ -294,9 +316,7 @@ def test_placement_is_corrected_when_llama_server_ignores_gpu_layers(monkeypatch
     monkeypatch.setattr(
         engine,
         "_log_text",
-        lambda limit=200_000: (
-            "warning: no usable GPU found, --gpu-layers option will be ignored\n"
-        ),
+        lambda limit=200_000: "warning: no usable GPU found, --gpu-layers option will be ignored\n",
     )
 
     plan = engine._adopt_placement(_plan(gpu_layers=7))
@@ -309,7 +329,9 @@ def test_placement_is_corrected_when_llama_server_ignores_gpu_layers(monkeypatch
 
 def test_placement_is_kept_when_the_child_uses_the_gpu(monkeypatch):
     engine = _engine()
-    monkeypatch.setattr(engine, "_log_text", lambda limit=200_000: "llm_load_tensors: offloaded 7/40 layers")
+    monkeypatch.setattr(
+        engine, "_log_text", lambda limit=200_000: "llm_load_tensors: offloaded 7/40 layers"
+    )
 
     plan = engine._adopt_placement(_plan(gpu_layers=7))
 
