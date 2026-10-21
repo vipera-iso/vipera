@@ -96,6 +96,24 @@ test** (`tests/test_planner.py::test_kv_estimate_*`), không phải số đo RSS
 trả giá đúng 0.3 s khởi động trên model 0.5B. Lớp này hoạt động đúng như thiết kế:
 đổi backend không đổi chất lượng sinh, chỉ đổi chỗ chạy.
 
+## E. L1 — đổi weight Q4_K_M → Q3_K_M+imatrix trên Hermes-4 (14B), số đo thật
+
+3 lần lặp mỗi model, cùng prompt (~470 token), ctx 4096, kv f16, 64 token sinh:
+
+| | load s | TTFT s | decode t/s | PPL |
+|---|---:|---:|---:|---:|
+| `q8src-ctl-q4km` (9.00 GB) | 7.9 / 9.2 / 8.0 | 9.8 / 10.1 / 13.2 | 3.73 / 3.76 / 3.69 | 7.0056 |
+| `q8src-imbf-q3km` (7.32 GB) | 6.1 / 6.0 / 5.9 | 8.0 / 7.4 / 7.4 | 3.85 / 3.89 / 3.74 | **6.9805** |
+| chênh (median) | **−25%** | **−27%** | **+3%** | **−0.36%** |
+
+Nghĩa là: bớt 18.7% dung lượng file, nạp nhanh hơn 25%, prefill nhanh hơn 27%,
+decode gần như không đổi (+3%), chất lượng **không giảm** (PPL thấp hơn 0.36%).
+Decode không nhanh hơn nhiều vì Q3_K_M dequant đắt hơn Q4_K_M — bớt byte đọc
+nhưng thêm việc giải mã.
+
+Ghi chú: gọi bằng đường dẫn `.gguf` nên `meta` trống (`layers=0`) — cả hai model
+đi cùng một nhánh planner nên so sánh vẫn công bằng.
+
 ## Tóm lại
 
 | Lớp | Có tối ưu thật không? | Bằng chứng |
@@ -105,6 +123,24 @@ trả giá đúng 0.3 s khởi động trên model 0.5B. Lớp này hoạt độ
 | L2 KV estimate | **Có** — planner tính đúng theo dtype, không dùng heuristic 1.5 GB | bảng C + test |
 | L3 backend | **Có** — cùng tốc độ, +0.3 s khởi động, cách ly process | bảng D |
 | L1a imatrix | **Có ở Q3** (−5.18%), không kết luận được ở Q4 (−0.96%) | `../l1a2_results/REPORT.md` |
+| L1 đổi weight | **−19% file, −25% load, −27% prefill, PPL không giảm** | bảng E |
+
+### Tổng % đạt được (Hermes-4, một máy CPU-only 15 GiB)
+
+| Hạng mục | Trước | Sau (Q3+imatrix, kv q8_0) | Đổi |
+|---|---:|---:|---:|
+| Kích thước file | 9.00 GB | 7.32 GB | **−18.7%** |
+| KV @8k (f16 → q8_0) | 1.25 GB | 0.62 GB | **−50%** |
+| Tổng RAM @8k | 10.25 GB | 7.94 GB | **−22.5%** |
+| Tổng RAM @32k | 14.00 GB | 9.82 GB | **−29.9%** |
+| Thời gian nạp | 8.0 s | 6.0 s | **−25%** |
+| Prefill (TTFT) | 10.1 s | 7.4 s | **−27%** |
+| Decode | 3.73 t/s | 3.85 t/s | +3% |
+| PPL (thấp = tốt) | 7.0056 | 6.9805 | **−0.36%** |
+
+Ba lớp còn lại (`server` backend, FA, dtype q5_1/iq4_nl) **không đem lại % nào** về
+tốc độ hay dung lượng ở máy này — chúng đem lại cách ly process / khả năng chọn,
+nên đừng tính vào con số "tối ưu".
 
 ## Hạn chế
 
