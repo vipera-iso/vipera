@@ -60,6 +60,52 @@ cache fits in RAM, flash attention stays off, and the CPU-side layers run the
 normal attention path. Long context is the limit — at 16K this model does not
 create a GPU context on a 4 GB card at all and the engine falls back to CPU.
 
+### Quantization: what an imatrix buys at Q4 and Q3
+
+Hermes-4-14B, requantized from a **Q8_0** source (not from Q4_K_M: `llama-quantize`
+copies a tensor verbatim when source and target types match, so an imatrix can
+never reach the weights that way). Importance matrix built from BF16. Same
+machine as above, CPU-only, `ctx 4096`, ~470-token prompt, median of 3 runs:
+
+| Build | Size | Load | TTFT | Decode | PPL (WikiText, 12k tok) |
+|---|---:|---:|---:|---:|---:|
+| Q4_K_M | 9.00 GB | 8.0 s | 10.1 s | 3.73 t/s | 7.0056 |
+| Q3_K_M + imatrix | 7.32 GB | 6.0 s | 7.4 s | 3.85 t/s | 6.9805 |
+| Δ | **−18.7%** | **−25%** | **−27%** | +3% (noise) | −0.025 = **0.11σ** |
+
+Read the last column carefully: the two builds are **equivalent within the
+eval-set error, not one better than the other**. The claim this supports is
+"Q3 with an importance matrix does not lose quality while being 19% smaller and
+faster to load", which is what makes it worth shipping on a RAM-tight box.
+Decode does not improve because Q3_K_M dequant is more expensive per weight.
+
+The imatrix effect itself was only measurable at Q3: −5.2% PPL (−0.381, ~1.6σ)
+against no-imatrix Q3, versus −0.96% at Q4 (0.3σ, indistinguishable from noise).
+Raw runs and the per-tensor audit (280/443 tensors changed while types stayed
+identical) live in [tools/l1a2_results/REPORT.md](../tools/l1a2_results/REPORT.md).
+
+### KV cache dtype: what it costs in speed
+
+qwen2.5-0.5B, `ctx 4096`, 64 generated tokens. Every row is a fresh engine, so
+`load` is included:
+
+| KV dtype | Flash attention | Decode t/s | vs f16 |
+|---|---|---:|---:|
+| f16 | off | 67.2 | — |
+| q8_0 | on (required) | 65.0 | −3% |
+| q5_1 | on | 57.5 | −14% |
+| iq4_nl | on | 55.1 | −18% |
+
+`q8_0` is the sweet spot: half the KV memory for ~3% decode. The 5- and 4-bit
+cache types cost real throughput, and at those widths the model also started
+ending generation earlier on the same prompt — treat them as a last resort when
+KV size, not speed, is what blocks the context.
+
+KV sizes themselves are **planned, not measured**: the planner's formula
+(`2 × kv_layers × kv_heads × head_dim × ctx × bytes_per_elem`) gives 5.00 GB for
+Hermes-4 at 32K with f16 KV and 2.50 GB with q8_0. The formula is covered by
+`tests/test_planner.py`; the tables above are what was actually run.
+
 ## Method
 
 ```bash

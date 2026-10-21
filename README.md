@@ -184,6 +184,15 @@ flag set: when a model fits in RAM there is nothing to plan, and placement only
 matters when it spills. Full tables, the 14B-on-4GB case, and the measurement
 method: [docs/benchmarks.md](docs/benchmarks.md).
 
+Two layer-level numbers from that document, on a 14B CPU-only box:
+
+- **Q3_K_M + imatrix vs Q4_K_M**: 18.7% smaller (7.32 vs 9.00 GB), loads 25%
+faster, prefill 27% faster, and quality is **equivalent within the eval-set
+error** (PPL 6.9805 vs 7.0056 — a 0.11σ difference, not a win). Say "same
+quality, 19% lighter", not "better".
+- **`kv_cache: q8_0`**: halves KV memory for ~3% decode throughput. `q5_1` and
+`iq4_nl` cost 14–18%; use them only when KV size blocks the context you need.
+
 ## Contributing and license
 
 ```bash
