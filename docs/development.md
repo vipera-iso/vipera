@@ -36,6 +36,23 @@ The extras:
 Tests run without either optional extra; runtime commands that load a model do
 not.
 
+**One venv per job.** A CUDA build of `llama-cpp-python` and a plain CPU build
+can sit side by side on the same machine, and nothing warns you when you bench
+the wrong one — a CPU-only binding silently ignores `gpu_layers`, so a GPU
+sweep reported through it is a CPU measurement with a GPU-shaped label. Pick
+one virtualenv for serving and one for tests, and confirm which is which
+before quoting a number:
+
+```bash
+vipera system doctor | grep 'gpu offload'
+# serving env:  gpu offload  compiled in (CUDA/Metal)  [ PASS ]
+# test env:     gpu offload  CPU-only build            [ WARN ]
+```
+
+`tools/sweep_gpu.py` refuses to run in a binding without a GPU backend for the
+same reason (pass `--allow-cpu` only when the CPU fallback is what you meant to
+measure). Every throughput table should name the environment it came from.
+
 Verify the install:
 
 ```bash

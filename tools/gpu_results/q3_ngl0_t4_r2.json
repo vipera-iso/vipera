@@ -1,0 +1,16 @@
+[
+  {
+    "ngl_requested": 0,
+    "ctx": 8192,
+    "kv": "f16",
+    "threads": 4,
+    "error": null,
+    "ngl_actual": 0,
+    "load_s": 1.07,
+    "tokens": 66,
+    "ttft_s": 4.958820827000636,
+    "decode_tps": 4.776382323847162,
+    "vram_peak_mib": 1092,
+    "rss_peak_mib": 8818
+  }
+]

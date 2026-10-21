@@ -41,7 +41,13 @@ known-good flag set. That has a direct consequence for where it helps:
 | Vulkan offload | 3.4 | — | — |
 
 Reading the table: placement changed throughput on this box only because the
-model already fit in RAM. The load-flag layer (`mlock`) did the work. A second
+model already fit in RAM. The load-flag layer (`mlock`) did the work — **if the
+run was made with the memory-lock limit raised**: on this box `ulimit -l` is
+8 MiB (soft = hard) and a non-root process cannot raise it, so `-lm mlock` and
+`use_mlock=True` both log `failed to mlock … Cannot allocate memory` and fall
+back to plain mmap. Re-measure with `RLIMIT_MEMLOCK` unlimited (root:
+`/etc/security/limits.conf`, or `LimitMEMLOCK=infinity` for the service) before
+quoting an mlock gain; see Caveats. A second
 reference run on a 14B dense model that does *not* fit shows the opposite
 result: the same 14B model measured 0.1-0.2 t/s CPU-only at 64K context, and a
 10-layer hybrid split reached 4.0 t/s at 8K. Treat placement as the lever for
@@ -125,6 +131,11 @@ vipera bench run <model> --ctx 8192,16384 --max-tokens 64
 ## Caveats
 
 - One machine, one model family. Do not treat these as leaderboard numbers.
+- **`mlock` is unverifiable on this machine as configured.** `ulimit -l` is
+  8 MiB (soft = hard), unraisable without root, so every locked-memory path
+  warns and runs as mmap. Any row attributed to `mlock` here predates that
+  check or ran with the limit raised — the engine requests it, the kernel
+  refuses it, and nothing in the gateway says so.
 - `llama.cpp` build and flags move throughput more than the gateway layer does.
 - Prompt-prefix reuse depends on `llama-cpp-python` 0.3.36+ and on the client
   resending an identical prefix; a cold process always pays full prefill.

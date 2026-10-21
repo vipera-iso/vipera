@@ -1,0 +1,44 @@
+[
+  {
+    "ngl_requested": 8,
+    "ctx": 16384,
+    "kv": "q8_0",
+    "threads": 3,
+    "error": null,
+    "ngl_actual": 8,
+    "load_s": 1.32,
+    "tokens": 66,
+    "ttft_s": 4.511487636000311,
+    "decode_tps": 4.550258278575237,
+    "vram_peak_mib": 2278,
+    "rss_peak_mib": 7391
+  },
+  {
+    "ngl_requested": 10,
+    "ctx": 16384,
+    "kv": "q8_0",
+    "threads": 3,
+    "error": null,
+    "ngl_actual": 10,
+    "load_s": 1.27,
+    "tokens": 66,
+    "ttft_s": 4.440660620000017,
+    "decode_tps": 4.7917595417021275,
+    "vram_peak_mib": 2650,
+    "rss_peak_mib": 7488
+  },
+  {
+    "ngl_requested": 12,
+    "ctx": 16384,
+    "kv": "q8_0",
+    "threads": 3,
+    "error": null,
+    "ngl_actual": 12,
+    "load_s": 1.29,
+    "tokens": 66,
+    "ttft_s": 4.379507910999564,
+    "decode_tps": 4.869169208582592,
+    "vram_peak_mib": 3018,
+    "rss_peak_mib": 7501
+  }
+]
