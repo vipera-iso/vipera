@@ -488,3 +488,37 @@ def test_unknown_model_is_still_rejected():
         },
     )
     assert r.status_code == 404
+
+
+def test_include_usage_is_forwarded_to_the_backend():
+    # The trailing choices:[] frame is only useful when the backend actually
+    # reports usage; llama-server does, llama-cpp-python 0.3.x does not.
+    engine = FakeEngine()
+    client = TestClient(build_app(engine, "test-model"))
+    with client.stream(
+        "POST",
+        "/v1/chat/completions",
+        json={
+            "messages": [{"role": "user", "content": "hi"}],
+            "stream": True,
+            "stream_options": {"include_usage": True},
+        },
+    ) as r:
+        assert r.status_code == 200
+        b"".join(r.iter_bytes())
+
+    assert engine.calls[-1]["stream_options"] == {"include_usage": True}
+
+
+def test_include_usage_is_not_sent_when_not_requested():
+    engine = FakeEngine()
+    client = TestClient(build_app(engine, "test-model"))
+    with client.stream(
+        "POST",
+        "/v1/chat/completions",
+        json={"messages": [{"role": "user", "content": "hi"}], "stream": True},
+    ) as r:
+        assert r.status_code == 200
+        b"".join(r.iter_bytes())
+
+    assert "stream_options" not in engine.calls[-1]

@@ -10,7 +10,7 @@ from rich.panel import Panel
 from rich.text import Text
 
 from vipera.config import VIPERA_HOME, load_config
-from vipera.engine import Engine
+from vipera.engine import ChatEngine, create_engine
 from vipera.hardware import detect
 from vipera.planner import plan
 from vipera.registry import get_model
@@ -47,7 +47,7 @@ def _is_loopback(host: str) -> bool:
     return h in _LOOPBACK_HOSTS or h.startswith("127.")
 
 
-def _quick_bench(engine: Engine) -> None:
+def _quick_bench(engine: ChatEngine) -> None:
     """Informational speed check after load."""
     prompt = "Write a short sentence about AI."
 
@@ -127,6 +127,7 @@ def start(
     profile = _resolve_option(profile, "auto")
     ctx = _resolve_option(ctx, cfg["ctx"])
     bench = _resolve_option(bench, False)
+    backend = cfg.get("backend", "inprocess")
 
     if not model:
         console.print(f"[{C_RED}] ✗ No model specified. Use --model <name>[/]")
@@ -167,7 +168,8 @@ def start(
     content = Text()
     content.append("  ▸ MOUNTING MODEL\n", style=C_ACCENT)
     content.append(f"    ├─ {model}\n", style=C_TEXT)
-    content.append(f"    └─ {quant}\n\n", style=C_DIM)
+    content.append(f"    ├─ {quant}\n", style=C_DIM)
+    content.append(f"    └─ backend {backend}\n\n", style=C_DIM)
 
     content.append("  ▸ ALLOCATING VRAM\n", style=C_ACCENT)
     content.append(
@@ -201,7 +203,7 @@ def start(
 
     try:
         with console.status(f"[{C_ACCENT}] Loading model into memory…"):
-            engine = Engine(p, m["path"])
+            engine = create_engine(p, m["path"], backend)
     except RuntimeError as e:
         console.print(f"[{C_RED}] ✗ {e}[/]")
         raise typer.Exit(1) from e

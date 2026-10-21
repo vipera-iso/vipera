@@ -1,0 +1,44 @@
+[
+  {
+    "backend": "inprocess",
+    "kv": "f16",
+    "fa_requested": "auto",
+    "fa_effective": false,
+    "load_s": 0.34,
+    "gen_tps": 58.58,
+    "ttft_ms": 3549,
+    "prompt_tok": 1082,
+    "error": null,
+    "gpu_layers": 0,
+    "gen_tok": 16,
+    "exact_tokens": false
+  },
+  {
+    "backend": "inprocess",
+    "kv": "f16",
+    "fa_requested": "on",
+    "fa_effective": true,
+    "load_s": 0.23,
+    "gen_tps": 56.78,
+    "ttft_ms": 3197,
+    "prompt_tok": 1082,
+    "error": null,
+    "gpu_layers": 0,
+    "gen_tok": 16,
+    "exact_tokens": false
+  },
+  {
+    "backend": "inprocess",
+    "kv": "f16",
+    "fa_requested": "off",
+    "fa_effective": false,
+    "load_s": 0.22,
+    "gen_tps": 60.31,
+    "ttft_ms": 3260,
+    "prompt_tok": 1082,
+    "error": null,
+    "gpu_layers": 0,
+    "gen_tok": 16,
+    "exact_tokens": false
+  }
+]

@@ -10,7 +10,7 @@ be reproduced later.
 Usage:
     .venv/bin/python tools/ppl_baseline.py \
         --gguf ~/.vipera/models/NousResearch_Hermes-4-14B-Q4_K_M.gguf \
-        --gguf ~/.vipera/models/qwen15b.gguf
+        --gguf ~/.vipera/models/qwen2.5-0.5b-instruct-q4_k_m.gguf
 
 Run it with the vipera venv so psutil is available for peak-RSS sampling;
 without psutil the script still works, it just cannot report peak RSS.
@@ -192,8 +192,11 @@ def main() -> int:
             print(f"{r['model']:<44}{'FAILED':>16} rc={r['rc']} tail: {r.get('log_tail', '')[-200:]}")
             continue
         err = r["ppl_stderr"] or 0.0
+        # Pre-3.12 f-strings cannot reuse the outer quote, and this repo
+        # supports Python 3.11.
+        ppl_cell = f"{r['ppl']:.4f}±{err:.4f}"
         print(
-            f"{r['model'][:43]:<44}{f'{r['ppl']:.4f}±{err:.4f}':>16}"
+            f"{r['model'][:43]:<44}{ppl_cell:>16}"
             f"{r['ppl_delta']:>+9.4f}{(r['scored_tok'] or 0):>8}{(r['ppl_tok_per_s'] or 0.0):>10.1f}"
             f"{(r['peak_rss_gib'] or 0):>9.3f}{r['sha256'][:12]:>14}"
         )

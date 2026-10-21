@@ -88,7 +88,11 @@ def test_build_wires_planner_and_engine(monkeypatch):
     monkeypatch.setattr(chat_cmd, "load_config", lambda: dict(DEFAULT_CONFIG))
     monkeypatch.setattr(chat_cmd, "detect", lambda: types.SimpleNamespace())
     monkeypatch.setattr(chat_cmd, "plan", lambda *a, **kw: _plan())
-    monkeypatch.setattr(chat_cmd, "Engine", StubEngine)
+    monkeypatch.setattr(
+        chat_cmd,
+        "create_engine",
+        lambda plan, path, backend="inprocess": StubEngine(plan, path),
+    )
 
     engine = chat_cmd._build("m")
 

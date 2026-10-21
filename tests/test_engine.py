@@ -4,7 +4,7 @@ from typing import ClassVar
 
 import pytest
 
-from vipera.engine import Engine
+from vipera.engine import Engine, create_engine
 from vipera.planner import Plan
 
 
@@ -29,6 +29,7 @@ class FakeLlama:
 
     calls: ClassVar[list[dict]] = []
     chat_calls: ClassVar[list[dict]] = []
+    tokenize_calls: ClassVar[list[bytes]] = []
     fail_if = staticmethod(lambda kwargs: False)
 
     def __init__(self, **kwargs):
@@ -40,11 +41,16 @@ class FakeLlama:
         type(self).chat_calls.append(kwargs)
         return {"choices": [{"message": {"role": "assistant", "content": "ok"}}]}
 
+    def tokenize(self, data):
+        type(self).tokenize_calls.append(data)
+        return [1, 2, 3]
+
 
 @pytest.fixture(autouse=True)
 def fake_llama(monkeypatch):
     FakeLlama.calls = []
     FakeLlama.chat_calls = []
+    FakeLlama.tokenize_calls = []
     FakeLlama.fail_if = staticmethod(lambda kwargs: False)
     module = types.SimpleNamespace(Llama=FakeLlama)
     monkeypatch.setitem(sys.modules, "llama_cpp", module)
@@ -178,3 +184,38 @@ def test_chat_drops_unknown_and_unset_params(fake_llama):
     assert kwargs["max_tokens"] == 2048
     assert kwargs["top_p"] == pytest.approx(0.95)
     assert kwargs["repeat_penalty"] == pytest.approx(1.1)
+
+
+def test_tokenize_goes_through_the_loaded_model(fake_llama):
+    engine = Engine(_plan(), "model.gguf")
+
+    assert engine.tokenize("hello") == [1, 2, 3]
+    assert fake_llama.tokenize_calls[-1] == b"hello"
+
+    # Already-encoded bytes pass through untouched (bench used to call
+    # engine.llm.tokenize(prompt.encode()) directly).
+    engine.tokenize(b"raw bytes")
+    assert fake_llama.tokenize_calls[-1] == b"raw bytes"
+
+
+def test_create_engine_defaults_to_the_in_process_engine(fake_llama):
+    engine = create_engine(_plan(), "model.gguf")
+
+    assert isinstance(engine, Engine)
+    assert engine.plan.context == 65536
+
+
+def test_create_engine_selects_the_server_backend(monkeypatch):
+    seen = {}
+
+    class StubServer:
+        def __init__(self, plan, path):
+            seen["plan"] = plan
+            seen["path"] = path
+
+    monkeypatch.setattr("vipera.server_backend.ServerEngine", StubServer)
+
+    engine = create_engine(_plan(), "model.gguf", "server")
+
+    assert isinstance(engine, StubServer)
+    assert seen["path"] == "model.gguf"

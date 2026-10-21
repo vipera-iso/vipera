@@ -33,14 +33,27 @@ _VALID_PROFILES = ("auto", "cpu", "gpu", "lowmem")
 # the engine's only fallback is CPU-only, which is much slower than 11 layers.
 _GPU_COMPUTE_RESERVE_GB = 0.3
 
-# Bytes per element for each supported kv_cache dtype.
+# Bytes per element for each supported kv_cache dtype. The values for the
+# original five are the rounded ones the VRAM budget was measured against
+# (11 layers load, 12 fail, on a 4 GB GTX 1650); the newer dtypes use their
+# exact ggml block size so a q5_0 plan does not inherit a q4_0 estimate.
 _KV_BYTES_PER_ELEM = {
     "f32": 4.0,
     "f16": 2.0,
+    "bf16": 2.0,
     "q8_0": 1.0,
+    "q5_0": 0.6875,  # 22 B / 32 elems
+    "q5_1": 0.75,  # 24 B / 32 elems
     "q4_0": 0.5,
     "q4_1": 0.5,
+    "iq4_nl": 0.5,
 }
+
+# llama.cpp can only create a context with these cache types when flash
+# attention is on. f32/f16/bf16 do not need it, and the CPU flash-attention
+# path is the slow one once the attention work grows with context, so it is
+# requested only where it is required.
+_FA_REQUIRED_KV = {"q8_0", "q5_0", "q5_1", "q4_0", "q4_1", "iq4_nl"}
 
 
 def _kv_layer_count(meta: dict) -> int:
@@ -167,9 +180,9 @@ def plan(
         # llama.cpp runs flash attention on the CPU backend too, and forcing
         # f16 here would make a 64K-context KV for a 14B model ~10 GiB, which
         # does not fit beside this gateway on a 15 GiB / no-swap box.
-        # flash_attn is required for KV quantization, so enable it whenever
-        # the cache is not f16.
-        flash_attn = kv_cache != "f16"
+        # flash_attn is required for KV quantization, so enable it only for the
+        # dtypes that need it (bf16/f16/f32 stay on the fast default path).
+        flash_attn = kv_cache in _FA_REQUIRED_KV
 
         if profile == "gpu":
             note = "CPU ONLY (GPU profile requested, no usable GPU)"
@@ -180,7 +193,7 @@ def plan(
             note = "CPU ONLY"
     else:
         # Quantized KV requires flash attention, regardless of VRAM size.
-        flash_attn = kv_cache != "f16" or hw.vram_total_gb > 4
+        flash_attn = kv_cache in _FA_REQUIRED_KV or hw.vram_total_gb > 4
         offload_kqv = True
         n_batch = min(n_batch, 512)
         note = "Full GPU" if gpu_layers == n_layers else f"Hybrid: {gpu_layers}/{n_layers} layers"

@@ -26,7 +26,8 @@ All code lives in `src/vipera`.
 |---|---|---|
 | `hardware.py` | Probe CPU topology, RAM, GPU name, VRAM. Returns `HardwareInfo`. No side effects beyond optional NVML init. | `psutil`, `pynvml` module (optional `nvidia` extra) |
 | `planner.py` | Turn `(model metadata, HardwareInfo, overrides)` into a `Plan` dataclass. Pure function. | `hardware` |
-| `engine.py` | Wrap `llama_cpp.Llama` from a `Plan`; perform the GPU→CPU and `mlock` retries; expose `chat()`. | `llama-cpp-python` (optional extra), `planner` |
+| `engine.py` | Wrap `llama_cpp.Llama` from a `Plan`; perform the GPU→CPU and `mlock` retries; expose `chat()`/`tokenize()`. `create_engine()` picks the backend. | `llama-cpp-python` (optional extra), `planner` |
+| `server_backend.py` | Opt-in `llama-server` child process: translate a `Plan` into flags, wait for `/health`, proxy `chat()`/`tokenize()`, stop the child. | `planner`, `optimizer` (binary lookup) |
 | `server.py` | Build the FastAPI app around an engine: `/health`, `/v1/models`, `/v1/chat/completions`, SSE framing. | `fastapi`, `pydantic` |
 | `registry.py` | JSON model index at `$VIPERA_HOME/registry.json`: add/list/get/remove. | `config` |
 | `config.py` | Paths, default config, load/save with type coercion. | stdlib |
@@ -52,7 +53,8 @@ engine plus the model alias.
    against the config and looks the model up in the registry.
 3. `hardware.detect()` builds a `HardwareInfo`; `planner.plan()` produces a
    `Plan` from the model's stored metadata and the hardware profile.
-4. `Engine(plan, model_path)` loads the model. A boot panel prints the plan
+4. `create_engine(plan, model_path, backend)` loads the model (`inprocess` →
+   `Engine`, `server` → `ServerEngine`). A boot panel prints the plan
    (offloaded layers, KV cache type, flash attention). The gateway binds as
    soon as `uvicorn` starts; the 20-token speed check only runs when
    `serve start --bench` is passed.
@@ -239,8 +241,31 @@ If every load fails, the engine raises `RuntimeError`.
 0.7 / 2048 / 0.95 / 1.1) to `create_chat_completion`. Any other keyword
 arguments are ignored.
 
-Supported KV cache names: `f32`→0, `f16`→1, `q4_0`→2, `q4_1`→3, `q8_0`→8. An
-unknown name maps to `None`, which lets `llama.cpp` use its default.
+Supported KV cache names: `f32`→0, `f16`→1, `q4_0`→2, `q4_1`→3, `q5_0`→6,
+`q5_1`→7, `q8_0`→8, `iq4_nl`→20, `bf16`→30. An unknown name maps to `None`,
+which lets `llama.cpp` use its default.
+
+### Server backend
+
+`ServerEngine` (`server_backend.py`) exposes the same surface as `Engine`.
+It translates the `Plan` into `llama-server` flags (`-c`, `-ngl`, `-t`, `-b`,
+`-ub`, `-fa`, `-ctk`/`-ctv`, `--jinja`), starts the child on a free loopback
+port, polls `/health` for up to 900 s, and talks the OpenAI HTTP API
+(`/v1/chat/completions`, streaming or not, plus `/tokenize`).
+
+Differences from the in-process engine:
+
+- `Plan.use_mlock` is not forwarded: `llama-server` rejects `--mlock` (only
+  `llama-cli` has it) and its replacement, `--load-mode`, changed name across
+  releases.
+- The child's stdout/stderr go to `~/.vipera/logs/llama-server-<port>.log`; a
+  failed start raises with the log tail instead of an opaque exception.
+- A GPU start failure retries once CPU-only (`gpu_layers=0`, KQV offload off,
+  `n_batch` capped at 128). The context and KV type are kept.
+- `close()` terminates the child (SIGTERM, then SIGKILL after 10 s) and is
+  registered with `atexit`; `serve stop` stops the gateway, which stops it.
+- `stream_options.include_usage` is forwarded when a caller asks for it, so
+  `vipera bench` gets an exact token count instead of a chunk count.
 
 ### Prompt-prefix reuse
 
@@ -300,10 +325,10 @@ These are observable in the current code and worth knowing before filing a bug:
 - Tool/function calling, multimodal message content (arrays of parts), and the
   remaining OpenAI endpoints (`/v1/completions`, `/v1/embeddings`) are not
   implemented.
-- Speculative decoding is unavailable. DFlash is a `llama-server` feature
-  (`--spec-type draft-dflash`), and the in-process `llama_cpp.Llama` backend
-  cannot enable it; `draft_model=` would be classic speculative decoding, not
-  DFlash. A subprocess backend is proposed in
+- Speculative decoding is unavailable. A `llama-server` backend now exists
+  (`backend: "server"`), but it does not pass `--spec-type` or `-md` yet, and
+  the in-process `llama_cpp.Llama` backend cannot enable DFlash at all;
+  `draft_model=` would be classic speculative decoding, not DFlash. See
   [design/llama-server-backend.md](design/llama-server-backend.md).
 - The `model` field of a chat request is accepted and ignored; the response
   `model` field comes from `llama.cpp`, not from the gateway alias.

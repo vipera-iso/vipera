@@ -149,3 +149,22 @@ def test_config_that_is_not_an_object_is_backed_up(isolated_home):
 
     assert cfg_mod.load_config()["port"] == 8686
     assert (isolated_home / "config.json.corrupt").read_text() == "[1, 2, 3]"
+
+
+def test_default_backend_is_inprocess():
+    # The server backend is opt-in until it has been validated on hardware.
+    assert cfg_mod.DEFAULT_CONFIG["backend"] == "inprocess"
+
+
+def test_coerce_resets_unknown_backend():
+    assert cfg_mod._coerce({"backend": "torch"})["backend"] == "inprocess"
+
+
+@pytest.mark.parametrize("backend", sorted(cfg_mod._BACKENDS))
+def test_every_declared_backend_is_accepted(backend):
+    assert cfg_mod._coerce_strict({"backend": backend})["backend"] == backend
+
+
+def test_coerce_strict_rejects_unknown_backend():
+    with pytest.raises(ValueError, match="backend"):
+        cfg_mod._coerce_strict({"backend": "torch"})

@@ -8,6 +8,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Opt-in `llama-server` backend** — `backend: "server"` in the config runs
+  the `llama-server` binary as a child process and serves the same
+  OpenAI-compatible API from it (`src/vipera/server_backend.py`). The flags
+  come from the same `Plan` as the in-process engine, the child's output goes
+  to `~/.vipera/logs/llama-server-<port>.log`, a GPU start failure retries
+  CPU-only, and the child is stopped with the gateway. `inprocess` stays the
+  default until this path has been measured on real hardware.
+- **`Engine.tokenize()`** — one call that works on both backends, instead of
+  reaching into `engine.llm`.
 - **Hybrid-attention KV sizing** — models that mix attention with recurrent
   layers (KDA/BCSA, Mamba, linear attention) are detected from their tensor
   names, and the planner now sizes the KV cache from the attention layers only
@@ -23,6 +32,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   nominal bit width.
 
 ### Changed
+- **Four more KV cache types** — `bf16`, `q5_0`, `q5_1`, and `iq4_nl` are
+  accepted next to the original five, and the planner sizes them from their
+  ggml block size instead of falling back to the f16 estimate.
+- **Flash attention only where it is required** — `f32`, `f16`, and `bf16` no
+  longer enable the CPU flash-attention path, which measured ~30x slower than
+  the default path on a 14B; quantized cache types still do, because llama.cpp
+  refuses to create a context without it.
 - A GGUF whose tensor type the installed `gguf` cannot size now fails with
   `GGUFAnalysisError: failed to read ...` instead of a traceback.
 
@@ -35,6 +51,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the unreadable file is copied to `<name>.corrupt` and a warning names the
   backup, instead of defaults being saved over the user's settings on the next
   write.
+- **`stream_options.include_usage` now reaches the backend** — the request
+  model parsed the field but never forwarded it, so the trailing
+  `choices: []` usage frame could not fire. It is passed on now; llama-server
+  fills it with real counts, and the in-process engine still drops it.
+- **`vipera bench` no longer crashes on an engine without `.llm`** — it called
+  `engine.llm.tokenize()` directly, so any engine wrapper (or the server
+  backend) failed before measuring. It now calls `engine.tokenize()`.
+- **`tools/ppl_baseline.py` parses on Python 3.11** — a nested-quote f-string
+  only worked on 3.12+, while the package declares `requires-python >=3.11`.
 - **`vipera model rm` keeps a file another alias still references** —
   downloading the same file twice via `model search` created two aliases for
   one path; removing one of them deleted the shared file out from under the

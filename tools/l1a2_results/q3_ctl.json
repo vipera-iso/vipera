@@ -1,0 +1,21 @@
+[
+  {
+    "model": "q8src-ctl-q3km.gguf",
+    "path": "/home/user/.vipera/models/q8src-ctl-q3km.gguf",
+    "sha256": "2d146e3fdfb66e44327e1550d66b0a4d4cb3e2d6aa4e1acad2645d9b8928f40d",
+    "size_gib": 6.819,
+    "rc": 0,
+    "wall_s": 526.4,
+    "ctx": 512,
+    "ngl": 0,
+    "chunks": 24,
+    "n_seq": 4,
+    "scored_tok": 12264,
+    "pass_s": 85.53,
+    "ppl": 7.3617,
+    "ppl_stderr": 0.24067,
+    "peak_rss_gib": 10.522,
+    "ppl_tok_per_s": 23.94,
+    "ppl_delta": 0.0
+  }
+]

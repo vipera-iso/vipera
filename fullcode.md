@@ -160,7 +160,7 @@ from rich import box
 from rich.table import Table
 
 from vipera.config import load_config
-from vipera.engine import Engine
+from vipera.engine import ChatEngine, create_engine
 from vipera.hardware import detect
 from vipera.planner import plan
 from vipera.registry import get_model
@@ -185,9 +185,10 @@ PROMPT = (
 )
 
 
-def _run_bench(engine: Engine, prompt: str, max_tokens: int) -> dict:
+def _run_bench(engine: ChatEngine, prompt: str, max_tokens: int) -> dict:
     try:
-        prompt_tok = len(engine.llm.tokenize(prompt.encode()))
+        # Go through the engine: the server backend has no `.llm`.
+        prompt_tok = len(engine.tokenize(prompt))
     except Exception:
         prompt_tok = 0
 
@@ -201,6 +202,9 @@ def _run_bench(engine: Engine, prompt: str, max_tokens: int) -> dict:
             [{"role": "user", "content": prompt}],
             stream=True,
             max_tokens=max_tokens,
+            # In-process drops this (llama-cpp-python 0.3.x does not report
+            # usage); llama-server returns the exact completion_tokens with it.
+            stream_options={"include_usage": True},
         )
         for chunk in stream:
             usage = chunk.get("usage") if isinstance(chunk, dict) else None
@@ -281,7 +285,11 @@ def run(
         console.print(f"[{C_RED}] ✗ --ctx values must be positive integers, got: {ctx!r}[/]")
         raise typer.Exit(1)
 
-    console.print(f"\n[{C_ACCENT}]▸ Benchmarking model:[/] [{C_TEXT}]{model}[/]")
+    backend = cfg.get("backend", "inprocess")
+    console.print(
+        f"\n[{C_ACCENT}]▸ Benchmarking model:[/] [{C_TEXT}]{model}[/]"
+        f"  [{C_DIM}](backend: {backend})[/]"
+    )
     console.print(
         f"[{C_DIM}]  (Hardware: {hw.cpu_cores} cores, "
         f"{hw.ram_free_gb:.1f} GB RAM free, GPU: {hw.gpu_name})[/]\n"
@@ -312,7 +320,7 @@ def run(
                 f"[{C_ACCENT}] Loading model with ctx={c} (GPU: {p.gpu_layers} layers)…"
             ):
                 try:
-                    engine = Engine(p, m["path"])
+                    engine = create_engine(p, m["path"], backend)
                 except Exception as e:
                     console.print(f"[{C_RED}] ✗ Failed to load model with ctx={c}: {e}[/]")
                     continue
@@ -362,7 +370,7 @@ from rich.panel import Panel
 from rich.text import Text
 
 from vipera.config import load_config
-from vipera.engine import Engine
+from vipera.engine import ChatEngine, create_engine
 from vipera.hardware import detect
 from vipera.planner import plan
 from vipera.registry import get_model
@@ -386,7 +394,7 @@ def _chat_kwargs(cfg: dict) -> dict:
     return {k: cfg[k] for k in keys if k in cfg and cfg[k] is not None}
 
 
-def _build(model: str) -> Engine:
+def _build(model: str) -> ChatEngine:
     m = get_model(model)
     if not m:
         console.print(f"[{C_RED}] ✗ Model not found: {model}[/]")
@@ -402,10 +410,10 @@ def _build(model: str) -> Engine:
         n_batch=cfg.get("n_batch", 512),
     )
     with console.status(f"[{C_ACCENT}] Loading {model}…"):
-        return Engine(p, m["path"])
+        return create_engine(p, m["path"], cfg.get("backend", "inprocess"))
 
 
-def repl_loop(engine: Engine, typewriter: bool = False, chat_kwargs: dict | None = None):
+def repl_loop(engine: ChatEngine, typewriter: bool = False, chat_kwargs: dict | None = None):
     console.print(
         Panel(
             Text("  System Ready. Type 'exit' or Ctrl+C to quit.", style=C_SUCCESS),
@@ -1246,7 +1254,7 @@ from rich.panel import Panel
 from rich.text import Text
 
 from vipera.config import VIPERA_HOME, load_config
-from vipera.engine import Engine
+from vipera.engine import ChatEngine, create_engine
 from vipera.hardware import detect
 from vipera.planner import plan
 from vipera.registry import get_model
@@ -1283,7 +1291,7 @@ def _is_loopback(host: str) -> bool:
     return h in _LOOPBACK_HOSTS or h.startswith("127.")
 
 
-def _quick_bench(engine: Engine) -> None:
+def _quick_bench(engine: ChatEngine) -> None:
     """Informational speed check after load."""
     prompt = "Write a short sentence about AI."
 
@@ -1363,6 +1371,7 @@ def start(
     profile = _resolve_option(profile, "auto")
     ctx = _resolve_option(ctx, cfg["ctx"])
     bench = _resolve_option(bench, False)
+    backend = cfg.get("backend", "inprocess")
 
     if not model:
         console.print(f"[{C_RED}] ✗ No model specified. Use --model <name>[/]")
@@ -1403,7 +1412,8 @@ def start(
     content = Text()
     content.append("  ▸ MOUNTING MODEL\n", style=C_ACCENT)
     content.append(f"    ├─ {model}\n", style=C_TEXT)
-    content.append(f"    └─ {quant}\n\n", style=C_DIM)
+    content.append(f"    ├─ {quant}\n", style=C_DIM)
+    content.append(f"    └─ backend {backend}\n\n", style=C_DIM)
 
     content.append("  ▸ ALLOCATING VRAM\n", style=C_ACCENT)
     content.append(
@@ -1437,7 +1447,7 @@ def start(
 
     try:
         with console.status(f"[{C_ACCENT}] Loading model into memory…"):
-            engine = Engine(p, m["path"])
+            engine = create_engine(p, m["path"], backend)
     except RuntimeError as e:
         console.print(f"[{C_RED}] ✗ {e}[/]")
         raise typer.Exit(1) from e
@@ -1734,6 +1744,7 @@ DEFAULT_CONFIG = {
     "host": "127.0.0.1",
     "port": 8686,
     "default_model": None,
+    "backend": "inprocess",
     "profile": "auto",
     "ctx": 8192,
     "kv_cache": "q8_0",
@@ -1745,7 +1756,12 @@ DEFAULT_CONFIG = {
     "repeat_penalty": 1.1,
 }
 
-_KV_CACHE_TYPES = {"f32", "f16", "q4_0", "q4_1", "q8_0"}
+_KV_CACHE_TYPES = {"f32", "bf16", "f16", "q4_0", "q4_1", "q5_0", "q5_1", "q8_0", "iq4_nl"}
+
+# "inprocess" drives llama-cpp-python in this process; "server" runs the
+# llama-server binary as a child and talks OpenAI/SSE to it. The default stays
+# inprocess until the server backend has been validated on real hardware.
+_BACKENDS = {"inprocess", "server"}
 
 _TRUE_STRINGS = {"1", "true", "yes", "on"}
 _FALSE_STRINGS = {"0", "false", "no", "off", ""}
@@ -1779,6 +1795,8 @@ def _coerce(cfg: dict) -> dict:
                 pass
     if cfg.get("kv_cache") not in _KV_CACHE_TYPES:
         cfg["kv_cache"] = DEFAULT_CONFIG["kv_cache"]
+    if cfg.get("backend") not in _BACKENDS:
+        cfg["backend"] = DEFAULT_CONFIG["backend"]
     return cfg
 
 
@@ -1808,6 +1826,9 @@ def _coerce_strict(cfg: dict) -> dict:
     if "kv_cache" in cfg and cfg["kv_cache"] not in _KV_CACHE_TYPES:
         valid = ", ".join(sorted(_KV_CACHE_TYPES))
         raise ValueError(f"kv_cache: must be one of {valid}")
+    if "backend" in cfg and cfg["backend"] not in _BACKENDS:
+        valid = ", ".join(sorted(_BACKENDS))
+        raise ValueError(f"backend: must be one of {valid}")
     return cfg
 
 
@@ -1852,13 +1873,41 @@ def save_config(cfg: dict) -> None:
 # engine.py
 import gc
 from dataclasses import replace
-from typing import Any
+from typing import Any, Protocol
 
 import psutil
 
 from vipera.planner import Plan
 
-_KV_TYPES = {"f32": 0, "f16": 1, "q4_0": 2, "q4_1": 3, "q8_0": 8}
+
+class ChatEngine(Protocol):
+    """What the commands need from either backend.
+
+    `Engine` (in-process) and `ServerEngine` (llama-server child) both satisfy
+    this; callers must not reach for `.llm`, which only the in-process one has.
+    """
+
+    plan: Plan
+
+    def chat(self, messages: list[dict], stream: bool = False, **kw: Any): ...
+
+    def tokenize(self, text: str | bytes) -> list[int]: ...
+
+    def close(self) -> None: ...
+
+
+# ggml type ids accepted by llama.cpp for KV caches.
+_KV_TYPES = {
+    "f32": 0,
+    "f16": 1,
+    "q4_0": 2,
+    "q4_1": 3,
+    "q5_0": 6,
+    "q5_1": 7,
+    "q8_0": 8,
+    "iq4_nl": 20,
+    "bf16": 30,
+}
 
 # Sampling and tool-calling parameters accepted by
 # llama_cpp.Llama.create_chat_completion. Anything else is dropped so a typo in
@@ -1900,6 +1949,33 @@ _DEFAULT_SAMPLING = {
 }
 
 
+def check_host_ram(plan: Plan) -> None:
+    """Refuse a plan whose host-side footprint clearly exceeds free RAM.
+
+    An OOM here is an uncatchable SIGKILL, not a Python exception, so the
+    GPU->CPU fallback never gets a chance to run. Shared by both backends: the
+    llama-server child dies the same way.
+    """
+    if plan.ram_estimate_gb <= 0:
+        return
+    available_gb = psutil.virtual_memory().available / 1024**3
+    if plan.ram_estimate_gb > available_gb + 0.5:
+        raise RuntimeError(
+            f"Not enough RAM for this plan: ~{plan.ram_estimate_gb:.1f} GB "
+            f"needed on the host, {available_gb:.1f} GB available. "
+            f"Lower --ctx, use kv_cache=q4_0, or close other applications."
+        )
+
+
+def create_engine(plan: Plan, model_path: str, backend: str = "inprocess") -> ChatEngine:
+    """Build the engine selected by the ``backend`` config key."""
+    if backend == "server":
+        from vipera.server_backend import ServerEngine
+
+        return ServerEngine(plan, model_path)
+    return Engine(plan, model_path)
+
+
 class Engine:
     def __init__(self, plan: Plan, model_path: str):
         try:
@@ -1914,17 +1990,7 @@ class Engine:
         self._Llama = Llama
         self._closed = False
 
-        # An OOM here is an uncatchable SIGKILL, not a Python exception, so the
-        # GPU->CPU fallback below never gets a chance to run. Refuse up front
-        # when the planner's host-RAM estimate clearly exceeds what is free.
-        if plan.ram_estimate_gb > 0:
-            available_gb = psutil.virtual_memory().available / 1024**3
-            if plan.ram_estimate_gb > available_gb + 0.5:
-                raise RuntimeError(
-                    f"Not enough RAM for this plan: ~{plan.ram_estimate_gb:.1f} GB "
-                    f"needed on the host, {available_gb:.1f} GB available. "
-                    f"Lower --ctx, use kv_cache=q4_0, or close other applications."
-                )
+        check_host_ram(plan)
 
         gpu_exc: Exception | None = None
         try:
@@ -2010,6 +2076,15 @@ class Engine:
         for key, default in _DEFAULT_SAMPLING.items():
             params.setdefault(key, default)
         return self.llm.create_chat_completion(messages=messages, stream=stream, **params)
+
+    def tokenize(self, text: str | bytes) -> list[int]:
+        """Tokenize with the loaded model's vocabulary.
+
+        Callers must go through this instead of ``engine.llm.tokenize`` so the
+        same code works against the server backend, which has no ``llm``.
+        """
+        data = text.encode() if isinstance(text, str) else text
+        return self.llm.tokenize(data)
 
     def close(self) -> None:
         if self._closed:
@@ -2505,6 +2580,7 @@ from pathlib import Path
 _TOOL_NAMES = {
     "imatrix": "llama-imatrix",
     "quantize": "llama-quantize",
+    "server": "llama-server",
 }
 
 _QUALITY_ORDER = ("Q8_0", "Q6_K", "Q5_K_M", "Q4_K_M", "Q3_K_M", "Q2_K")
@@ -2820,14 +2896,27 @@ _VALID_PROFILES = ("auto", "cpu", "gpu", "lowmem")
 # the engine's only fallback is CPU-only, which is much slower than 11 layers.
 _GPU_COMPUTE_RESERVE_GB = 0.3
 
-# Bytes per element for each supported kv_cache dtype.
+# Bytes per element for each supported kv_cache dtype. The values for the
+# original five are the rounded ones the VRAM budget was measured against
+# (11 layers load, 12 fail, on a 4 GB GTX 1650); the newer dtypes use their
+# exact ggml block size so a q5_0 plan does not inherit a q4_0 estimate.
 _KV_BYTES_PER_ELEM = {
     "f32": 4.0,
     "f16": 2.0,
+    "bf16": 2.0,
     "q8_0": 1.0,
+    "q5_0": 0.6875,  # 22 B / 32 elems
+    "q5_1": 0.75,  # 24 B / 32 elems
     "q4_0": 0.5,
     "q4_1": 0.5,
+    "iq4_nl": 0.5,
 }
+
+# llama.cpp can only create a context with these cache types when flash
+# attention is on. f32/f16/bf16 do not need it, and the CPU flash-attention
+# path is the slow one once the attention work grows with context, so it is
+# requested only where it is required.
+_FA_REQUIRED_KV = {"q8_0", "q5_0", "q5_1", "q4_0", "q4_1", "iq4_nl"}
 
 
 def _kv_layer_count(meta: dict) -> int:
@@ -2876,8 +2965,10 @@ def _estimate_kv_cache_gb(meta: dict, ctx: int, kv_cache: str) -> float:
             elems = 2 * kv_layers * embed * ctx
             return elems * bytes_per_elem / 1024**3
 
-    # Last-resort heuristic (conservative for ~7-8B models only).
-    return (ctx / 8192.0) * 1.5
+    # Last-resort heuristic (conservative for ~7-8B models), scaled by the KV
+    # dtype: 1.5 GB @ 8k assumes f16. Without the scale factor a q4_0 plan
+    # inherits the f16 number and under-offloads 1-2 layers.
+    return (ctx / 8192.0) * 1.5 * (bytes_per_elem / 2.0)
 
 
 def plan(
@@ -2952,9 +3043,9 @@ def plan(
         # llama.cpp runs flash attention on the CPU backend too, and forcing
         # f16 here would make a 64K-context KV for a 14B model ~10 GiB, which
         # does not fit beside this gateway on a 15 GiB / no-swap box.
-        # flash_attn is required for KV quantization, so enable it whenever
-        # the cache is not f16.
-        flash_attn = kv_cache != "f16"
+        # flash_attn is required for KV quantization, so enable it only for the
+        # dtypes that need it (bf16/f16/f32 stay on the fast default path).
+        flash_attn = kv_cache in _FA_REQUIRED_KV
 
         if profile == "gpu":
             note = "CPU ONLY (GPU profile requested, no usable GPU)"
@@ -2965,7 +3056,7 @@ def plan(
             note = "CPU ONLY"
     else:
         # Quantized KV requires flash attention, regardless of VRAM size.
-        flash_attn = kv_cache != "f16" or hw.vram_total_gb > 4
+        flash_attn = kv_cache in _FA_REQUIRED_KV or hw.vram_total_gb > 4
         offload_kqv = True
         n_batch = min(n_batch, 512)
         note = "Full GPU" if gpu_layers == n_layers else f"Hybrid: {gpu_layers}/{n_layers} layers"
@@ -3156,6 +3247,11 @@ def build_app(engine, model_name: str) -> FastAPI:
             exclude={"model", "messages", "stream", "stream_options"},
             exclude_none=True,
         )
+        # The in-process engine drops this (llama-cpp-python 0.3.x does not
+        # report usage), but llama-server returns real usage when asked, which
+        # is what turns the trailing choices:[] frame below into data.
+        if req.stream and req.stream_options and req.stream_options.include_usage:
+            kwargs["stream_options"] = {"include_usage": True}
 
         if req.stream:
 
@@ -3247,6 +3343,312 @@ def build_app(engine, model_name: str) -> FastAPI:
                 lock.release()
 
     return app
+
+# server_backend.py
+"""llama-server backend.
+
+Runs the `llama-server` binary as a child process and speaks the OpenAI HTTP
+API to it. The public surface is the same as `vipera.engine.Engine`:
+`.plan`, `.chat()`, `.tokenize()`, `.close()`.
+
+Why this exists: the Python binding bundles its own llama.cpp and exposes only
+part of it. A locally built `llama-server` can be newer (better CPU kernels,
+new flags) and is the only way to use builds vipera does not ship. Selecting it
+is opt-in through the `backend` config key; `inprocess` stays the default until
+this path has been measured on real hardware.
+"""
+
+from __future__ import annotations
+
+import atexit
+import contextlib
+import json
+import socket
+import subprocess
+import time
+import urllib.error
+import urllib.request
+from collections.abc import Iterator
+from dataclasses import replace
+from pathlib import Path
+from typing import Any
+
+from vipera import config
+from vipera.engine import _CHAT_PARAMS, _DEFAULT_SAMPLING, check_host_ram
+from vipera.optimizer import OptimizerError, find_llama_tool
+from vipera.planner import Plan
+
+# Loading a 14B from a cold page cache on CPU takes minutes; the HTTP server
+# binds first and answers 503 until the model is ready, so poll for a while.
+_START_TIMEOUT_S = 900
+_HEALTH_INTERVAL_S = 0.5
+_STOP_TIMEOUT_S = 10.0
+
+# Printed by llama.cpp builds without a GPU backend. The child keeps running
+# but ignores --gpu-layers, so the plan must be corrected instead of reporting
+# layers that are not on the GPU.
+_GPU_IGNORED_MARKER = "--gpu-layers option will be ignored"
+
+# Chat parameters llama-server understands. It ignores unknown JSON fields, but
+# sending a curated set keeps a typo from becoming a 400 in the child.
+_SERVER_CHAT_PARAMS = _CHAT_PARAMS - {"functions", "function_call", "grammar"}
+
+
+def _free_port() -> int:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.bind(("127.0.0.1", 0))
+        return int(sock.getsockname()[1])
+
+
+def server_command(binary: str, model_path: str, plan: Plan, port: int) -> list[str]:
+    """Translate a Plan into llama-server flags.
+
+    `--jinja` is required for tool calling and for models whose chat template
+    is not one of the hard-coded ones; it is harmless for plain chat.
+    """
+    command = [
+        binary,
+        "-m",
+        str(model_path),
+        "--host",
+        "127.0.0.1",
+        "--port",
+        str(port),
+        "-c",
+        str(plan.context),
+        "-ngl",
+        str(plan.gpu_layers),
+        "-t",
+        str(plan.cpu_threads),
+        "-b",
+        str(plan.n_batch),
+        "-ub",
+        str(min(plan.n_batch, 512)),
+        "-fa",
+        "on" if plan.flash_attn else "off",
+        "--jinja",
+    ]
+    if plan.kv_cache != "f16":
+        command.extend(["-ctk", plan.kv_cache, "-ctv", plan.kv_cache])
+    # No mlock flag: llama-server does not accept `--mlock` (llama-cli does),
+    # and its equivalent is a --load-mode value that older builds name
+    # differently. Passing it makes the child exit with "invalid argument".
+    return command
+
+
+class ServerEngine:
+    """Engine-compatible client for a `llama-server` child process."""
+
+    def __init__(self, plan: Plan, model_path: str):
+        check_host_ram(plan)
+
+        self.plan = plan
+        self._model_path = model_path
+        self._closed = False
+        self._proc: subprocess.Popen | None = None
+        self._log = None
+        self._port: int | None = None
+        self._log_path: Path | None = None
+
+        try:
+            self._binary = find_llama_tool("server")
+        except OptimizerError as exc:
+            raise RuntimeError(
+                f"{exc} The 'server' backend needs the llama-server binary; "
+                "the Python binding does not ship one."
+            ) from exc
+
+        try:
+            self._start(plan)
+        except RuntimeError as exc:
+            if plan.gpu_layers == 0:
+                raise
+            # Same honest fallback as the in-process engine: a plan the planner
+            # believed in can still fail to allocate, and CPU-only is a real
+            # (slow) answer instead of a crash.
+            print(f"\n[!] Warning: llama-server failed to start ({exc}). Falling back to CPU...")
+            cpu_plan = replace(
+                plan,
+                gpu_layers=0,
+                offload_kqv=False,
+                n_batch=min(plan.n_batch, 128),
+            )
+            try:
+                self._start(cpu_plan)
+                print(f"[!] Warning: serving CPU-only with ctx={cpu_plan.context}.")
+            except RuntimeError as cpu_exc:
+                raise RuntimeError(
+                    f"llama-server failed to start on GPU and CPU: {cpu_exc}"
+                ) from cpu_exc
+
+        atexit.register(self.close)
+
+    # -- lifecycle ---------------------------------------------------------
+
+    def _start(self, plan: Plan) -> None:
+        port = _free_port()
+        log_path = config.LOGS_DIR / f"llama-server-{port}.log"
+        command = server_command(self._binary, self._model_path, plan, port)
+        # The handle is handed to Popen and must outlive this function.
+        handle = open(log_path, "wb")  # noqa: SIM115
+        try:
+            proc = subprocess.Popen(
+                command,
+                stdin=subprocess.DEVNULL,
+                stdout=handle,
+                stderr=subprocess.STDOUT,
+            )
+        except OSError as exc:
+            handle.close()
+            raise RuntimeError(f"could not run {self._binary}: {exc}") from exc
+
+        self._proc, self._log, self._port, self._log_path = proc, handle, port, log_path
+        try:
+            self._wait_ready(proc, port)
+        except RuntimeError:
+            self._stop_process()
+            raise
+        self.plan = self._adopt_placement(plan)
+
+    def _wait_ready(self, proc: subprocess.Popen, port: int) -> None:
+        deadline = time.monotonic() + _START_TIMEOUT_S
+        url = f"http://127.0.0.1:{port}/health"
+        while time.monotonic() < deadline:
+            if (rc := proc.poll()) is not None:
+                raise RuntimeError(f"llama-server exited with code {rc}{self._tail()}")
+            try:
+                with urllib.request.urlopen(url, timeout=2) as resp:
+                    if resp.status == 200:
+                        return
+            except (urllib.error.URLError, OSError):
+                pass
+            time.sleep(_HEALTH_INTERVAL_S)
+        raise RuntimeError(
+            f"llama-server did not become healthy within {_START_TIMEOUT_S}s{self._tail()}"
+        )
+
+    def _log_text(self, limit: int = 200_000) -> str:
+        if self._log_path is None:
+            return ""
+        with contextlib.suppress(OSError):
+            return self._log_path.read_text(errors="replace")[-limit:]
+        return ""
+
+    def _tail(self) -> str:
+        text = self._log_text(1500)
+        if text.strip():
+            return f"\n--- llama-server log ({self._log_path}) ---\n{text}"
+        return ""
+
+    def _adopt_placement(self, plan: Plan) -> Plan:
+        """Report what the child actually did, not what was asked.
+
+        A CPU-only llama.cpp build starts normally and silently drops
+        --gpu-layers, which would otherwise make the banner and `bench` claim
+        layers that never left system RAM.
+        """
+        if plan.gpu_layers and _GPU_IGNORED_MARKER in self._log_text():
+            print(
+                "[!] Warning: llama-server was built without GPU support and "
+                f"ignored --gpu-layers {plan.gpu_layers}; serving CPU-only."
+            )
+            return replace(
+                plan,
+                gpu_layers=0,
+                offload_kqv=False,
+                note="CPU ONLY (llama-server ignored --gpu-layers)",
+            )
+        return plan
+
+    def _stop_process(self) -> None:
+        proc, self._proc = self._proc, None
+        if proc is not None and proc.poll() is None:
+            proc.terminate()
+            try:
+                proc.wait(timeout=_STOP_TIMEOUT_S)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                with contextlib.suppress(subprocess.TimeoutExpired):
+                    proc.wait(timeout=5)
+        if self._log is not None:
+            with contextlib.suppress(OSError):
+                self._log.close()
+            self._log = None
+
+    def close(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        self._stop_process()
+
+    @property
+    def log_path(self) -> Path | None:
+        """Where the child's stdout/stderr went; useful in bug reports."""
+        return self._log_path
+
+    # -- inference ---------------------------------------------------------
+
+    @property
+    def _base_url(self) -> str:
+        if self._port is None:
+            raise RuntimeError("llama-server is not running")
+        return f"http://127.0.0.1:{self._port}"
+
+    def _post(self, path: str, body: dict):
+        request = urllib.request.Request(
+            self._base_url + path,
+            data=json.dumps(body).encode(),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        try:
+            return urllib.request.urlopen(request, timeout=None)
+        except urllib.error.HTTPError as exc:
+            detail = exc.read().decode("utf-8", "replace")[:500]
+            raise RuntimeError(f"llama-server {path} returned {exc.code}: {detail}") from None
+        except urllib.error.URLError as exc:
+            raise RuntimeError(f"llama-server is unreachable: {exc.reason}") from None
+
+    def chat(self, messages: list[dict], stream: bool = False, **kw: Any):
+        params = {k: v for k, v in kw.items() if k in _SERVER_CHAT_PARAMS and v is not None}
+        for key, default in _DEFAULT_SAMPLING.items():
+            params.setdefault(key, default)
+        body: dict[str, Any] = {"messages": messages, "stream": stream, **params}
+        # Not part of the in-process engine's surface, but llama-server uses it
+        # to put the exact token usage in the final SSE chunk; bench relies on
+        # that for an exact generation count.
+        if kw.get("stream_options") is not None:
+            body["stream_options"] = kw["stream_options"]
+
+        if not stream:
+            with self._post("/v1/chat/completions", body) as resp:
+                return json.loads(resp.read())
+
+        # A streaming generator keeps the HTTP response open across yields, so
+        # the caller can consume it exactly like llama.cpp's own generator.
+        response = self._post("/v1/chat/completions", body)
+        return self._iter_sse(response)
+
+    @staticmethod
+    def _iter_sse(response) -> Iterator[dict]:
+        try:
+            for raw in response:
+                line = raw.decode("utf-8", "replace").strip()
+                if not line.startswith("data:"):
+                    continue
+                payload = line[len("data:") :].strip()
+                if payload == "[DONE]":
+                    break
+                with contextlib.suppress(json.JSONDecodeError):
+                    yield json.loads(payload)
+        finally:
+            with contextlib.suppress(OSError):
+                response.close()
+
+    def tokenize(self, text: str | bytes) -> list[int]:
+        content = text.decode("utf-8", "replace") if isinstance(text, bytes) else text
+        with self._post("/tokenize", {"content": content}) as resp:
+            return [int(tok) for tok in json.loads(resp.read()).get("tokens") or []]
 
 # ui.py
 import random
@@ -3559,6 +3961,7 @@ def pick_model(title: str = "SELECT A MODEL") -> str:
         raise typer.Exit(1)
 
     return installed[choice - 1]["name"]
+
 ```
 
 ---

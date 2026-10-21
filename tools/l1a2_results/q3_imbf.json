@@ -1,0 +1,21 @@
+[
+  {
+    "model": "q8src-imbf-q3km.gguf",
+    "path": "/home/user/.vipera/models/q8src-imbf-q3km.gguf",
+    "sha256": "c4f2fab80a9438bace7f2ba2b0cd4a39bfc2502e3b6df882a4c9a3b065e4e6d1",
+    "size_gib": 6.819,
+    "rc": 0,
+    "wall_s": 529.1,
+    "ctx": 512,
+    "ngl": 0,
+    "chunks": 24,
+    "n_seq": 4,
+    "scored_tok": 12264,
+    "pass_s": 86.84,
+    "ppl": 6.9805,
+    "ppl_stderr": 0.22526,
+    "peak_rss_gib": 10.249,
+    "ppl_tok_per_s": 23.58,
+    "ppl_delta": 0.0
+  }
+]

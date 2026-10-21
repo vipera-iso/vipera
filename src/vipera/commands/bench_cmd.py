@@ -5,7 +5,7 @@ from rich import box
 from rich.table import Table
 
 from vipera.config import load_config
-from vipera.engine import Engine
+from vipera.engine import ChatEngine, create_engine
 from vipera.hardware import detect
 from vipera.planner import plan
 from vipera.registry import get_model
@@ -30,9 +30,10 @@ PROMPT = (
 )
 
 
-def _run_bench(engine: Engine, prompt: str, max_tokens: int) -> dict:
+def _run_bench(engine: ChatEngine, prompt: str, max_tokens: int) -> dict:
     try:
-        prompt_tok = len(engine.llm.tokenize(prompt.encode()))
+        # Go through the engine: the server backend has no `.llm`.
+        prompt_tok = len(engine.tokenize(prompt))
     except Exception:
         prompt_tok = 0
 
@@ -46,6 +47,9 @@ def _run_bench(engine: Engine, prompt: str, max_tokens: int) -> dict:
             [{"role": "user", "content": prompt}],
             stream=True,
             max_tokens=max_tokens,
+            # In-process drops this (llama-cpp-python 0.3.x does not report
+            # usage); llama-server returns the exact completion_tokens with it.
+            stream_options={"include_usage": True},
         )
         for chunk in stream:
             usage = chunk.get("usage") if isinstance(chunk, dict) else None
@@ -126,7 +130,11 @@ def run(
         console.print(f"[{C_RED}] ✗ --ctx values must be positive integers, got: {ctx!r}[/]")
         raise typer.Exit(1)
 
-    console.print(f"\n[{C_ACCENT}]▸ Benchmarking model:[/] [{C_TEXT}]{model}[/]")
+    backend = cfg.get("backend", "inprocess")
+    console.print(
+        f"\n[{C_ACCENT}]▸ Benchmarking model:[/] [{C_TEXT}]{model}[/]"
+        f"  [{C_DIM}](backend: {backend})[/]"
+    )
     console.print(
         f"[{C_DIM}]  (Hardware: {hw.cpu_cores} cores, "
         f"{hw.ram_free_gb:.1f} GB RAM free, GPU: {hw.gpu_name})[/]\n"
@@ -157,7 +165,7 @@ def run(
                 f"[{C_ACCENT}] Loading model with ctx={c} (GPU: {p.gpu_layers} layers)…"
             ):
                 try:
-                    engine = Engine(p, m["path"])
+                    engine = create_engine(p, m["path"], backend)
                 except Exception as e:
                     console.print(f"[{C_RED}] ✗ Failed to load model with ctx={c}: {e}[/]")
                     continue

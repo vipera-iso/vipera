@@ -44,6 +44,9 @@ Thumbs.db
 .vscode/
 *.swp
 
+# Offline reference docs (downloaded, see docs/references/README.md)
+docs/references/
+
 # Tooling
 demo.cast
 docs/assets/demo-raw.mp4

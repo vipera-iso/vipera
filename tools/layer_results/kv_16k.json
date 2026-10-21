@@ -1,0 +1,30 @@
+[
+  {
+    "backend": "inprocess",
+    "kv": "f16",
+    "fa_requested": "auto",
+    "fa_effective": false,
+    "load_s": 0.36,
+    "gen_tps": 65.08,
+    "ttft_ms": 484,
+    "prompt_tok": 137,
+    "error": null,
+    "gpu_layers": 0,
+    "gen_tok": 32,
+    "exact_tokens": false
+  },
+  {
+    "backend": "inprocess",
+    "kv": "q8_0",
+    "fa_requested": "auto",
+    "fa_effective": true,
+    "load_s": 0.24,
+    "gen_tps": 62.75,
+    "ttft_ms": 464,
+    "prompt_tok": 137,
+    "error": null,
+    "gpu_layers": 0,
+    "gen_tok": 32,
+    "exact_tokens": false
+  }
+]

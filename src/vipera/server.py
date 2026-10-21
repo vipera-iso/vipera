@@ -97,6 +97,11 @@ def build_app(engine, model_name: str) -> FastAPI:
             exclude={"model", "messages", "stream", "stream_options"},
             exclude_none=True,
         )
+        # The in-process engine drops this (llama-cpp-python 0.3.x does not
+        # report usage), but llama-server returns real usage when asked, which
+        # is what turns the trailing choices:[] frame below into data.
+        if req.stream and req.stream_options and req.stream_options.include_usage:
+            kwargs["stream_options"] = {"include_usage": True}
 
         if req.stream:
 

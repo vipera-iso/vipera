@@ -300,3 +300,29 @@ def test_plan_exposes_hybrid_kv_split():
 def test_plan_kv_layers_defaults_to_all_layers():
     p = plan({"n_layers": 32, "size_bytes": 4 * _GIB}, _hw())
     assert p.kv_layers == 32
+
+
+# --- newer KV cache dtypes ---------------------------------------------------
+
+
+def test_new_kv_dtypes_are_sized_by_their_block_size():
+    meta = {"n_layers": 8, "n_heads": 8, "n_kv_heads": 2, "head_dim": 64}
+
+    iq4 = _estimate_kv_cache_gb(meta, 8192, "iq4_nl")
+    q5_0 = _estimate_kv_cache_gb(meta, 8192, "q5_0")
+    q5_1 = _estimate_kv_cache_gb(meta, 8192, "q5_1")
+    bf16 = _estimate_kv_cache_gb(meta, 8192, "bf16")
+
+    assert iq4 < q5_0 < q5_1 < bf16
+    assert bf16 == pytest.approx(_estimate_kv_cache_gb(meta, 8192, "f16"))
+
+
+def test_cpu_plan_requires_flash_attention_only_for_quantized_kv():
+    meta = {"n_layers": 32, "size_bytes": 4 * _GIB}
+
+    # Full-precision KV must not pay the (very slow) CPU flash-attention path.
+    for kv in ("f32", "f16", "bf16"):
+        assert plan(meta, _hw(), kv_cache=kv).flash_attn is False
+
+    for kv in ("q8_0", "q4_0", "q4_1", "q5_0", "q5_1", "iq4_nl"):
+        assert plan(meta, _hw(), kv_cache=kv).flash_attn is True

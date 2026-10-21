@@ -92,7 +92,11 @@ def test_start_serves_without_running_the_benchmark(monkeypatch, isolated_home):
     monkeypatch.setattr(serve_cmd, "get_model", lambda name: _model())
     monkeypatch.setattr(serve_cmd, "detect", lambda: types.SimpleNamespace())
     monkeypatch.setattr(serve_cmd, "plan", lambda *a, **kw: _plan())
-    monkeypatch.setattr(serve_cmd, "Engine", FakeEngine)
+    monkeypatch.setattr(
+        serve_cmd,
+        "create_engine",
+        lambda plan, path, backend="inprocess": FakeEngine(plan, path),
+    )
     monkeypatch.setattr(serve_cmd, "_quick_bench", lambda engine: calls.setdefault("bench", True))
     monkeypatch.setitem(
         sys.modules,
@@ -121,7 +125,11 @@ def test_start_runs_bench_only_when_requested(monkeypatch, isolated_home):
     monkeypatch.setattr(serve_cmd, "get_model", lambda name: _model())
     monkeypatch.setattr(serve_cmd, "detect", lambda: types.SimpleNamespace())
     monkeypatch.setattr(serve_cmd, "plan", lambda *a, **kw: _plan())
-    monkeypatch.setattr(serve_cmd, "Engine", FakeEngine)
+    monkeypatch.setattr(
+        serve_cmd,
+        "create_engine",
+        lambda plan, path, backend="inprocess": FakeEngine(plan, path),
+    )
     monkeypatch.setattr(
         serve_cmd, "_quick_bench", lambda engine: calls.setdefault("bench_calls", 0)
     )
@@ -316,7 +324,11 @@ def test_start_warns_for_non_loopback_host_and_still_serves(monkeypatch, isolate
     monkeypatch.setattr(serve_cmd, "get_model", lambda name: _model())
     monkeypatch.setattr(serve_cmd, "detect", lambda: types.SimpleNamespace())
     monkeypatch.setattr(serve_cmd, "plan", lambda *a, **kw: _plan())
-    monkeypatch.setattr(serve_cmd, "Engine", FakeEngine)
+    monkeypatch.setattr(
+        serve_cmd,
+        "create_engine",
+        lambda plan, path, backend="inprocess": FakeEngine(plan, path),
+    )
     monkeypatch.setattr(time, "sleep", slept.append)
     monkeypatch.setitem(
         sys.modules,
@@ -349,3 +361,26 @@ def test_start_grace_period_aborts_on_ctrl_c(monkeypatch, isolated_home):
         serve_cmd.start(model="m", host="0.0.0.0", port=8686, profile="auto", ctx=1024, bench=False)
 
     assert exc.value.exit_code == 1
+
+
+def test_start_passes_the_configured_backend_to_the_engine(monkeypatch, isolated_home):
+    seen = {}
+
+    monkeypatch.setattr(serve_cmd, "load_config", lambda: _cfg(backend="server"))
+    monkeypatch.setattr(serve_cmd, "get_model", lambda name: _model())
+    monkeypatch.setattr(serve_cmd, "detect", lambda: types.SimpleNamespace())
+    monkeypatch.setattr(serve_cmd, "plan", lambda *a, **kw: _plan())
+    monkeypatch.setattr(
+        serve_cmd,
+        "create_engine",
+        lambda plan, path, backend="inprocess": (
+            seen.setdefault("backend", backend),
+            FakeEngine(plan, path),
+        )[1],
+    )
+    monkeypatch.setitem(sys.modules, "uvicorn", types.SimpleNamespace(run=lambda app, **kw: None))
+    monkeypatch.setattr("vipera.server.build_app", lambda engine, model: object())
+
+    serve_cmd.start(model="m", host="127.0.0.1", port=8686, profile="auto", ctx=1024, bench=False)
+
+    assert seen["backend"] == "server"

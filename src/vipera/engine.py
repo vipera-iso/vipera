@@ -1,12 +1,40 @@
 import gc
 from dataclasses import replace
-from typing import Any
+from typing import Any, Protocol
 
 import psutil
 
 from vipera.planner import Plan
 
-_KV_TYPES = {"f32": 0, "f16": 1, "q4_0": 2, "q4_1": 3, "q8_0": 8}
+
+class ChatEngine(Protocol):
+    """What the commands need from either backend.
+
+    `Engine` (in-process) and `ServerEngine` (llama-server child) both satisfy
+    this; callers must not reach for `.llm`, which only the in-process one has.
+    """
+
+    plan: Plan
+
+    def chat(self, messages: list[dict], stream: bool = False, **kw: Any): ...
+
+    def tokenize(self, text: str | bytes) -> list[int]: ...
+
+    def close(self) -> None: ...
+
+
+# ggml type ids accepted by llama.cpp for KV caches.
+_KV_TYPES = {
+    "f32": 0,
+    "f16": 1,
+    "q4_0": 2,
+    "q4_1": 3,
+    "q5_0": 6,
+    "q5_1": 7,
+    "q8_0": 8,
+    "iq4_nl": 20,
+    "bf16": 30,
+}
 
 # Sampling and tool-calling parameters accepted by
 # llama_cpp.Llama.create_chat_completion. Anything else is dropped so a typo in
@@ -48,6 +76,33 @@ _DEFAULT_SAMPLING = {
 }
 
 
+def check_host_ram(plan: Plan) -> None:
+    """Refuse a plan whose host-side footprint clearly exceeds free RAM.
+
+    An OOM here is an uncatchable SIGKILL, not a Python exception, so the
+    GPU->CPU fallback never gets a chance to run. Shared by both backends: the
+    llama-server child dies the same way.
+    """
+    if plan.ram_estimate_gb <= 0:
+        return
+    available_gb = psutil.virtual_memory().available / 1024**3
+    if plan.ram_estimate_gb > available_gb + 0.5:
+        raise RuntimeError(
+            f"Not enough RAM for this plan: ~{plan.ram_estimate_gb:.1f} GB "
+            f"needed on the host, {available_gb:.1f} GB available. "
+            f"Lower --ctx, use kv_cache=q4_0, or close other applications."
+        )
+
+
+def create_engine(plan: Plan, model_path: str, backend: str = "inprocess") -> ChatEngine:
+    """Build the engine selected by the ``backend`` config key."""
+    if backend == "server":
+        from vipera.server_backend import ServerEngine
+
+        return ServerEngine(plan, model_path)
+    return Engine(plan, model_path)
+
+
 class Engine:
     def __init__(self, plan: Plan, model_path: str):
         try:
@@ -62,17 +117,7 @@ class Engine:
         self._Llama = Llama
         self._closed = False
 
-        # An OOM here is an uncatchable SIGKILL, not a Python exception, so the
-        # GPU->CPU fallback below never gets a chance to run. Refuse up front
-        # when the planner's host-RAM estimate clearly exceeds what is free.
-        if plan.ram_estimate_gb > 0:
-            available_gb = psutil.virtual_memory().available / 1024**3
-            if plan.ram_estimate_gb > available_gb + 0.5:
-                raise RuntimeError(
-                    f"Not enough RAM for this plan: ~{plan.ram_estimate_gb:.1f} GB "
-                    f"needed on the host, {available_gb:.1f} GB available. "
-                    f"Lower --ctx, use kv_cache=q4_0, or close other applications."
-                )
+        check_host_ram(plan)
 
         gpu_exc: Exception | None = None
         try:
@@ -158,6 +203,15 @@ class Engine:
         for key, default in _DEFAULT_SAMPLING.items():
             params.setdefault(key, default)
         return self.llm.create_chat_completion(messages=messages, stream=stream, **params)
+
+    def tokenize(self, text: str | bytes) -> list[int]:
+        """Tokenize with the loaded model's vocabulary.
+
+        Callers must go through this instead of ``engine.llm.tokenize`` so the
+        same code works against the server backend, which has no ``llm``.
+        """
+        data = text.encode() if isinstance(text, str) else text
+        return self.llm.tokenize(data)
 
     def close(self) -> None:
         if self._closed:

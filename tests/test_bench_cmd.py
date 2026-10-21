@@ -37,6 +37,9 @@ class FakeEngine:
         self.closed = False
         self.chat_calls = []
 
+    def tokenize(self, text):
+        return self.llm.tokenize(text)
+
     def chat(self, messages, stream=False, **kw):
         self.chat_calls.append({"messages": messages, "stream": stream, **kw})
 
@@ -150,7 +153,11 @@ def test_run_benchmarks_each_context_and_closes_engines(monkeypatch):
         ),
     )
     monkeypatch.setattr(bench_cmd, "plan", lambda *a, **kw: _plan())
-    monkeypatch.setattr(bench_cmd, "Engine", TrackingEngine)
+    monkeypatch.setattr(
+        bench_cmd,
+        "create_engine",
+        lambda plan, path, backend="inprocess": TrackingEngine(plan, path),
+    )
     monkeypatch.setattr(bench_cmd, "animated_loading_bar", lambda *a, **kw: None)
 
     bench_cmd.run(model="m", ctx="512,1024", max_tokens=2)

@@ -16,10 +16,11 @@ variable per setting and no global/system-wide config.
 ├── config.json      # gateway settings
 ├── registry.json    # model index (alias → path + metadata)
 ├── models/          # *.gguf artifacts
-└── logs/            # created, currently unused
+└── logs/            # llama-server child output (backend = server)
 ```
 
-`logs/` is created on startup but nothing writes to it yet.
+`logs/` holds one `llama-server-<port>.log` per server-backend run. The
+in-process backend writes nothing there yet.
 
 ### `VIPERA_HOME`
 
@@ -61,9 +62,10 @@ to the defaults. Corrupt JSON does not produce an error.
 | `host` | `str` | `127.0.0.1` | `serve start`, `serve status` | Gateway bind address. |
 | `port` | `int` | `8686` | `serve start`, `serve status` | Gateway port. |
 | `default_model` | `str \| null` | `null` | root command, `serve start`, `chat`, `bench` | Alias used when `--model` is absent. |
+| `backend` | `str` | `inprocess` | `serve start`, `chat`, `bench` | Where inference runs: `inprocess` (llama-cpp-python) or `server` (a `llama-server` child). See [backends](#backends). |
 | `profile` | `str` | `auto` | nothing currently | Planner profile. `serve start --profile` defaults to `auto` independently. |
 | `ctx` | `int` | `8192` | `serve start`, `chat` | Context size for the planner. `bench run` uses its own `--ctx` list. |
-| `kv_cache` | `str` | `q8_0` | `serve start`, `chat`, `bench` | KV cache type; honored on CPU-only plans too (flash attention is enabled for quantized types). |
+| `kv_cache` | `str` | `q8_0` | `serve start`, `chat`, `bench` | KV cache type: `f32`, `bf16`, `f16`, `q8_0`, `q5_1`, `q5_0`, `q4_1`, `q4_0`, `iq4_nl`. Honored on CPU-only plans too; flash attention is enabled only for the quantized types, which require it. |
 | `flash_attn` | `bool` | `true` | nothing currently | Planner decides flash attention from VRAM instead. |
 | `n_batch` | `int` | `512` | `serve start`, `chat`, `bench` | Prompt batch size; capped by the plan. |
 | `temperature` | `float` | `0.7` | nothing currently | Per-request default comes from `server.ChatRequest`. |
@@ -74,6 +76,28 @@ The "read by nothing" rows are accepted and persisted so the schema is stable,
 but changing them does not alter runtime behavior today. See
 [known gaps](architecture.md#known-gaps).
 
+### Backends
+
+`backend` selects where the tokens come from:
+
+| Value | Runtime | When to use it |
+|---|---|---|
+| `inprocess` | `llama-cpp-python` in the gateway process | Default. No extra binary, one process to stop. |
+| `server` | `llama-server` as a child process, spoken to over its OpenAI/SSE API | You have a newer or differently built llama.cpp (CPU kernels, flags) than the Python wheel bundles. |
+
+The gateway API is identical for both; the planner produces the flags in both
+cases. The server backend looks for `llama-server` in `VIPERA_LLAMA_BIN`, then
+`~/.vipera/bin`, `~/llama.cpp/build/bin`, `/usr/local/bin`, `/opt/homebrew/bin`,
+then `PATH`. It writes the child's output to `logs/llama-server-<port>.log` and
+shuts the child down with the gateway. If the GPU plan fails to start it
+retries CPU-only, exactly like the in-process engine.
+
+```bash
+vipera system config backend server
+vipera serve start                 # child llama-server, same :8686 API
+vipera system config backend inprocess
+```
+
 ### Type coercion
 
 When loading, known keys are coerced:
@@ -83,6 +107,9 @@ When loading, known keys are coerced:
 - `flash_attn` → `bool`
 - While loading, strings `"1"`, `"true"`, `"yes"`, `"on"` (case-insensitive)
   become `True`; every other string becomes `False`.
+- `backend` and `kv_cache` are checked against their allowed sets: an unknown
+  value falls back to the default on load, and `vipera system config` rejects
+  it with the list of valid values.
 - `vipera system config` uses strict coercion: an unrecognized boolean raises
   an error instead of silently becoming `False`.
 
@@ -151,6 +178,7 @@ concurrently.
 | Variable | Effect |
 |---|---|
 | `VIPERA_HOME` | Root storage directory. Read at import time. |
+| `VIPERA_LLAMA_BIN` | Directory searched for `llama-server` (and the quantize tools). |
 
 Nothing else is configurable via the environment. In particular, `HOST` and
 `PORT` have no effect; use `vipera serve start --host/--port` or the config

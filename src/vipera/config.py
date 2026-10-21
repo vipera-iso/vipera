@@ -15,6 +15,7 @@ DEFAULT_CONFIG = {
     "host": "127.0.0.1",
     "port": 8686,
     "default_model": None,
+    "backend": "inprocess",
     "profile": "auto",
     "ctx": 8192,
     "kv_cache": "q8_0",
@@ -26,7 +27,12 @@ DEFAULT_CONFIG = {
     "repeat_penalty": 1.1,
 }
 
-_KV_CACHE_TYPES = {"f32", "f16", "q4_0", "q4_1", "q8_0"}
+_KV_CACHE_TYPES = {"f32", "bf16", "f16", "q4_0", "q4_1", "q5_0", "q5_1", "q8_0", "iq4_nl"}
+
+# "inprocess" drives llama-cpp-python in this process; "server" runs the
+# llama-server binary as a child and talks OpenAI/SSE to it. The default stays
+# inprocess until the server backend has been validated on real hardware.
+_BACKENDS = {"inprocess", "server"}
 
 _TRUE_STRINGS = {"1", "true", "yes", "on"}
 _FALSE_STRINGS = {"0", "false", "no", "off", ""}
@@ -60,6 +66,8 @@ def _coerce(cfg: dict) -> dict:
                 pass
     if cfg.get("kv_cache") not in _KV_CACHE_TYPES:
         cfg["kv_cache"] = DEFAULT_CONFIG["kv_cache"]
+    if cfg.get("backend") not in _BACKENDS:
+        cfg["backend"] = DEFAULT_CONFIG["backend"]
     return cfg
 
 
@@ -89,6 +97,9 @@ def _coerce_strict(cfg: dict) -> dict:
     if "kv_cache" in cfg and cfg["kv_cache"] not in _KV_CACHE_TYPES:
         valid = ", ".join(sorted(_KV_CACHE_TYPES))
         raise ValueError(f"kv_cache: must be one of {valid}")
+    if "backend" in cfg and cfg["backend"] not in _BACKENDS:
+        valid = ", ".join(sorted(_BACKENDS))
+        raise ValueError(f"backend: must be one of {valid}")
     return cfg
 
 

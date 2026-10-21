@@ -1,0 +1,18 @@
+run params (phai giong nhau moi arm):
+  q4_ctl.json     q8src-ctl-q4km.gguf                  ctx=512 ngl=0 chunks=24 tok=12264 ppl=7.0056
+  q4_imbf.json    q8src-imbf-q4km.gguf                 ctx=512 ngl=0 chunks=24 tok=12264 ppl=6.9383
+  q3_ctl.json     q8src-ctl-q3km.gguf                  ctx=512 ngl=0 chunks=24 tok=12264 ppl=7.3617
+  q3_imbf.json    q8src-imbf-q3km.gguf                 ctx=512 ngl=0 chunks=24 tok=12264 ppl=6.9805
+
+Q4_K_M (nguon Q8_0)  (ctl PPL 7.0056 ± 0.2256, 12264 token)
+  imatrix BF16 (bartowski)     6.9383  Δ =  -0.0673 ( -0.96%)  < 1 stderr
+
+Q3_K_M (nguon Q8_0)  (ctl PPL 7.3617 ± 0.2407, 12264 token)
+  imatrix BF16 (bartowski)     6.9805  Δ =  -0.3812 ( -5.18%)  >= 1 stderr
+
+Doc so:
+  - Δ < 0 la imatrix lam PPL giam (tot hon).
+  - stderr cua PPL la do eval set (24 chunk ~ 12k token), khong phai nhieu
+    run-to-run (run lap lai giong tung so le) => |Δ| < stderr la khong ket luan
+    duoc la co loi tren van ban khac.
+

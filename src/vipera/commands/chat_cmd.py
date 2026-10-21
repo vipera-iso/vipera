@@ -4,7 +4,7 @@ from rich.panel import Panel
 from rich.text import Text
 
 from vipera.config import load_config
-from vipera.engine import Engine
+from vipera.engine import ChatEngine, create_engine
 from vipera.hardware import detect
 from vipera.planner import plan
 from vipera.registry import get_model
@@ -28,7 +28,7 @@ def _chat_kwargs(cfg: dict) -> dict:
     return {k: cfg[k] for k in keys if k in cfg and cfg[k] is not None}
 
 
-def _build(model: str) -> Engine:
+def _build(model: str) -> ChatEngine:
     m = get_model(model)
     if not m:
         console.print(f"[{C_RED}] ✗ Model not found: {model}[/]")
@@ -44,10 +44,10 @@ def _build(model: str) -> Engine:
         n_batch=cfg.get("n_batch", 512),
     )
     with console.status(f"[{C_ACCENT}] Loading {model}…"):
-        return Engine(p, m["path"])
+        return create_engine(p, m["path"], cfg.get("backend", "inprocess"))
 
 
-def repl_loop(engine: Engine, typewriter: bool = False, chat_kwargs: dict | None = None):
+def repl_loop(engine: ChatEngine, typewriter: bool = False, chat_kwargs: dict | None = None):
     console.print(
         Panel(
             Text("  System Ready. Type 'exit' or Ctrl+C to quit.", style=C_SUCCESS),
