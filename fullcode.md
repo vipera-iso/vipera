@@ -1628,10 +1628,28 @@ def doctor():
     row("python", py_ver)
 
     llama_missing = False
+    gpu_offload = None
     try:
-        import llama_cpp  # noqa: F401
+        import llama_cpp
 
         row("llama-cpp-python", "installed")
+
+        # A binding compiled without a GPU backend silently ignores
+        # n_gpu_layers: the planner still reports "9/40 layers" while every
+        # layer runs on the CPU. Two virtualenvs on one machine can disagree
+        # here, so this row reports the binding, not the hardware.
+        supports_offload = getattr(llama_cpp, "llama_supports_gpu_offload", None)
+        try:
+            gpu_offload = supports_offload() if supports_offload else None
+        except Exception:
+            gpu_offload = None
+
+        if gpu_offload is True:
+            row("gpu offload", "compiled in (CUDA/Metal)", "PASS", C_GREEN)
+        elif gpu_offload is False:
+            row("gpu offload", "CPU-only build", "WARN", C_YELLOW)
+        else:
+            row("gpu offload", "unknown (binding too old)", "WARN", C_YELLOW)
     except ImportError:
         row("llama-cpp-python", "missing", "FAIL", C_RED)
         llama_missing = True
@@ -1683,6 +1701,21 @@ def doctor():
         console.print(f"[{C_YELLOW}] ⚠ llama-cpp-python is required to load models.[/]")
         console.print(f"[{C_DIM}]   Install:[/] python -m pip install llama-cpp-python")
         console.print(f"[{C_DIM}]   Then restart the gateway.[/]\n")
+
+    if gpu_offload is False and hw.gpu_name != "None":
+        console.print(
+            f"[{C_YELLOW}] ⚠ A GPU was detected but this llama-cpp-python build has no "
+            f"GPU backend.[/]"
+        )
+        console.print(
+            f"[{C_DIM}]   gpu_layers is planned but ignored: every layer runs on the CPU. "
+            f"Reinstall with the matching extra:[/]"
+        )
+        console.print(
+            f"[{C_DIM}]   CMAKE_ARGS='-DGGML_CUDA=on' "
+            f"pip install --force-reinstall llama-cpp-python"
+        )
+        console.print(f"[{C_DIM}]   Then re-run this command.[/]\n")
 
     if gguf_missing:
         console.print(
@@ -3400,11 +3433,36 @@ def _free_port() -> int:
         return int(sock.getsockname()[1])
 
 
-def server_command(binary: str, model_path: str, plan: Plan, port: int) -> list[str]:
+def _supports_load_mode(binary: str) -> bool:
+    """Whether this llama-server knows `--load-mode`.
+
+    There is no `--mlock` on the server (that is a llama-cli flag); the mlock
+    equivalent is a `--load-mode` value, and builds that predate it accept the
+    flag only to exit with "invalid argument" after the weights are mapped.
+    One `--help` run per spawn is cheaper than a failed child, and the caller
+    may skip the probe entirely by passing the answer in.
+    """
+    try:
+        probe = subprocess.run([binary, "--help"], capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return "--load-mode" in f"{probe.stdout}{probe.stderr}"
+
+
+def server_command(
+    binary: str,
+    model_path: str,
+    plan: Plan,
+    port: int,
+    *,
+    load_mode_supported: bool | None = None,
+) -> list[str]:
     """Translate a Plan into llama-server flags.
 
     `--jinja` is required for tool calling and for models whose chat template
     is not one of the hard-coded ones; it is harmless for plain chat.
+
+    `load_mode_supported` skips the `--help` probe; `None` probes the binary.
     """
     command = [
         binary,
@@ -3430,9 +3488,12 @@ def server_command(binary: str, model_path: str, plan: Plan, port: int) -> list[
     ]
     if plan.kv_cache != "f16":
         command.extend(["-ctk", plan.kv_cache, "-ctv", plan.kv_cache])
-    # No mlock flag: llama-server does not accept `--mlock` (llama-cli does),
-    # and its equivalent is a --load-mode value that older builds name
-    # differently. Passing it makes the child exit with "invalid argument".
+    if plan.use_mlock:
+        supported = (
+            _supports_load_mode(binary) if load_mode_supported is None else load_mode_supported
+        )
+        if supported:
+            command.extend(["-lm", "mlock"])
     return command
 
 
@@ -3961,7 +4022,6 @@ def pick_model(title: str = "SELECT A MODEL") -> str:
         raise typer.Exit(1)
 
     return installed[choice - 1]["name"]
-
 ```
 
 ---

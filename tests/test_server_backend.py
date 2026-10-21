@@ -99,8 +99,54 @@ def test_server_command_maps_the_plan_to_flags():
     assert command[command.index("-ctv") + 1] == "q5_0"
     assert command[command.index("-fa") + 1] == "on"
     assert "--jinja" in command
-    # llama-server rejects --mlock outright; mlock stays an in-process decision.
-    assert "--mlock" not in command
+    # A non-existent binary fails the --help probe, so the mlock flag is left
+    # out: passing it to a build without --load-mode kills the child.
+    assert "-lm" not in command
+
+
+def test_server_command_maps_mlock_when_the_binary_supports_load_mode():
+    command = sb.server_command(
+        "/bin/llama-server", "/m.gguf", _plan(use_mlock=True), 1, load_mode_supported=True
+    )
+
+    assert command[command.index("-lm") + 1] == "mlock"
+
+
+def test_server_command_skips_mlock_on_builds_without_load_mode():
+    command = sb.server_command(
+        "/bin/llama-server", "/m.gguf", _plan(use_mlock=True), 1, load_mode_supported=False
+    )
+
+    assert "-lm" not in command
+
+
+def test_server_command_skips_mlock_when_the_plan_does_not_ask_for_it():
+    command = sb.server_command(
+        "/bin/llama-server", "/m.gguf", _plan(use_mlock=False), 1, load_mode_supported=True
+    )
+
+    assert "-lm" not in command
+
+
+def test_supports_load_mode_reads_the_binary_help(monkeypatch):
+    class _Result:
+        def __init__(self, text):
+            self.stdout = text
+            self.stderr = ""
+
+    monkeypatch.setattr(
+        sb.subprocess, "run", lambda *a, **kw: _Result("  -lm, --load-mode MODE  model loading mode")
+    )
+    assert sb._supports_load_mode("/bin/llama-server") is True
+
+    monkeypatch.setattr(sb.subprocess, "run", lambda *a, **kw: _Result("no such option here"))
+    assert sb._supports_load_mode("/bin/llama-server") is False
+
+    def _boom(*a, **kw):
+        raise OSError("no such file")
+
+    monkeypatch.setattr(sb.subprocess, "run", _boom)
+    assert sb._supports_load_mode("/bin/llama-server") is False
 
 
 def test_server_command_leaves_f16_alone_and_can_disable_flash_attention():
@@ -111,10 +157,6 @@ def test_server_command_leaves_f16_alone_and_can_disable_flash_attention():
     assert "-ctk" not in command
     assert "-ctv" not in command
     assert command[command.index("-fa") + 1] == "off"
-    command_with_mlock_plan = sb.server_command(
-        "/bin/llama-server", "/m.gguf", _plan(use_mlock=True), 1
-    )
-    assert "--mlock" not in command_with_mlock_plan
 
 
 # --- HTTP surface ------------------------------------------------------------

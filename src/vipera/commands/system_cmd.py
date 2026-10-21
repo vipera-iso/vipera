@@ -56,10 +56,28 @@ def doctor():
     row("python", py_ver)
 
     llama_missing = False
+    gpu_offload = None
     try:
-        import llama_cpp  # noqa: F401
+        import llama_cpp
 
         row("llama-cpp-python", "installed")
+
+        # A binding compiled without a GPU backend silently ignores
+        # n_gpu_layers: the planner still reports "9/40 layers" while every
+        # layer runs on the CPU. Two virtualenvs on one machine can disagree
+        # here, so this row reports the binding, not the hardware.
+        supports_offload = getattr(llama_cpp, "llama_supports_gpu_offload", None)
+        try:
+            gpu_offload = supports_offload() if supports_offload else None
+        except Exception:
+            gpu_offload = None
+
+        if gpu_offload is True:
+            row("gpu offload", "compiled in (CUDA/Metal)", "PASS", C_GREEN)
+        elif gpu_offload is False:
+            row("gpu offload", "CPU-only build", "WARN", C_YELLOW)
+        else:
+            row("gpu offload", "unknown (binding too old)", "WARN", C_YELLOW)
     except ImportError:
         row("llama-cpp-python", "missing", "FAIL", C_RED)
         llama_missing = True
@@ -111,6 +129,21 @@ def doctor():
         console.print(f"[{C_YELLOW}] ⚠ llama-cpp-python is required to load models.[/]")
         console.print(f"[{C_DIM}]   Install:[/] python -m pip install llama-cpp-python")
         console.print(f"[{C_DIM}]   Then restart the gateway.[/]\n")
+
+    if gpu_offload is False and hw.gpu_name != "None":
+        console.print(
+            f"[{C_YELLOW}] ⚠ A GPU was detected but this llama-cpp-python build has no "
+            f"GPU backend.[/]"
+        )
+        console.print(
+            f"[{C_DIM}]   gpu_layers is planned but ignored: every layer runs on the CPU. "
+            f"Reinstall with the matching extra:[/]"
+        )
+        console.print(
+            f"[{C_DIM}]   CMAKE_ARGS='-DGGML_CUDA=on' "
+            f"pip install --force-reinstall llama-cpp-python"
+        )
+        console.print(f"[{C_DIM}]   Then re-run this command.[/]\n")
 
     if gguf_missing:
         console.print(

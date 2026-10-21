@@ -53,11 +53,36 @@ def _free_port() -> int:
         return int(sock.getsockname()[1])
 
 
-def server_command(binary: str, model_path: str, plan: Plan, port: int) -> list[str]:
+def _supports_load_mode(binary: str) -> bool:
+    """Whether this llama-server knows `--load-mode`.
+
+    There is no `--mlock` on the server (that is a llama-cli flag); the mlock
+    equivalent is a `--load-mode` value, and builds that predate it accept the
+    flag only to exit with "invalid argument" after the weights are mapped.
+    One `--help` run per spawn is cheaper than a failed child, and the caller
+    may skip the probe entirely by passing the answer in.
+    """
+    try:
+        probe = subprocess.run([binary, "--help"], capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return "--load-mode" in f"{probe.stdout}{probe.stderr}"
+
+
+def server_command(
+    binary: str,
+    model_path: str,
+    plan: Plan,
+    port: int,
+    *,
+    load_mode_supported: bool | None = None,
+) -> list[str]:
     """Translate a Plan into llama-server flags.
 
     `--jinja` is required for tool calling and for models whose chat template
     is not one of the hard-coded ones; it is harmless for plain chat.
+
+    `load_mode_supported` skips the `--help` probe; `None` probes the binary.
     """
     command = [
         binary,
@@ -83,9 +108,12 @@ def server_command(binary: str, model_path: str, plan: Plan, port: int) -> list[
     ]
     if plan.kv_cache != "f16":
         command.extend(["-ctk", plan.kv_cache, "-ctv", plan.kv_cache])
-    # No mlock flag: llama-server does not accept `--mlock` (llama-cli does),
-    # and its equivalent is a --load-mode value that older builds name
-    # differently. Passing it makes the child exit with "invalid argument".
+    if plan.use_mlock:
+        supported = (
+            _supports_load_mode(binary) if load_mode_supported is None else load_mode_supported
+        )
+        if supported:
+            command.extend(["-lm", "mlock"])
     return command
 
 
