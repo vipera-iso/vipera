@@ -119,7 +119,7 @@ Ghi chú: gọi bằng đường dẫn `.gguf` nên `meta` trống (`layers=0`) 
 | Lớp | Có tối ưu thật không? | Bằng chứng |
 |---|---|---|
 | L2 KV dtype | **Có** — q8_0 nửa RAM, −3% tốc độ; q5_1/iq4_nl đắt hơn, chất lượng đổi | bảng A |
-| L2 FA | **Rẻ ở sequence ≤4k** (+0%); chưa do với Hermes 64k nên không kết luận chung | bảng B |
+| L2 FA | **Rẻ ở sequence ≤4k** (+0%); chưa đo lại Hermes 64k nên không kết luận chung | bảng B |
 | L2 KV estimate | **Có** — planner tính đúng theo dtype, không dùng heuristic 1.5 GB | bảng C + test |
 | L3 backend | **Có** — cùng tốc độ, +0.3 s khởi động, cách ly process | bảng D |
 | L1a imatrix | **Có ở Q3** (−5.18%), không kết luận được ở Q4 (−0.96%) | `../l1a2_results/REPORT.md` |
@@ -144,7 +144,8 @@ nên đừng tính vào con số "tối ưu".
 
 ## Hạn chế
 
-- 0.5B, prompt ~470 token, 1 lần/dòng. Chênh lệch <5% là nhiễu; đừng đọc 67.21 vs
-  66.28 thành "inprocess nhanh hơn".
+- Bảng A–D: 0.5B, prompt ~470 token, 1 lần/dòng. Chênh lệch <5% là nhiễu; đừng
+  đọc 67.21 vs 66.28 thành "inprocess nhanh hơn". Bảng E: Hermes-4 14B, 3 lần/model
+  (median) nên chênh lệch 25–27% là thật, còn +3% decode thì vẫn trong nhiễu.
 - CPU-only. Trên GPU, FA là đường nhanh **hơn** nhiều — kết luận B không áp dụng cho GPU.
 - KV RAM ở bảng C là số tính, không phải RSS đo được.
