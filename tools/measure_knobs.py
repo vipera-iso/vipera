@@ -103,8 +103,9 @@ def one(over):
             offload_kqv=p.offload_kqv,
             type_k=kv,
             type_v=kv,
-            use_mmap=True,
+            use_mmap=over.get("use_mmap", True),
             use_mlock=over.get("mlock", p.use_mlock),
+            op_offload=over.get("op_offload", True),
             verbose=False,
         )
     except Exception as exc:

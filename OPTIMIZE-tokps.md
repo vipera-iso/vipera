@@ -38,6 +38,13 @@ Còn lại của plan: P2.1 build `llama-server` với CUDA (máy không có `nv
 P2.3 `--spec-type ngram-*`, P3.2 tách lane 64K. P1.5 coi như **đóng bằng số đo
 âm tính** (giữ `n_batch`/`n_ubatch` 512).
 
+**2026-10-23 — kết quả đọc tài liệu:** xem `OPTIMIZE-techniques.md`. Kết luận
+ngắn: cửa lớn nhất còn lại là **MoE expert offload** (`-ot exps=CPU` /
+`--n-cpu-moe`) cho LFM2.5 — 91% file là expert weights, và `llama-cpp-python`
+**không** có tham số đó (chỉ `llama-server`). Cùng blocker `nvcc` với P2.3. Ba
+đòn bẩy nữa đã đo và **loại**: `--no-op-offload` (TTFT +18%), `--no-mmap`,
+`n_ubatch` lớn.
+
 ---
 
 ## 0. Phạm vi đọc
