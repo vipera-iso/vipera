@@ -80,6 +80,17 @@ def test_gpu_fallback_walks_the_offload_down_before_cpu(fake_llama):
     assert engine.plan.note == "Hybrid: 2/40 layers"
 
 
+def test_reduced_offload_does_not_still_claim_full_gpu(fake_llama):
+    # A big card can plan a full offload and still fail: the note must follow the
+    # split that loaded instead of saying "Full GPU" while 1 layer sits on CPU.
+    fake_llama.fail_if = staticmethod(lambda kw: kw["n_gpu_layers"] >= 32)
+
+    engine = Engine(_plan(gpu_layers=32, note="Full GPU"), "model.gguf")
+
+    assert engine.plan.gpu_layers == 31
+    assert engine.plan.note == "Hybrid: 31/all layers"
+
+
 def test_cpu_fallback_keeps_context_kv_and_flash_attention(fake_llama):
     fake_llama.fail_if = staticmethod(lambda kw: kw["n_gpu_layers"] > 0)
 

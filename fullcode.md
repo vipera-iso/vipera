@@ -2025,6 +2025,12 @@ def with_gpu_layers(plan: Plan, layers: int) -> Plan:
     if note.startswith("Hybrid: "):
         total = note.split("/", 1)[1].split()[0]
         note = f"Hybrid: {layers}/{total} layers"
+    elif note == "Full GPU":
+        # A large card can plan a full offload and still fail to create the
+        # context (the driver holds more than the weights). Reporting "Full
+        # GPU" while running a reduced split would repeat the lie the ladder
+        # exists to stop.
+        note = f"Hybrid: {layers}/all layers"
     return replace(plan, gpu_layers=layers, note=note)
 
 
