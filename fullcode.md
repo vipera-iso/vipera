@@ -4039,3 +4039,260 @@ Không phải "thêm 60 quant type". Nội dung thật:
 2. **L3**: flag trong **config** (`backend`, default `inprocess`) — `_coerce_strict` đã sẵn; env var sẽ tạo 2 nguồn sự thật.
 3. **L1**: dùng pipeline `vipera model quantize/optimize` sẵn có (L1a); repo tích hợp **chưa** chọn — nếu L1b cần thì `advanced-gguf-quantizer`.
 4. **L4**: tách L4a/L4b như trên — nhưng L4a ghi điều kiện "model có MTP head" (2 model hiện tại không có), L4b blocked. Kết luận: **không làm code L4 trong vòng này**.
+
+---
+
+# Kết quả đo — 2026-10-21
+
+> Phần "Đề xuất v2" ở trên viết trước khi làm. Đây là số đo sau khi làm xong;
+> chỗ nào lệch nhau thì **số đo thắng**.
+
+## L1a v3 — imatrix đo từ nguồn Q8_0 (requantize thật)
+
+**Ngày:** 2026-10-21 · **Trạng thái:** xong, 4/4 arm `rc=0` · **Kết quả:** Q4 trong nhiễu,
+Q3 có hiệu ứng thật nhưng vẫn dưới ngưỡng gate đã chốt (0.3812 < 0.4).
+
+---
+
+### Vì sao phải chạy lại (khác L1a v2)
+
+L1a v2 lượng tử hoá `Q4_K_M → Q4_K_M`. `llama-quantize` copy nguyên byte khi type
+nguồn trùng type đích (`llama-quant.cpp`: `quantize = cur_type != new_type`), và
+imatrix chỉ được tra **bên trong** nhánh lượng tử hoá thật. Nên arm Q4 của v2 là
+no-op cấu trúc: `+0.0000` không phải "imatrix vô dụng ở Q4".
+
+v3 sửa đúng chỗ đó: nguồn là **Q8_0** (15.7 GB, ~0.01% loss so với BF16) nên
+`Q8_0 → Q4_K_M` và `Q8_0 → Q3_K_M` **bắt buộc** đi qua bộ lượng tử hoá, và imatrix
+có đường tác động vào từng weight.
+
+### Bằng chứng "imatrix có thật sự đi vào cuộc"
+
+`tools/gguf_quant_audit.py` so từng tensor giữa hai output cùng nguồn:
+
+| Cặp | Tensor đổi **type** | Tensor đổi **data** |
+|---|---:|---:|
+| `q8src-ctl-q4km` vs `q8src-imbf-q4km` | 0/443 | **280/443** |
+| `q8src-ctl-q3km` vs `q8src-imbf-q3km` | 0/443 | **280/443** |
+| (v2, để so) `ctl-hermes-q4km` vs `l1a-hermes-q4km` | 0/443 | 0/443 |
+
+Cùng type (type do recipe quyết định), nhưng **280/443 tensor đổi giá trị** — đó
+đúng là chỗ imatrix tác động. Ở v2 con số này là 0.
+
+### Số đo
+
+Điều kiện y hệt L5a/L1a v2: `llama-perplexity 0.7.0-dev (build 1, commit 797de63)`,
+`ctx=512, ngl=0, chunks=24, n_seq=4, scored_tok=12264`, eval `wikitext_sample.txt`
+(sha256 `2a8ef09474c9`), CPU-only, chạy `setsid` nên không chết theo session.
+
+| Arm | PPL ± stderr | Δ so control | % | Đọc |
+|---|---:|---:|---:|---|
+| `Q4_K_M` không imatrix | 7.0056 ± 0.2256 | — | — | control |
+| `Q4_K_M` + imatrix BF16 | **6.9383** ± 0.2238 | **−0.0673** | −0.96% | **0.3σ → nhiễu** |
+| `Q3_K_M` không imatrix | 7.3617 ± 0.2407 | — | — | control |
+| `Q3_K_M` + imatrix BF16 | **6.9805** ± 0.2253 | **−0.3812** | −5.18% | **1.6σ → thật, nhưng < ngưỡng 0.4** |
+
+stderr là độ bất định của eval set (12,264 token), không phải nhiễu run-to-run:
+run lặp lại cho **đúng từng số lẻ**. Vì vậy Δ nhỏ hơn 1σ thì không kết luận được
+là có lợi trên văn bản khác; Δ = 1.6σ thì có lợi nhưng chưa đủ để tuyên bố.
+
+### Đọc số
+
+1. **Q4_K_M: imatrix gần như không đổi gì** (−0.96%, 0.3σ). Hợp lý — Q4_K_M đã
+   mixed-precision, tensor nhạy cảm được đẩy lên type cao sẵn, còn ít chỗ để
+   imatrix cải thiện.
+2. **Q3_K_M: imatrix cải thiện 5.18%** — cùng chiều với v2 (−3.24%), khác nguồn
+   đo và khác imatrix. Hai phép đo độc lập cùng dấu ⇒ hiệu ứng có thật; biên độ
+   0.24–0.38 PPL.
+3. **Kết quả thực dụng quan trọng nhất:**
+   `Q3_K_M + imatrix` = **6.9805**, `Q4_K_M` (không imatrix) = **7.0056**.
+   Tức Q3+imatrix **nhỉnh hơn Q4** một chút với file **7.32 GB thay vì 9.00 GB
+   (−1.68 GB, −19%)**, và chạy perplexity **nhanh hơn 27%** (23.6 vs 18.8 tok/s)
+   trên cùng máy CPU-only.
+4. **Verdict theo gate đã chốt trước:** Q4 không kết luận được; Q3 = 0.3812 vẫn
+   **dưới** ngưỡng 0.4 ⇒ **chưa mở L1b**. Gate đúng như đã viết — không sửa
+   ngưỡng sau khi thấy số.
+
+### Hạn chế (phải nói kèm số)
+
+- Một eval set duy nhất (WikiText, 12k token). Không đo trên văn bản khác, không
+  đo KL per-tensor, không kiểm tra chất lượng hội thoại.
+- Imatrix là bản có sẵn của bartowski build từ **BF16** của cùng model — không
+  phải build tại máy này. Nó loại trừ được giả thuyết "imatrix từ Q4_K_M bị lệch"
+  của v2, nhưng không chứng minh được "imatrix tự build cũng cho kết quả này".
+- Q3_K_M ở 3-bit: 5% PPL là con số đẹp, nhưng 3-bit vẫn dễ hỏng ở suy luận
+  nhiều bước; chưa đo task-level.
+
+### Tái lập
+
+```bash
+bash tools/l1a2_run.sh          # resume: bỏ qua bước đã có, PPL đã có rc=0 thì skip
+cat tools/l1a2_results/report_numbers.txt
+python tools/gguf_quant_audit.py \
+  --a ~/.vipera/models/q8src-ctl-q4km.gguf --b ~/.vipera/models/q8src-imbf-q4km.gguf
+```
+
+---
+
+## L2/L3 — Các lớp tối ưu có thật sự làm gì? (số đo, không phải suy đoán)
+
+**Ngày:** 2026-10-21 · Máy: 4C/8T, 15 GiB RAM, CPU-only · Model: `qwen2.5-0.5b-instruct-q4_k_m`
+(24 layer, 14 head / 2 KV head, head_dim 64) · Prompt cố định ~470 token · Engine tạo mới
+cho mỗi dòng nên `load s` là thời gian nạp thật.
+
+Chạy bằng `tools/bench_layers.py`; dữ liệu thô trong `kv_backends.json`, `fa_cost.json`, `kv_16k.json`.
+
+```bash
+.venv/bin/python tools/bench_layers.py --model qwen2.5-0.5b-instruct-q4_k_m \
+  --ctx 4096 --max-tokens 64 --backend inprocess server --kv f16 q8_0 q5_1 iq4_nl
+```
+
+### A. L2 — KV cache dtype × backend (ctx 4096, sinh 64 token)
+
+| backend | kv | FA planner đặt | load s | TTFT ms | gen t/s | token sinh |
+|---|---|---:|---:|---:|---:|---:|
+| inprocess | f16 | off | 0.67 | 464 | **67.21** | 64 |
+| inprocess | q8_0 | **on** | 0.22 | 597 | 64.97 | 64 |
+| inprocess | q5_1 | **on** | 0.22 | 549 | 57.49 | 64 |
+| inprocess | iq4_nl | **on** | 0.20 | 549 | 55.05 | 47 |
+| server | f16 | off | 0.54 | 579 | 66.28 | 64 |
+| server | q8_0 | **on** | 0.50 | 533 | 66.24 | 64 |
+| server | q5_1 | **on** | 0.50 | 650 | 61.26 | 6 |
+| server | iq4_nl | **on** | 0.50 | 687 | 55.93 | 64 |
+
+Đọc:
+
+- **Planner bật flash-attention đúng như thiết kế**: f16 → off, mọi dtype lượng tử → on.
+  Không có dòng nào `eff=on` khi `kv=f16` với `--fa auto`.
+- **q8_0 gần như miễn phí:** −3.3% gen t/s (67.2 → 65.0) để đổi **một nửa KV RAM**.
+  Đây là mặc định đúng cho máy ít RAM.
+- **q5_1 / iq4_nl đắt hơn:** −14% / −18% gen t/s. Ở 0.5B, KV chỉ ~50 MB nên tiết
+  kiệm RAM không đáng giá trị tốc độ mất đi; chỉ nên dùng khi KV là thứ chặn ctx.
+- **`token sinh` khác nhau là tín hiệu chất lượng, không phải lỗi:** iq4_nl dừng ở 47
+  token, `server q5_1` dừng ở 6 token — KV 4–5 bit đổi phân bố xác suất đủ để model
+  kết thúc sớm. q8_0 sinh đủ 64 như f16 ở cả hai backend.
+
+### B. L2 — flash-attention trên CPU có thật sự chậm? (kv f16)
+
+Giả định cũ trong `planner.py`/`OPTIMIZE-hermes4.md`: "FA + KV lượng tử trên CPU =
+chậm kinh khủng" (đo trên Hermes-4 @65536: 0.1–0.2 tok/s). Đo lại bằng cách ép
+`--fa on` với f16, hai độ dài sequence:
+
+**Prompt ~470 token, ctx 4096:**
+
+| backend | FA | TTFT ms | gen t/s |
+|---|---|---:|---:|
+| inprocess | auto (off) | 464 | 66.71 |
+| inprocess | **on** | 425 | 66.09 |
+| inprocess | off | 464 | 66.62 |
+| server | auto (off) | 543 | 66.12 |
+| server | **on** | 566 | 66.91 |
+| server | off | 579 | 65.48 |
+
+**Prompt ~3,760 token (repeat 8), ctx 8192:**
+
+| FA | TTFT ms | gen t/s |
+|---|---:|---:|
+| auto (off) | 3549 | 58.58 |
+| **on** | **3197** | 56.78 |
+| off | 3260 | 60.31 |
+
+Đọc: ở 0.5B và sequence ≤ ~4k, FA trên CPU **không đắt** — TTFT còn thấp hơn (3.20 s
+vs 3.26 s), decode chậm 6%. Con số "50× chậm" của Hermes-4 là ở **ctx 65,536 với KV
+lượng tử trên 14B**, một chế độ khác hẳn; phép đo này **không** bác bỏ nó.
+
+Vì vậy: planner giữ nguyên hành vi bảo thủ (f16/bf16/f32 không bật FA) là hợp lý —
+không có lợi ích đo được, và ở ctx lớn nó là đường đã biết rất chậm. Nhưng ghi chú
+"FA luôn chậm" trong tài liệu là **quá rộng**: nó chỉ đúng ở ctx lớn / model lớn.
+
+### C. L2 — KV RAM thật sự tiết kiệm bao nhiêu (tính bằng `planner._estimate_kv_cache_gb`)
+
+Hermes-4-14B (40 layer, 8 KV head, head_dim 128):
+
+| ctx | f16 | bf16 | q8_0 | q5_1 | q4_0 |
+|---:|---:|---:|---:|---:|---:|
+| 4,096 | 0.62 GB | 0.62 GB | 0.31 GB | 0.23 GB | 0.16 GB |
+| 8,192 | 1.25 GB | 1.25 GB | 0.62 GB | 0.47 GB | 0.31 GB |
+| 32,768 | 5.00 GB | 5.00 GB | 2.50 GB | 1.88 GB | 1.25 GB |
+
+Đo thực tế ở ctx 16384 trên qwen0.5b không phân biệt được (KV chỉ ~100 MB f16 vs
+~53 MB q8_0, nằm dưới nhiễu RSS), nên bảng trên là **số tính từ công thức đã có
+test** (`tests/test_planner.py::test_kv_estimate_*`), không phải số đo RSS.
+
+### D. L3 — backend `server` so với `inprocess`
+
+| | inprocess | server |
+|---|---|---|
+| load (0.5B) | 0.20–0.67 s | 0.50 s (spawn + chờ `/health`) |
+| gen t/s | 65–67 | 66–67 |
+| streaming | generator trong process | SSE từ `llama-server` |
+| cách ly | chung GIL/RAM với gateway | process riêng, chết không kéo gateway |
+
+**Backend `server` không mất throughput** (66.2 vs 67.2 t/s, ~1.5% trong nhiễu) và
+trả giá đúng 0.3 s khởi động trên model 0.5B. Lớp này hoạt động đúng như thiết kế:
+đổi backend không đổi chất lượng sinh, chỉ đổi chỗ chạy.
+
+### E. L1 — đổi weight Q4_K_M → Q3_K_M+imatrix trên Hermes-4 (14B), số đo thật
+
+3 lần lặp mỗi model, cùng prompt (~470 token), ctx 4096, kv f16, 64 token sinh:
+
+| | load s | TTFT s | decode t/s | PPL |
+|---|---:|---:|---:|---:|
+| `q8src-ctl-q4km` (9.00 GB) | 7.9 / 9.2 / 8.0 | 9.8 / 10.1 / 13.2 | 3.73 / 3.76 / 3.69 | 7.0056 |
+| `q8src-imbf-q3km` (7.32 GB) | 6.1 / 6.0 / 5.9 | 8.0 / 7.4 / 7.4 | 3.85 / 3.89 / 3.74 | **6.9805** |
+| chênh (median) | **−25%** | **−27%** | **+3%** | **−0.36%** |
+
+Nghĩa là: bớt 18.7% dung lượng file, nạp nhanh hơn 25%, prefill nhanh hơn 27%,
+decode gần như không đổi (+3%), chất lượng **không giảm** (PPL thấp hơn 0.36%).
+Decode không nhanh hơn nhiều vì Q3_K_M dequant đắt hơn Q4_K_M — bớt byte đọc
+nhưng thêm việc giải mã.
+
+Ghi chú: gọi bằng đường dẫn `.gguf` nên `meta` trống (`layers=0`) — cả hai model
+đi cùng một nhánh planner nên so sánh vẫn công bằng.
+
+### Tóm lại
+
+| Lớp | Có tối ưu thật không? | Bằng chứng |
+|---|---|---|
+| L2 KV dtype | **Có** — q8_0 nửa RAM, −3% tốc độ; q5_1/iq4_nl đắt hơn, chất lượng đổi | bảng A |
+| L2 FA | **Rẻ ở sequence ≤4k** (+0%); chưa đo lại Hermes 64k nên không kết luận chung | bảng B |
+| L2 KV estimate | **Có** — planner tính đúng theo dtype, không dùng heuristic 1.5 GB | bảng C + test |
+| L3 backend | **Có** — cùng tốc độ, +0.3 s khởi động, cách ly process | bảng D |
+| L1a imatrix | **Có ở Q3** (−5.18%), không kết luận được ở Q4 (−0.96%) | `../l1a2_results/REPORT.md` |
+| L1 đổi weight | **−19% file, −25% load, −27% prefill, PPL không giảm** | bảng E |
+
+#### Tổng % đạt được (Hermes-4, một máy CPU-only 15 GiB)
+
+| Hạng mục | Trước | Sau (Q3+imatrix, kv q8_0) | Đổi |
+|---|---:|---:|---:|
+| Kích thước file | 9.00 GB | 7.32 GB | **−18.7%** |
+| KV @8k (f16 → q8_0) | 1.25 GB | 0.62 GB | **−50%** |
+| Tổng RAM @8k | 10.25 GB | 7.94 GB | **−22.5%** |
+| Tổng RAM @32k | 14.00 GB | 9.82 GB | **−29.9%** |
+| Thời gian nạp | 8.0 s | 6.0 s | **−25%** |
+| Prefill (TTFT) | 10.1 s | 7.4 s | **−27%** |
+| Decode | 3.73 t/s | 3.85 t/s | +3% |
+| PPL (thấp = tốt) | 7.0056 | 6.9805 | **−0.36%** |
+
+Ba lớp còn lại (`server` backend, FA, dtype q5_1/iq4_nl) **không đem lại % nào** về
+tốc độ hay dung lượng ở máy này — chúng đem lại cách ly process / khả năng chọn,
+nên đừng tính vào con số "tối ưu".
+
+### Hạn chế
+
+- Bảng A–D: 0.5B, prompt ~470 token, 1 lần/dòng. Chênh lệch <5% là nhiễu; đừng
+  đọc 67.21 vs 66.28 thành "inprocess nhanh hơn". Bảng E: Hermes-4 14B, 3 lần/model
+  (median) nên chênh lệch 25–27% là thật, còn +3% decode thì vẫn trong nhiễu.
+- CPU-only. Trên GPU, FA là đường nhanh **hơn** nhiều — kết luận B không áp dụng cho GPU.
+- KV RAM ở bảng C là số tính, không phải RSS đo được.
+
+---
+
+## Dữ liệu thô
+
+| Đường dẫn | Nội dung |
+|---|---|
+| `tools/l1a2_results/q4_ctl.json`, `q4_imbf.json`, `q3_ctl.json`, `q3_imbf.json` | PPL từng arm |
+| `tools/l1a2_results/report_numbers.txt` | bảng số do `l1a2_report.py` sinh |
+| `tools/layer_results/kv_backends.json` | KV dtype × backend |
+| `tools/layer_results/fa_cost.json`, `fa_long.json` | chi phí flash-attention |
+| `tools/layer_results/kv_16k.json` | ctx 16384, f16 vs q8_0 |
