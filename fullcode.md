@@ -3968,7 +3968,7 @@ def pick_model(title: str = "SELECT A MODEL") -> str:
 
 # Đề xuất v2: 5 layer tối ưu cho Vipera
 
-> ⚠️ **ĐỀ XUẤT, CHƯA TRIỂN KHAI.** v2 chỉnh ngày 2026-10-20 sau khi đối chiếu từng ý review với code thật. Chưa có dòng nào viết vào `src/`.
+> ✅ **ĐÃ TRIỂN KHAI** (2026-10-21). Phần dưới là kế hoạch viết ngày 2026-10-20, giữ nguyên để đối chiếu; nó **không** còn mô tả hiện trạng. Hiện trạng trong `src/`: `_KV_BYTES_PER_ELEM` / `_KV_CACHE_TYPES` / `_KV_TYPES` đều **9/9** dtype llama.cpp hỗ trợ; fallback `_estimate_kv_cache_gb` đã scale theo dtype; backend `server` + `Engine.tokenize()` đã có (mặc định vẫn `inprocess`); `bench_cmd` dùng `engine.tokenize()`. Số đo nằm ở mục **Kết quả đo — 2026-10-21** cuối file.
 
 ## Kết quả đối chiếu ý kiến review
 
@@ -3978,6 +3978,14 @@ def pick_model(title: str = "SELECT A MODEL") -> str:
 | 2 | 60 quant type của ik fork áp cho **weight**, không áp cho KV | **Đúng.** llama.cpp chỉ nhận 9 KV dtype (`common/arg.cpp:304-313`: f32, f16, bf16, q8_0, q4_0, q4_1, iq4_nl, q5_0, q5_1). Planner đã phủ 5/9 → mở thêm tối đa 4 loại, lợi ích nhỏ. **L2 phải viết lại** |
 | 3 | "−15% weight Hermes-4" là giả thuyết | **Đúng.** Chưa đo trên model này. Chuyển thành **tiêu chí nghiệm thu**: PPL/KL measured trên chính Hermes-4 trước khi chấp nhận con số |
 | 4 | "vipera bench đã có sẵn" cho L5 | **Đúng.** `bench run` chỉ đo speed (TTFT/prefill/gen). Perplexity + KL per-tensor là **code mới** = phần lớn nhất của L5 |
+
+> **Cập nhật 2026-10-21 — dòng #1 và #2 đã lỗi thời, đọc kèm ghi chú này.**
+> Con số "5 dtype" là của bản code ngày 2026-10-20. Bản hiện tại phủ **9/9** dtype
+> llama.cpp (`_KV_BYTES_PER_ELEM`, `_KV_CACHE_TYPES`, `_KV_TYPES` giống nhau, đều 9
+> entry) và fallback `_estimate_kv_cache_gb` đã scale theo dtype. Vì vậy kết luận
+> "mở thêm tối đa 4 loại / L2 phải viết lại" **không còn đúng**: phần L2 đã xong,
+> việc còn lại chỉ là giữ test. Chỗ nào trong văn bản dưới còn nói "cần code" thì
+> hiểu là *đã làm xong* — kiểm chứng bằng test, không bằng đoạn văn này.
 | 5 | `bench_cmd._run_bench` gọi thẳng `engine.llm.tokenize` | **Đúng** (`bench_cmd.py:35`) → cần `Engine.tokenize()` wrapper cho backend llama-server |
 | 6 | `serve_cmd.start` đọc `engine.plan.gpu_layers/kv_cache_gb/kv_layers` | **Không đúng.** `serve_cmd.py:152` tự gọi `plan(m["meta"], hw, ...)` từ planner — **không phụ thuộc backend**. Nơi duy nhất đọc `engine.plan` là **`bench_cmd.py:175,183`** (dự phòng `or max(engine.plan.gpu_layers, 1)`) → fix ở bench_cmd; panel serve chạy nguyên |
 | 7 | server.py lock + `CancelledError` giả định sync generator | **Chấp nhận** — đọc tĩnh không chứng minh được; bắt buộc có test cancel-giữa-stream (test plan ở dưới) |
@@ -4104,13 +4112,19 @@ là có lợi trên văn bản khác; Δ = 1.6σ thì có lợi nhưng chưa đ�
    đo và khác imatrix. Hai phép đo độc lập cùng dấu ⇒ hiệu ứng có thật; biên độ
    0.24–0.38 PPL.
 3. **Kết quả thực dụng quan trọng nhất:**
-   `Q3_K_M + imatrix` = **6.9805**, `Q4_K_M` (không imatrix) = **7.0056**.
-   Tức Q3+imatrix **nhỉnh hơn Q4** một chút với file **7.32 GB thay vì 9.00 GB
-   (−1.68 GB, −19%)**, và chạy perplexity **nhanh hơn 27%** (23.6 vs 18.8 tok/s)
-   trên cùng máy CPU-only.
+   `Q3_K_M + imatrix` = **6.9805**, `Q4_K_M` (không imatrix) = **7.0056**: Δ = 0.025
+   PPL = **0.11σ**, tức **tương đương trong sai số** — không phải "tốt hơn".
+   Điều bảo vệ được là: chất lượng không giảm khi file **7.32 GB thay vì 9.00 GB
+   (−1.68 GB, −18.7%)**, và perplexity chạy **nhanh hơn 27%** (23.6 vs 18.8 tok/s)
+   trên cùng máy CPU-only. Đừng viết "Q3 tốt hơn Q4" ở README.
 4. **Verdict theo gate đã chốt trước:** Q4 không kết luận được; Q3 = 0.3812 vẫn
    **dưới** ngưỡng 0.4 ⇒ **chưa mở L1b**. Gate đúng như đã viết — không sửa
    ngưỡng sau khi thấy số.
+5. **Về việc sát ngưỡng:** 0.3812 chỉ cách 0.4 một chút, nên một eval set lớn hơn
+   12k token rất có thể vượt ngưỡng. Quyết định: **giữ nguyên ngưỡng đã chốt
+   trước khi thấy số và không mở L1b ở vòng này** — đổi ngưỡng sau khi nhìn kết
+   quả thì gate không còn là gate. Muốn vượt thì chạy thêm eval set (ghi rõ là
+   đo lại, không phải chỉnh ngưỡng).
 
 ### Hạn chế (phải nói kèm số)
 
@@ -4246,8 +4260,13 @@ decode gần như không đổi (+3%), chất lượng **không giảm** (PPL th
 Decode không nhanh hơn nhiều vì Q3_K_M dequant đắt hơn Q4_K_M — bớt byte đọc
 nhưng thêm việc giải mã.
 
-Ghi chú: gọi bằng đường dẫn `.gguf` nên `meta` trống (`layers=0`) — cả hai model
-đi cùng một nhánh planner nên so sánh vẫn công bằng.
+Ghi chú quan trọng: gọi bằng đường dẫn `.gguf` nên `meta` trống (`layers=0`), tức
+cả hai model đi qua **nhánh fallback heuristic** của planner, không phải nhánh
+per-model (`_kv_layer_count`/`head_dim` từ metadata). Vì cả hai đi cùng một nhánh
+nên so sánh L1 vẫn công bằng — nhưng **không được** trích bảng E để nói "L2 KV
+estimate chạy đúng": nhánh per-model không được chạm tới ở đây. Số L2 nằm ở
+bảng C, và bảng C là số **tính** từ `planner._estimate_kv_cache_gb` (công thức đã
+có test), **không phải RSS đo được**.
 
 ### Tóm lại
 
@@ -4273,6 +4292,9 @@ Ghi chú: gọi bằng đường dẫn `.gguf` nên `meta` trống (`layers=0`) 
 | Decode | 3.73 t/s | 3.85 t/s | +3% |
 | PPL (thấp = tốt) | 7.0056 | 6.9805 | **−0.36%** |
 
+Hàng PPL: 7.0056 → 6.9805 là Δ = 0.025 = **0.11σ** — **tương đương trong sai số**,
+không phải "Q3 tốt hơn Q4". Claim bảo vệ được là *"không giảm chất lượng"*.
+
 Ba lớp còn lại (`server` backend, FA, dtype q5_1/iq4_nl) **không đem lại % nào** về
 tốc độ hay dung lượng ở máy này — chúng đem lại cách ly process / khả năng chọn,
 nên đừng tính vào con số "tối ưu".
@@ -4283,7 +4305,10 @@ nên đừng tính vào con số "tối ưu".
   đọc 67.21 vs 66.28 thành "inprocess nhanh hơn". Bảng E: Hermes-4 14B, 3 lần/model
   (median) nên chênh lệch 25–27% là thật, còn +3% decode thì vẫn trong nhiễu.
 - CPU-only. Trên GPU, FA là đường nhanh **hơn** nhiều — kết luận B không áp dụng cho GPU.
-- KV RAM ở bảng C là số tính, không phải RSS đo được.
+- KV RAM ở bảng C là số **tính** từ `planner._estimate_kv_cache_gb`, không phải RSS
+  đo được — chưa có phép đo RSS nào trong báo cáo này chứng minh con số đó.
+- Bảng E chỉ đo nhánh fallback của planner (path `.gguf` → meta trống), không đo
+  nhánh per-model. Xem ghi chú ở mục E.
 
 ---
 

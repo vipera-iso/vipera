@@ -55,13 +55,19 @@ là có lợi trên văn bản khác; Δ = 1.6σ thì có lợi nhưng chưa đ�
    đo và khác imatrix. Hai phép đo độc lập cùng dấu ⇒ hiệu ứng có thật; biên độ
    0.24–0.38 PPL.
 3. **Kết quả thực dụng quan trọng nhất:**
-   `Q3_K_M + imatrix` = **6.9805**, `Q4_K_M` (không imatrix) = **7.0056**.
-   Tức Q3+imatrix **nhỉnh hơn Q4** một chút với file **7.32 GB thay vì 9.00 GB
-   (−1.68 GB, −19%)**, và chạy perplexity **nhanh hơn 27%** (23.6 vs 18.8 tok/s)
-   trên cùng máy CPU-only.
+   `Q3_K_M + imatrix` = **6.9805**, `Q4_K_M` (không imatrix) = **7.0056**: Δ = 0.025
+   PPL = **0.11σ**, tức **tương đương trong sai số** — không phải "tốt hơn".
+   Điều bảo vệ được là: chất lượng không giảm khi file **7.32 GB thay vì 9.00 GB
+   (−1.68 GB, −18.7%)**, và perplexity chạy **nhanh hơn 27%** (23.6 vs 18.8 tok/s)
+   trên cùng máy CPU-only. Đừng viết "Q3 tốt hơn Q4" ở README.
 4. **Verdict theo gate đã chốt trước:** Q4 không kết luận được; Q3 = 0.3812 vẫn
    **dưới** ngưỡng 0.4 ⇒ **chưa mở L1b**. Gate đúng như đã viết — không sửa
    ngưỡng sau khi thấy số.
+5. **Về việc sát ngưỡng:** 0.3812 chỉ cách 0.4 một chút, nên một eval set lớn hơn
+   12k token rất có thể vượt ngưỡng. Quyết định: **giữ nguyên ngưỡng đã chốt
+   trước khi thấy số và không mở L1b ở vòng này** — đổi ngưỡng sau khi nhìn kết
+   quả thì gate không còn là gate. Muốn vượt thì chạy thêm eval set (ghi rõ là
+   đo lại, không phải chỉnh ngưỡng).
 
 ## Hạn chế (phải nói kèm số)
 

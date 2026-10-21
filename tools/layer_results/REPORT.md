@@ -111,8 +111,13 @@ decode gần như không đổi (+3%), chất lượng **không giảm** (PPL th
 Decode không nhanh hơn nhiều vì Q3_K_M dequant đắt hơn Q4_K_M — bớt byte đọc
 nhưng thêm việc giải mã.
 
-Ghi chú: gọi bằng đường dẫn `.gguf` nên `meta` trống (`layers=0`) — cả hai model
-đi cùng một nhánh planner nên so sánh vẫn công bằng.
+Ghi chú quan trọng: gọi bằng đường dẫn `.gguf` nên `meta` trống (`layers=0`), tức
+cả hai model đi qua **nhánh fallback heuristic** của planner, không phải nhánh
+per-model (`_kv_layer_count`/`head_dim` từ metadata). Vì cả hai đi cùng một nhánh
+nên so sánh L1 vẫn công bằng — nhưng **không được** trích bảng E để nói "L2 KV
+estimate chạy đúng": nhánh per-model không được chạm tới ở đây. Số L2 nằm ở
+bảng C, và bảng C là số **tính** từ `planner._estimate_kv_cache_gb` (công thức đã
+có test), **không phải RSS đo được**.
 
 ## Tóm lại
 
@@ -138,6 +143,9 @@ Ghi chú: gọi bằng đường dẫn `.gguf` nên `meta` trống (`layers=0`) 
 | Decode | 3.73 t/s | 3.85 t/s | +3% |
 | PPL (thấp = tốt) | 7.0056 | 6.9805 | **−0.36%** |
 
+Hàng PPL: 7.0056 → 6.9805 là Δ = 0.025 = **0.11σ** — **tương đương trong sai số**,
+không phải "Q3 tốt hơn Q4". Claim bảo vệ được là *"không giảm chất lượng"*.
+
 Ba lớp còn lại (`server` backend, FA, dtype q5_1/iq4_nl) **không đem lại % nào** về
 tốc độ hay dung lượng ở máy này — chúng đem lại cách ly process / khả năng chọn,
 nên đừng tính vào con số "tối ưu".
@@ -148,4 +156,7 @@ nên đừng tính vào con số "tối ưu".
   đọc 67.21 vs 66.28 thành "inprocess nhanh hơn". Bảng E: Hermes-4 14B, 3 lần/model
   (median) nên chênh lệch 25–27% là thật, còn +3% decode thì vẫn trong nhiễu.
 - CPU-only. Trên GPU, FA là đường nhanh **hơn** nhiều — kết luận B không áp dụng cho GPU.
-- KV RAM ở bảng C là số tính, không phải RSS đo được.
+- KV RAM ở bảng C là số **tính** từ `planner._estimate_kv_cache_gb`, không phải RSS
+  đo được — chưa có phép đo RSS nào trong báo cáo này chứng minh con số đó.
+- Bảng E chỉ đo nhánh fallback của planner (path `.gguf` → meta trống), không đo
+  nhánh per-model. Xem ghi chú ở mục E.
