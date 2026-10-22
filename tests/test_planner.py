@@ -224,6 +224,24 @@ def test_kv_estimate_prefers_real_head_counts():
     assert _estimate_kv_cache_gb(meta, 8192, "q8_0") == pytest.approx(0.5)
 
 
+def test_kv_estimate_charges_only_kv_layers_on_hybrid():
+    # LFM2.5-8B-A1B: 24 blocks, but only 6 carry attention (8 KV heads each,
+    # head_dim 64) — the other 18 keep a conv state. This is the number that
+    # set the offload: 0.1875 GB prices 14 layers on a 4 GB card, the old
+    # dense/32-head reading of the same model reserved 3.00 GB and stopped at 10.
+    meta = {
+        "n_layers": 24,
+        "kv_layers": 6,
+        "n_heads": 32,
+        "n_kv_heads": 8,
+        "head_dim": 64,
+        "embedding_length": 2048,
+    }
+    expected = 2 * 6 * 8 * 64 * 65536 * 0.5 / _GIB  # q4_0 = 0.5 byte/elem
+    assert _estimate_kv_cache_gb(meta, 65536, "q4_0") == pytest.approx(expected)
+    assert _estimate_kv_cache_gb(meta, 65536, "q4_0") == pytest.approx(0.1875)
+
+
 def test_kv_estimate_scales_with_cache_dtype():
     meta = {"n_layers": 32, "n_kv_heads": 8, "head_dim": 128}
     q8 = _estimate_kv_cache_gb(meta, 8192, "q8_0")
@@ -334,3 +352,103 @@ def test_cpu_plan_requires_flash_attention_only_for_quantized_kv():
 
     for kv in ("q8_0", "q4_0", "q4_1", "q5_0", "q5_1", "iq4_nl"):
         assert plan(meta, _hw(), kv_cache=kv).flash_attn is True
+
+
+# --- MoE placement -----------------------------------------------------------
+
+# LFM2.5-8B-A1B Q4_K_M, measured on the reference GTX 1650 (4 GB, 3.64 GB free)
+# with ctx 65536 and q4_0 KV. Routed experts are 93% of the file; layers 0 and
+# 1 have none. The last 12 expert layers are 2441 MiB, the last 13 are 2659,
+# and --n-cpu-moe 12 used 3496 MiB, which is the measured fit.
+_LFM_MOE_LAYER_MIB = [
+    0,
+    0,
+    217.9,
+    189.0,
+    189.0,
+    217.9,
+    189.0,
+    189.0,
+    217.9,
+    189.0,
+    189.0,
+    217.9,
+    189.0,
+    189.0,
+    217.9,
+    189.0,
+    189.0,
+    217.9,
+    189.0,
+    189.0,
+    217.9,
+    217.9,
+    217.9,
+    217.9,
+]
+_LFM_MOE_LAYER_BYTES = [int(value * 1024**2) for value in _LFM_MOE_LAYER_MIB]
+_LFM_MOE_META = {
+    "n_layers": 24,
+    "n_heads": 32,
+    "n_kv_heads": 8,
+    "head_dim": 64,
+    "kv_layers": 6,
+    "context_length": 128000,
+    "size_bytes": 5_155_564_768,
+    "expert_bytes": sum(_LFM_MOE_LAYER_BYTES),
+    "expert_layer_bytes": _LFM_MOE_LAYER_BYTES,
+    "expert_layers": 22,
+}
+
+
+def test_moe_plan_fits_last_expert_layers_and_keeps_classic_split():
+    hw = _hw(gpu_name="GTX 1650", vram_total_gb=4.0, vram_free_gb=3.64)
+    p = plan(_LFM_MOE_META, hw, ctx=65536, kv_cache="q4_0")
+
+    assert p.requires_server is True
+    assert p.moe_cpu_layers == 12
+    assert p.n_ubatch == 896
+    # The in-process fallback must still get the classic 14-layer split, not
+    # the 24 layers the server uses.
+    assert p.gpu_layers == 14
+    assert p.note.startswith("MoE:")
+
+
+def test_moe_plan_honours_explicit_ubatch():
+    hw = _hw(gpu_name="GTX 1650", vram_total_gb=4.0, vram_free_gb=3.64)
+    p = plan(_LFM_MOE_META, hw, ctx=65536, kv_cache="q4_0", n_ubatch=512)
+
+    assert p.moe_cpu_layers == 12
+    assert p.n_ubatch == 512
+
+
+def test_moe_plan_needs_per_layer_expert_sizes():
+    meta = dict(_LFM_MOE_META)
+    meta.pop("expert_layer_bytes")
+
+    p = plan(meta, _hw(gpu_name="GTX 1650", vram_total_gb=4.0, vram_free_gb=3.64))
+
+    assert p.moe_cpu_layers == -1
+    assert p.requires_server is False
+
+
+def test_moe_plan_falls_back_when_non_expert_weights_do_not_fit():
+    # 4 GB of non-expert weights on a 1.2 GB free card: the expert budget is
+    # negative. The planner must keep the classic split instead of crashing or
+    # emitting an impossible -ncmoe value.
+    per_layer = 4 * _GIB // 24
+    meta = {
+        "n_layers": 24,
+        "size_bytes": 8 * _GIB,
+        "expert_bytes": per_layer * 24,
+        "expert_layer_bytes": [per_layer] * 24,
+        "expert_layers": 24,
+    }
+    hw = _hw(gpu_name="GTX 1650", vram_total_gb=4.0, vram_free_gb=1.2)
+
+    p = plan(meta, hw, ctx=8192, kv_cache="q4_0")
+
+    assert p.gpu_layers > 0
+    assert p.moe_cpu_layers == -1
+    assert p.requires_server is False
+

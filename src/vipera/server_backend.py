@@ -69,6 +69,50 @@ def _supports_load_mode(binary: str) -> bool:
     return "--load-mode" in f"{probe.stdout}{probe.stderr}"
 
 
+def supports_n_cpu_moe(binary: str) -> bool:
+    """Whether this llama-server knows `-ncmoe` / `--n-cpu-moe`.
+
+    A build without the flag exits after allocating the model, so the planner
+    must know before choosing the server backend. Some builds print the short
+    form, others only the long one; accept either.
+    """
+    try:
+        probe = subprocess.run([binary, "--help"], capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.SubprocessError):
+        return False
+    help_text = f"{probe.stdout}{probe.stderr}"
+    return "-ncmoe" in help_text or "--n-cpu-moe" in help_text
+
+
+def supports_spec_type(binary: str) -> bool:
+    """Whether this llama-server knows `--spec-type` (the n-gram drafters).
+
+    Older builds have neither the flag nor the n-gram drafters, and passing an
+    unknown option kills the child, so the flag is only added after a probe.
+    """
+    try:
+        probe = subprocess.run([binary, "--help"], capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return "--spec-type" in f"{probe.stdout}{probe.stderr}"
+
+
+def _supports_fit(binary: str) -> bool:
+    """Whether this llama-server knows `-fit` / `--fit`.
+
+    Recent builds default `--fit on`, which adjusts unset arguments to leave
+    `--fit-target` MiB free (1024 by default). That would override the
+    planner's ngl/ncmoe placement, so Vipera turns it off — but only on builds
+    that understand the flag.
+    """
+    try:
+        probe = subprocess.run([binary, "--help"], capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.SubprocessError):
+        return False
+    help_text = f"{probe.stdout}{probe.stderr}"
+    return "-fit" in help_text or "--fit" in help_text
+
+
 def server_command(
     binary: str,
     model_path: str,
@@ -76,14 +120,35 @@ def server_command(
     port: int,
     *,
     load_mode_supported: bool | None = None,
+    fit_supported: bool | None = None,
+    spec_type: str | None = None,
+    spec_type_supported: bool | None = None,
 ) -> list[str]:
     """Translate a Plan into llama-server flags.
 
     `--jinja` is required for tool calling and for models whose chat template
     is not one of the hard-coded ones; it is harmless for plain chat.
 
-    `load_mode_supported` skips the `--help` probe; `None` probes the binary.
+    `load_mode_supported`, `fit_supported` and `spec_type_supported` skip the
+    `--help` probes; `None` probes the binary.
+
+    `spec_type` is llama-server's own speculative decoding. Measured on the
+    reference 4 GB card (Hermes-4-14B Q3_K_M, 17/40 layers): `ngram-map-k`
+    decodes 8.54 t/s against 6.23 t/s with it off (+37%) when the prompt is a
+    file the model then rewrites, and 6.33 against 6.40 (-1%, i.e. noise) on
+    fresh prose — the n-gram drafter only pays where the output repeats the
+    input, and costs a hash lookup where it does not.
     """
+    # A MoE plan keeps every layer on the GPU for its dense tensors and moves
+    # only routed experts with -ncmoe. That means -ngl is the full stack, not
+    # the classic gpu_layers value (which exists for the in-process fallback).
+    gpu_layers = (
+        plan.n_layers if plan.moe_cpu_layers >= 0 and plan.n_layers > 0 else plan.gpu_layers
+    )
+    # -ub is the prefill lever (measured: 896 was the best all-round point on
+    # the reference 4 GB card); -b must be at least as large as -ub.
+    ubatch = plan.n_ubatch or min(plan.n_batch, 512)
+    batch = max(plan.n_batch, ubatch)
     command = [
         binary,
         "-m",
@@ -95,17 +160,31 @@ def server_command(
         "-c",
         str(plan.context),
         "-ngl",
-        str(plan.gpu_layers),
+        str(gpu_layers),
         "-t",
         str(plan.cpu_threads),
         "-b",
-        str(plan.n_batch),
+        str(batch),
         "-ub",
-        str(min(plan.n_batch, 512)),
+        str(ubatch),
         "-fa",
         "on" if plan.flash_attn else "off",
         "--jinja",
     ]
+    if fit_supported is None:
+        fit_supported = _supports_fit(binary)
+    if fit_supported:
+        # The planner owns placement; auto-fit would shrink it to leave 1 GiB
+        # free and silently invalidate both the banner and the A/B numbers.
+        command.extend(["-fit", "off"])
+    if plan.moe_cpu_layers >= 0:
+        command.extend(["-ncmoe", str(plan.moe_cpu_layers)])
+    if spec_type and spec_type != "none":
+        supported = (
+            supports_spec_type(binary) if spec_type_supported is None else spec_type_supported
+        )
+        if supported:
+            command.extend(["--spec-type", spec_type])
     if plan.kv_cache != "f16":
         command.extend(["-ctk", plan.kv_cache, "-ctv", plan.kv_cache])
     if plan.use_mlock:
@@ -139,6 +218,12 @@ class ServerEngine:
                 "the Python binding does not ship one."
             ) from exc
 
+        # Probe once per engine: the load ladder may spawn the child several
+        # times, and each extra --help run is wasted startup time.
+        self._fit_supported = _supports_fit(self._binary)
+        self._spec_type = config.load_config().get("spec_type", "none")
+        self._spec_type_supported = supports_spec_type(self._binary)
+
         # Same staged fallback as the in-process engine: walk the offload down
         # before giving up the placement entirely, because CPU-only is the
         # slowest outcome and a one-layer-too-optimistic plan pays a few
@@ -167,7 +252,15 @@ class ServerEngine:
     def _start(self, plan: Plan) -> None:
         port = _free_port()
         log_path = config.LOGS_DIR / f"llama-server-{port}.log"
-        command = server_command(self._binary, self._model_path, plan, port)
+        command = server_command(
+            self._binary,
+            self._model_path,
+            plan,
+            port,
+            fit_supported=self._fit_supported,
+            spec_type=self._spec_type,
+            spec_type_supported=self._spec_type_supported,
+        )
         # The handle is handed to Popen and must outlive this function.
         handle = open(log_path, "wb")  # noqa: SIM115
         try:
@@ -235,6 +328,8 @@ class ServerEngine:
                 plan,
                 gpu_layers=0,
                 offload_kqv=False,
+                moe_cpu_layers=-1,
+                n_ubatch=0,
                 note="CPU ONLY (llama-server ignored --gpu-layers)",
             )
         return plan

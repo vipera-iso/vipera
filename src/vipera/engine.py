@@ -131,19 +131,43 @@ def with_gpu_layers(plan: Plan, layers: int) -> Plan:
 def load_attempts(plan: Plan) -> list[tuple[Plan, str]]:
     """Candidate plans for loading, most offload first, ending CPU-only."""
     attempts: list[tuple[Plan, str]] = [(plan, "planned split")]
-    hybrid_total = (
-        plan.note.split("/", 1)[1].split()[0] if plan.note.startswith("Hybrid: ") else None
-    )
-    for layers in layer_ladder(plan.gpu_layers)[1:]:
-        label = f"GPU, {layers}/{hybrid_total} layers" if hybrid_total else f"GPU, {layers}"
-        attempts.append((with_gpu_layers(plan, layers), label))
+    if plan.requires_server and plan.n_layers > 0:
+        # The server ladder moves one expert layer at a time to the CPU, which
+        # frees roughly 190-220 MB on the reference model. The last rung keeps
+        # every expert on the CPU instead of failing the load entirely.
+        rungs = (plan.moe_cpu_layers + 1, plan.moe_cpu_layers + 2, plan.n_layers)
+        for cpu_layers in dict.fromkeys(rungs):
+            if cpu_layers <= plan.moe_cpu_layers or cpu_layers > plan.n_layers:
+                continue
+            gpu_experts = plan.n_layers - cpu_layers
+            attempts.append(
+                (
+                    replace(
+                        plan,
+                        moe_cpu_layers=cpu_layers,
+                        note=f"MoE: {gpu_experts}/{plan.n_layers} expert layers on GPU",
+                    ),
+                    f"MoE, {gpu_experts}/{plan.n_layers} expert layers",
+                )
+            )
+    else:
+        hybrid_total = (
+            plan.note.split("/", 1)[1].split()[0] if plan.note.startswith("Hybrid: ") else None
+        )
+        for layers in layer_ladder(plan.gpu_layers)[1:]:
+            label = f"GPU, {layers}/{hybrid_total} layers" if hybrid_total else f"GPU, {layers}"
+            attempts.append((with_gpu_layers(plan, layers), label))
 
     # CPU stages: keep the caller's context and KV type first, then reduce.
+    # Clearing the MoE fields matters: -ncmoe with -ngl 0 is not a valid
+    # CPU-only plan.
     cpu_plan = replace(
         plan,
         gpu_layers=0,
         offload_kqv=False,
         n_batch=min(plan.n_batch, 128),
+        moe_cpu_layers=-1,
+        n_ubatch=0,
     )
     reduced_plan = replace(cpu_plan, context=min(plan.context, 2048))
     safe_plan = replace(reduced_plan, kv_cache="f16", flash_attn=False)
@@ -153,8 +177,49 @@ def load_attempts(plan: Plan) -> list[tuple[Plan, str]]:
     return attempts
 
 
+def resolve_backend(plan: Plan, backend: str) -> tuple[str, Plan]:
+    """Return a backend that can actually execute ``plan``.
+
+    llama-cpp-python has no ``n_cpu_moe`` argument, so a MoE plan is silently
+    ignored by the in-process engine (and its classic ``gpu_layers`` split is
+    the only safe fallback). If a llama-server with ``-ncmoe`` is available,
+    switch to it; otherwise clear the MoE fields so the banner and bench report
+    what is really running.
+    """
+    if backend == "server" or not plan.requires_server:
+        return backend, plan
+
+    try:
+        from vipera.optimizer import OptimizerError, find_llama_tool
+        from vipera.server_backend import supports_n_cpu_moe
+
+        binary = find_llama_tool("server")
+        supported = supports_n_cpu_moe(binary)
+    except (OptimizerError, OSError):
+        binary = None
+        supported = False
+
+    if supported:
+        gpu_experts = plan.n_layers - plan.moe_cpu_layers
+        print(
+            "[i] MoE plan: using llama-server for expert placement "
+            f"({gpu_experts}/{plan.n_layers} expert layers on GPU, "
+            f"ubatch {plan.n_ubatch})."
+        )
+        return "server", plan
+
+    where = f"{binary} has no -ncmoe" if binary else "llama-server was not found"
+    print(
+        f"[!] Warning: {where}; the MoE plan cannot run in-process and is "
+        "falling back to the classic layer split. Install a newer llama-server "
+        "to use expert offload."
+    )
+    return "inprocess", replace(plan, moe_cpu_layers=-1, n_ubatch=0)
+
+
 def create_engine(plan: Plan, model_path: str, backend: str = "inprocess") -> ChatEngine:
     """Build the engine selected by the ``backend`` config key."""
+    backend, plan = resolve_backend(plan, backend)
     if backend == "server":
         from vipera.server_backend import ServerEngine
 

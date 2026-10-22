@@ -131,9 +131,13 @@ def run(
         raise typer.Exit(1)
 
     backend = cfg.get("backend", "inprocess")
+    # The in-process engine cannot do speculative decoding (llama-cpp-python's
+    # prompt-lookup draft measured -29%), so the setting only exists here as
+    # context for reading the numbers: the server backend applies it itself.
+    spec = cfg.get("spec_type", "none") if backend == "server" else "off"
     console.print(
         f"\n[{C_ACCENT}]▸ Benchmarking model:[/] [{C_TEXT}]{model}[/]"
-        f"  [{C_DIM}](backend: {backend})[/]"
+        f"  [{C_DIM}](backend: {backend}, spec: {spec})[/]"
     )
     console.print(
         f"[{C_DIM}]  (Hardware: {hw.cpu_cores} cores, "
@@ -157,12 +161,14 @@ def run(
             ctx=c,
             kv_cache=cfg.get("kv_cache", "q8_0"),
             n_batch=cfg.get("n_batch", 512),
+            n_ubatch=cfg.get("n_ubatch", 0),
         )
 
         engine = None
         try:
+            display_layers = p.n_layers if p.requires_server else p.gpu_layers
             with console.status(
-                f"[{C_ACCENT}] Loading model with ctx={c} (GPU: {p.gpu_layers} layers)…"
+                f"[{C_ACCENT}] Loading model with ctx={c} (GPU: {display_layers} layers)…"
             ):
                 try:
                     engine = create_engine(p, m["path"], backend)
@@ -188,7 +194,7 @@ def run(
 
             t.add_row(
                 str(c),
-                f"{engine.plan.gpu_layers}/{layers_total}",
+                f"{engine.plan.n_layers if engine.plan.requires_server else engine.plan.gpu_layers}/{layers_total}",
                 str(result["prompt_tok"]),
                 f"{result['ttft_ms']:.0f} ms",
                 f"{result['prompt_tps']:.1f}",

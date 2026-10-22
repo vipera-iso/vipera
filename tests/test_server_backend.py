@@ -104,6 +104,112 @@ def test_server_command_maps_the_plan_to_flags():
     assert "-lm" not in command
 
 
+def test_server_command_emits_moe_flags_and_uses_full_ngl():
+    command = sb.server_command(
+        "/bin/llama-server",
+        "/m.gguf",
+        _plan(gpu_layers=14, n_layers=24, moe_cpu_layers=12, n_batch=512, n_ubatch=896),
+        1,
+    )
+
+    # A MoE plan keeps all 24 layers for dense tensors and moves the first 12
+    # layers' routed experts to the CPU.
+    assert command[command.index("-ngl") + 1] == "24"
+    assert command[command.index("-ncmoe") + 1] == "12"
+    # -ub is the prefill lever and -b must be at least as large.
+    assert command[command.index("-ub") + 1] == "896"
+    assert command[command.index("-b") + 1] == "896"
+
+
+def test_server_command_omits_ncmoe_for_dense_plans():
+    command = sb.server_command("/bin/llama-server", "/m.gguf", _plan(), 1)
+    assert "-ncmoe" not in command
+
+
+def test_server_command_passes_spec_type_when_supported():
+    # Measured +37% decode on a copy-heavy prompt, -1% on fresh prose; the flag
+    # is only safe on builds that list it in --help.
+    command = sb.server_command(
+        "/bin/llama-server",
+        "/m.gguf",
+        _plan(),
+        1,
+        spec_type="ngram-map-k",
+        spec_type_supported=True,
+    )
+
+    assert command[command.index("--spec-type") + 1] == "ngram-map-k"
+
+
+def test_server_command_skips_spec_type_when_unset_unsupported_or_none():
+    for kwargs in (
+        {"spec_type": None, "spec_type_supported": True},
+        {"spec_type": "ngram-map-k", "spec_type_supported": False},
+        {"spec_type": "none", "spec_type_supported": True},
+    ):
+        command = sb.server_command("/bin/llama-server", "/m.gguf", _plan(), 1, **kwargs)
+        assert "--spec-type" not in command
+
+
+def test_supports_spec_type_reads_the_binary_help(monkeypatch):
+    class _Result:
+        def __init__(self, text):
+            self.stdout = text
+            self.stderr = ""
+
+    monkeypatch.setattr(
+        sb.subprocess,
+        "run",
+        lambda *a, **kw: _Result("--spec-type none,ngram-simple,ngram-map-k"),
+    )
+    assert sb.supports_spec_type("/bin/llama-server") is True
+
+    monkeypatch.setattr(sb.subprocess, "run", lambda *a, **kw: _Result("no such option here"))
+    assert sb.supports_spec_type("/bin/llama-server") is False
+
+    def _boom(*a, **kw):
+        raise OSError("no such file")
+
+    monkeypatch.setattr(sb.subprocess, "run", _boom)
+    assert sb.supports_spec_type("/bin/llama-server") is False
+
+
+def test_server_command_disables_auto_fit_when_supported():
+    command = sb.server_command("/bin/llama-server", "/m.gguf", _plan(), 1, fit_supported=True)
+    assert command[command.index("-fit") + 1] == "off"
+
+    command = sb.server_command("/bin/llama-server", "/m.gguf", _plan(), 1, fit_supported=False)
+    assert "-fit" not in command
+
+
+def test_supports_n_cpu_moe_reads_the_binary_help(monkeypatch):
+    class _Result:
+        def __init__(self, text):
+            self.stdout = text
+            self.stderr = ""
+
+    monkeypatch.setattr(
+        sb.subprocess,
+        "run",
+        lambda *a, **kw: _Result("  -ncmoe, --n-cpu-moe N  keep experts on CPU"),
+    )
+    assert sb.supports_n_cpu_moe("/bin/llama-server") is True
+
+    monkeypatch.setattr(
+        sb.subprocess, "run", lambda *a, **kw: _Result("  --n-cpu-moe N  keep experts")
+    )
+    assert sb.supports_n_cpu_moe("/bin/llama-server") is True
+
+    monkeypatch.setattr(sb.subprocess, "run", lambda *a, **kw: _Result("no such option here"))
+    assert sb.supports_n_cpu_moe("/bin/llama-server") is False
+
+    def _boom(*a, **kw):
+        raise OSError("no such file")
+
+    monkeypatch.setattr(sb.subprocess, "run", _boom)
+    assert sb.supports_n_cpu_moe("/bin/llama-server") is False
+
+
 def test_server_command_maps_mlock_when_the_binary_supports_load_mode():
     command = sb.server_command(
         "/bin/llama-server", "/m.gguf", _plan(use_mlock=True), 1, load_mode_supported=True

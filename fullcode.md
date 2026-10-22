@@ -286,9 +286,13 @@ def run(
         raise typer.Exit(1)
 
     backend = cfg.get("backend", "inprocess")
+    # The in-process engine cannot do speculative decoding (llama-cpp-python's
+    # prompt-lookup draft measured -29%), so the setting only exists here as
+    # context for reading the numbers: the server backend applies it itself.
+    spec = cfg.get("spec_type", "none") if backend == "server" else "off"
     console.print(
         f"\n[{C_ACCENT}]▸ Benchmarking model:[/] [{C_TEXT}]{model}[/]"
-        f"  [{C_DIM}](backend: {backend})[/]"
+        f"  [{C_DIM}](backend: {backend}, spec: {spec})[/]"
     )
     console.print(
         f"[{C_DIM}]  (Hardware: {hw.cpu_cores} cores, "
@@ -312,12 +316,14 @@ def run(
             ctx=c,
             kv_cache=cfg.get("kv_cache", "q8_0"),
             n_batch=cfg.get("n_batch", 512),
+            n_ubatch=cfg.get("n_ubatch", 0),
         )
 
         engine = None
         try:
+            display_layers = p.n_layers if p.requires_server else p.gpu_layers
             with console.status(
-                f"[{C_ACCENT}] Loading model with ctx={c} (GPU: {p.gpu_layers} layers)…"
+                f"[{C_ACCENT}] Loading model with ctx={c} (GPU: {display_layers} layers)…"
             ):
                 try:
                     engine = create_engine(p, m["path"], backend)
@@ -343,7 +349,7 @@ def run(
 
             t.add_row(
                 str(c),
-                f"{engine.plan.gpu_layers}/{layers_total}",
+                f"{engine.plan.n_layers if engine.plan.requires_server else engine.plan.gpu_layers}/{layers_total}",
                 str(result["prompt_tok"]),
                 f"{result['ttft_ms']:.0f} ms",
                 f"{result['prompt_tps']:.1f}",
@@ -408,6 +414,7 @@ def _build(model: str) -> ChatEngine:
         ctx=cfg.get("ctx", 8192),
         kv_cache=cfg.get("kv_cache", "q8_0"),
         n_batch=cfg.get("n_batch", 512),
+        n_ubatch=cfg.get("n_ubatch", 0),
     )
     with console.status(f"[{C_ACCENT}] Loading {model}…"):
         return create_engine(p, m["path"], cfg.get("backend", "inprocess"))
@@ -563,6 +570,10 @@ def _read_meta(path: Path, name: str | None = None) -> dict:
         "hybrid_attention": False,
         "kv_layers": 0,
         "recurrent_layers": 0,
+        "expert_bytes": 0,
+        "shared_expert_bytes": 0,
+        "expert_layer_bytes": [],
+        "expert_layers": 0,
     }
 
     m = _QUANT_RE.search(name or path.name)
@@ -592,6 +603,12 @@ def _read_meta(path: Path, name: str | None = None) -> dict:
         meta["hybrid_attention"] = bool(am.get("hybrid_attention"))
         meta["kv_layers"] = int(am.get("kv_layers") or 0)
         meta["recurrent_layers"] = int(am.get("recurrent_layers") or 0)
+        meta["expert_bytes"] = int(am.get("expert_bytes") or 0)
+        meta["shared_expert_bytes"] = int(am.get("shared_expert_bytes") or 0)
+        meta["expert_layers"] = int(am.get("expert_layers") or 0)
+        layer_experts = am.get("expert_layer_bytes") or []
+        if isinstance(layer_experts, list):
+            meta["expert_layer_bytes"] = [int(value) for value in layer_experts]
         # Size of one repeating transformer layer, excluding the non-repeating
         # tensors (token_embd, output.weight, ...). The planner budgets VRAM per
         # layer from this; size_bytes/n_layers would charge those tensors to
@@ -1254,7 +1271,7 @@ from rich.panel import Panel
 from rich.text import Text
 
 from vipera.config import VIPERA_HOME, load_config
-from vipera.engine import ChatEngine, create_engine
+from vipera.engine import ChatEngine, create_engine, resolve_backend
 from vipera.hardware import detect
 from vipera.planner import plan
 from vipera.registry import get_model
@@ -1401,10 +1418,15 @@ def start(
             ctx=ctx,
             kv_cache=cfg.get("kv_cache", "q8_0"),
             n_batch=cfg.get("n_batch", 512),
+            n_ubatch=cfg.get("n_ubatch", 0),
         )
     except ValueError as e:
         console.print(f"[{C_RED}] ✗ {e}[/]")
         raise typer.Exit(1) from e
+
+    # Decide before the banner: an MoE plan either upgrades to llama-server or
+    # falls back to the classic split, and the panel must show the truth.
+    backend, p = resolve_backend(p, backend)
 
     n_layers_total = int(m["meta"].get("n_layers") or 0) or max(p.gpu_layers, 1)
     quant = m["meta"].get("quant") or "?"
@@ -1416,10 +1438,18 @@ def start(
     content.append(f"    └─ backend {backend}\n\n", style=C_DIM)
 
     content.append("  ▸ ALLOCATING VRAM\n", style=C_ACCENT)
+    offload_layers = p.n_layers if p.requires_server else p.gpu_layers
     content.append(
-        "    ├─ layer offload " + "·" * 28 + f" {p.gpu_layers}/{n_layers_total}\n",
+        "    ├─ layer offload " + "·" * 28 + f" {offload_layers}/{n_layers_total}\n",
         style=C_TEXT,
     )
+    if p.requires_server:
+        gpu_experts = p.n_layers - p.moe_cpu_layers
+        ubatch = f" · ub {p.n_ubatch}" if p.n_ubatch else ""
+        content.append(
+            "    ├─ moe experts " + "·" * 27 + f" {gpu_experts}/{p.n_layers} layers{ubatch}\n",
+            style=C_TEXT,
+        )
     kv_suffix = f" · {p.kv_cache_gb:.2f} GB" if p.kv_cache_gb > 0 else ""
     content.append(
         f"    ├─ kv cache ({p.kv_cache}) " + "·" * 24 + f" [ OK ]{kv_suffix}\n",
@@ -1783,10 +1813,18 @@ DEFAULT_CONFIG = {
     "kv_cache": "q8_0",
     "flash_attn": True,
     "n_batch": 512,
+    # 0 = auto (server backend uses 896 for MoE plans, min(n_batch, 512)
+    # otherwise). -ub is the prefill lever; -b is raised to at least this.
+    "n_ubatch": 0,
     "temperature": 0.7,
     "max_tokens": 2048,
     "top_p": 0.95,
     "repeat_penalty": 1.1,
+    # llama-server's own still-free speed lever: --spec-type ngram-*. The
+    # in-process engine has no equivalent (llama-cpp-python's prompt-lookup
+    # draft measured -29% decode on this box), so the value only applies to the
+    # `server` backend. "none" turns it off.
+    "spec_type": "ngram-map-k",
 }
 
 _KV_CACHE_TYPES = {"f32", "bf16", "f16", "q4_0", "q4_1", "q5_0", "q5_1", "q8_0", "iq4_nl"}
@@ -1803,6 +1841,7 @@ _TYPE_MAP = {
     "port": int,
     "ctx": int,
     "n_batch": int,
+    "n_ubatch": int,
     "max_tokens": int,
     "temperature": float,
     "top_p": float,
@@ -2037,19 +2076,43 @@ def with_gpu_layers(plan: Plan, layers: int) -> Plan:
 def load_attempts(plan: Plan) -> list[tuple[Plan, str]]:
     """Candidate plans for loading, most offload first, ending CPU-only."""
     attempts: list[tuple[Plan, str]] = [(plan, "planned split")]
-    hybrid_total = (
-        plan.note.split("/", 1)[1].split()[0] if plan.note.startswith("Hybrid: ") else None
-    )
-    for layers in layer_ladder(plan.gpu_layers)[1:]:
-        label = f"GPU, {layers}/{hybrid_total} layers" if hybrid_total else f"GPU, {layers}"
-        attempts.append((with_gpu_layers(plan, layers), label))
+    if plan.requires_server and plan.n_layers > 0:
+        # The server ladder moves one expert layer at a time to the CPU, which
+        # frees roughly 190-220 MB on the reference model. The last rung keeps
+        # every expert on the CPU instead of failing the load entirely.
+        rungs = (plan.moe_cpu_layers + 1, plan.moe_cpu_layers + 2, plan.n_layers)
+        for cpu_layers in dict.fromkeys(rungs):
+            if cpu_layers <= plan.moe_cpu_layers or cpu_layers > plan.n_layers:
+                continue
+            gpu_experts = plan.n_layers - cpu_layers
+            attempts.append(
+                (
+                    replace(
+                        plan,
+                        moe_cpu_layers=cpu_layers,
+                        note=f"MoE: {gpu_experts}/{plan.n_layers} expert layers on GPU",
+                    ),
+                    f"MoE, {gpu_experts}/{plan.n_layers} expert layers",
+                )
+            )
+    else:
+        hybrid_total = (
+            plan.note.split("/", 1)[1].split()[0] if plan.note.startswith("Hybrid: ") else None
+        )
+        for layers in layer_ladder(plan.gpu_layers)[1:]:
+            label = f"GPU, {layers}/{hybrid_total} layers" if hybrid_total else f"GPU, {layers}"
+            attempts.append((with_gpu_layers(plan, layers), label))
 
     # CPU stages: keep the caller's context and KV type first, then reduce.
+    # Clearing the MoE fields matters: -ncmoe with -ngl 0 is not a valid
+    # CPU-only plan.
     cpu_plan = replace(
         plan,
         gpu_layers=0,
         offload_kqv=False,
         n_batch=min(plan.n_batch, 128),
+        moe_cpu_layers=-1,
+        n_ubatch=0,
     )
     reduced_plan = replace(cpu_plan, context=min(plan.context, 2048))
     safe_plan = replace(reduced_plan, kv_cache="f16", flash_attn=False)
@@ -2059,8 +2122,49 @@ def load_attempts(plan: Plan) -> list[tuple[Plan, str]]:
     return attempts
 
 
+def resolve_backend(plan: Plan, backend: str) -> tuple[str, Plan]:
+    """Return a backend that can actually execute ``plan``.
+
+    llama-cpp-python has no ``n_cpu_moe`` argument, so a MoE plan is silently
+    ignored by the in-process engine (and its classic ``gpu_layers`` split is
+    the only safe fallback). If a llama-server with ``-ncmoe`` is available,
+    switch to it; otherwise clear the MoE fields so the banner and bench report
+    what is really running.
+    """
+    if backend == "server" or not plan.requires_server:
+        return backend, plan
+
+    try:
+        from vipera.optimizer import OptimizerError, find_llama_tool
+        from vipera.server_backend import supports_n_cpu_moe
+
+        binary = find_llama_tool("server")
+        supported = supports_n_cpu_moe(binary)
+    except (OptimizerError, OSError):
+        binary = None
+        supported = False
+
+    if supported:
+        gpu_experts = plan.n_layers - plan.moe_cpu_layers
+        print(
+            "[i] MoE plan: using llama-server for expert placement "
+            f"({gpu_experts}/{plan.n_layers} expert layers on GPU, "
+            f"ubatch {plan.n_ubatch})."
+        )
+        return "server", plan
+
+    where = f"{binary} has no -ncmoe" if binary else "llama-server was not found"
+    print(
+        f"[!] Warning: {where}; the MoE plan cannot run in-process and is "
+        "falling back to the classic layer split. Install a newer llama-server "
+        "to use expert offload."
+    )
+    return "inprocess", replace(plan, moe_cpu_layers=-1, n_ubatch=0)
+
+
 def create_engine(plan: Plan, model_path: str, backend: str = "inprocess") -> ChatEngine:
     """Build the engine selected by the ``backend`` config key."""
+    backend, plan = resolve_backend(plan, backend)
     if backend == "server":
         from vipera.server_backend import ServerEngine
 
@@ -2265,7 +2369,11 @@ _QUANT_RANK = {
 # Mamba, RWKV) mix both; the planner only needs the split.
 # `attn_k` also covers MLA/KDA-adjacent names: attn_k_b, attn_kv_a_mqa, attn_k_norm.
 _KV_TENSOR_MARKERS = ("attn_k", "attn_v", "attn_qkv")
-_RECURRENT_TENSOR_MARKERS = ("ssm_", "linear_attn", "kda", "mamba", "conv1d")
+# `conv` also covers `conv1d` and the `shortconv.*` stacks LFM2.5 uses for its
+# non-KV layers: those layers hold no K/V tensors at all, so without the marker
+# they are skipped, `hybrid` never trips and the planner prices all layers as
+# KV-bearing.
+_RECURRENT_TENSOR_MARKERS = ("ssm_", "linear_attn", "kda", "mamba", "conv")
 
 _CRITICAL_TENSORS = ("ffn_down", "attn_v")
 _CRITICAL_THRESHOLD = "Q4_K"
@@ -2403,13 +2511,22 @@ def _as_int(value: Any) -> int | None:
 
 
 def _field_first_int(fields: dict, key: str) -> int | None:
-    """Return the first element of an int-array field, or None.
+    """Return the representative element of an int-array field, or None.
 
     Per-layer arrays such as attention.head_count are uniform for the
-    architectures we support, so the first entry describes the model.
+    architectures we support, so the first entry describes the model. Hybrid
+    stacks are the exception: lfm2moe writes ``attention.head_count_kv`` as
+    0 on the conv-only layers and 8 on the attention ones, and taking the first
+    entry reports zero KV heads, which makes the planner fall back to the full
+    head count and price every layer as 4x its real KV. First non-zero entry
+    wins; an all-zero array stays zero so the caller can fall back as before.
     """
     value = _field_value(fields, key)
     if isinstance(value, (list, tuple)):
+        for item in value:
+            parsed = _as_int(item)
+            if parsed:
+                return parsed
         return _as_int(value[0]) if value else None
     return _as_int(value)
 
@@ -2474,6 +2591,13 @@ def analyze_gguf(path: str) -> dict[str, Any]:
     quant_counts: dict[str, int] = defaultdict(int)
     warnings: list[dict[str, str]] = []
     max_layer = -1
+    # MoE weights split in two classes because llama.cpp's --n-cpu-moe only
+    # moves routed experts (*_exps). Shared experts (*_shexp) and the router
+    # (ffn_gate_inp) run for every token and must stay on the GPU with the
+    # attention block, so folding them into expert_bytes would over-offload.
+    expert_bytes = 0
+    shared_expert_bytes = 0
+    expert_layer_bytes: dict[int, int] = defaultdict(int)
 
     for tensor in getattr(reader, "tensors", []):
         tensor_name = str(tensor.name)
@@ -2499,6 +2623,12 @@ def analyze_gguf(path: str) -> dict[str, Any]:
         category_sizes[category] += size
         quant_sizes[quant] += size
         quant_counts[quant] += 1
+        if "_exps" in tensor_name:
+            expert_bytes += size
+            if layer is not None:
+                expert_layer_bytes[layer] += size
+        elif "_shexp" in tensor_name:
+            shared_expert_bytes += size
         if layer is not None:
             max_layer = max(max_layer, layer)
 
@@ -2522,6 +2652,8 @@ def analyze_gguf(path: str) -> dict[str, Any]:
 
     if n_layers is None:
         n_layers = max_layer + 1
+
+    expert_layer_sizes = [int(expert_layer_bytes.get(i, 0)) for i in range(n_layers)]
 
     attention = _attention_profile([t["name"] for t in tensor_map], n_layers)
 
@@ -2548,6 +2680,13 @@ def analyze_gguf(path: str) -> dict[str, Any]:
             "dominant_quant": dominant_quant,
             "tensor_count": len(tensor_map),
             "file_size_bytes": os.path.getsize(model_path),
+            # Routed experts are the only tensors --n-cpu-moe can move. The
+            # per-layer list uses the model's layer indices so the planner can
+            # fit the exact bytes of the layers that stay on the GPU.
+            "expert_bytes": expert_bytes,
+            "shared_expert_bytes": shared_expert_bytes,
+            "expert_layer_bytes": expert_layer_sizes,
+            "expert_layers": sum(1 for value in expert_layer_sizes if value > 0),
             **attention,
         },
         "tensor_map": tensor_map,
@@ -2955,6 +3094,20 @@ class Plan:
     # 0.0 / 0 mean "not estimated" (hand-built Plans in tests stay valid).
     kv_cache_gb: float = 0.0
     kv_layers: int = 0
+    # --n-cpu-moe value: the first N layers keep their routed experts on the
+    # CPU. -1 means "no MoE plan"; 0 means every expert stays on the GPU.
+    # The classic gpu_layers field stays untouched so an in-process fallback
+    # still loads a split that fits.
+    moe_cpu_layers: int = -1
+    # llama.cpp ubatch for the server backend. 0 keeps the historical
+    # min(n_batch, 512) behaviour.
+    n_ubatch: int = 0
+    n_layers: int = 0
+
+    @property
+    def requires_server(self) -> bool:
+        """True when the plan needs llama-server flags the binding lacks."""
+        return self.moe_cpu_layers >= 0
 
 
 _VALID_PROFILES = ("auto", "cpu", "gpu", "lowmem")
@@ -3048,6 +3201,84 @@ def _estimate_kv_cache_gb(meta: dict, ctx: int, kv_cache: str) -> float:
     return (ctx / 8192.0) * 1.5 * (bytes_per_elem / 2.0)
 
 
+# --- MoE placement ----------------------------------------------------------
+#
+# `--n-cpu-moe N` keeps the routed experts of the FIRST N layers on the CPU and
+# leaves the rest on the GPU. This is the opposite direction from the Hugging
+# Face guide, and was verified on a GTX 1650 by reading VRAM at different N:
+# N=24 (all experts CPU) used 972 MiB, N=20 used 1844 MiB (the four experts
+# layers 20-23, not 0-3), and N=12 used 3412 MiB (layers 12-23). The help text
+# in llama.cpp is right; the guide is not.
+#
+# The budget separates the non-expert weights (attention, embeddings, shared
+# experts, router) from the routed experts, because only the latter move with
+# --n-cpu-moe. A shared expert or router must stay on the GPU with attention.
+#
+# Runtime overhead (CUDA context + compute buffers) measured on the reference
+# box with LFM2.5-8B-A1B Q4_K_M, ctx 65536, q4_0 KV:
+#   ub 512  -> 321 MiB
+#   ub 896  -> 405 MiB
+#   ub 1024 -> 432 MiB
+# A linear fit (0.20 GB + 0.00022 GB per ubatch token) reproduces all three.
+_MOE_UBATCH = 896
+_MOE_OVERHEAD_BASE_GB = 0.20
+_MOE_OVERHEAD_PER_UB_GB = 0.00022
+# Driver/fragmentation headroom. The 0.3 GB dense reserve already covers the
+# compute buffer, so charging it again here would drop one expert layer.
+_MOE_VRAM_RESERVE_GB = 0.15
+
+
+def _moe_cpu_layers(
+    meta: dict,
+    hw: HardwareInfo,
+    n_layers: int,
+    ctx: int,
+    kv_cache: str,
+    n_ubatch: int,
+) -> int | None:
+    """Pick the --n-cpu-moe value that fits, or None when MoE placement is unsafe.
+
+    Greedily keeps the suffix of layers whose routed experts fit in VRAM.
+    Because --n-cpu-moe counts from layer 0, the suffix is exactly what stays on
+    the GPU. Requires the per-layer expert sizes from ``analyze_gguf``; without
+    them the estimate would be a guess that can offload one layer too many and
+    fail context creation.
+    """
+    expert_bytes = int(meta.get("expert_bytes") or 0)
+    layer_experts = meta.get("expert_layer_bytes")
+    if expert_bytes <= 0 or not isinstance(layer_experts, list) or len(layer_experts) != n_layers:
+        return None
+    sizes = [int(value or 0) for value in layer_experts]
+    if sum(sizes) <= 0:
+        return None
+
+    size_bytes = int(meta.get("size_bytes") or 4_000_000_000)
+    non_expert_gb = max(0.0, (size_bytes - expert_bytes) / 1024**3)
+    kv_gb = _estimate_kv_cache_gb(meta, ctx, kv_cache)
+    overhead_gb = _MOE_OVERHEAD_BASE_GB + _MOE_OVERHEAD_PER_UB_GB * n_ubatch
+    budget_gb = (
+        hw.vram_free_gb - _MOE_VRAM_RESERVE_GB - non_expert_gb - kv_gb - overhead_gb
+    )
+    if budget_gb <= 0:
+        return None
+
+    budget_bytes = int(budget_gb * 1024**3)
+    used = 0
+    gpu_layers = 0
+    for size in reversed(sizes):
+        if used + size > budget_bytes:
+            break
+        used += size
+        gpu_layers += 1
+
+    # At least one layer that actually carries routed experts must stay on the
+    # GPU. "All experts on CPU" measured 40.8 t/s vs 56.7 for the MoE split on
+    # the reference card, so the classic split is the better fallback.
+    if not any(size > 0 for size in sizes[n_layers - gpu_layers :]):
+        return None
+    return n_layers - gpu_layers
+
+
 def plan(
     meta: dict,
     hw: HardwareInfo,
@@ -3055,6 +3286,7 @@ def plan(
     ctx: int = 8192,
     kv_cache: str = "q8_0",
     n_batch: int = 512,
+    n_ubatch: int = 0,
 ) -> Plan:
     if profile not in _VALID_PROFILES:
         raise ValueError(f"unknown profile '{profile}' (valid: {', '.join(_VALID_PROFILES)})")
@@ -3129,6 +3361,21 @@ def plan(
     if want_gpu and safe_vram > 0 and layer_total_gb > 0:
         gpu_layers = min(n_layers, int(safe_vram / layer_total_gb))
 
+    # The classic split offloads whole layers, so a layer's experts travel with
+    # it. MoE models do better by keeping every attention block on the GPU and
+    # moving only routed experts, which is a flag the Python binding does not
+    # expose. Only propose that plan when at least one classic layer fits (the
+    # in-process fallback needs a valid gpu_layers) and at least one expert
+    # layer fits.
+    moe_cpu_layers = -1
+    moe_ubatch = 0
+    if want_gpu and gpu_layers > 0:
+        candidate_ubatch = n_ubatch if n_ubatch > 0 else _MOE_UBATCH
+        candidate = _moe_cpu_layers(meta, hw, n_layers, ctx, kv_cache, candidate_ubatch)
+        if candidate is not None:
+            moe_cpu_layers = candidate
+            moe_ubatch = candidate_ubatch
+
     if gpu_layers == 0:
         offload_kqv = False
         n_batch = min(n_batch, 128)
@@ -3153,13 +3400,23 @@ def plan(
         offload_kqv = True
         n_batch = min(n_batch, 512)
         note = "Full GPU" if gpu_layers == n_layers else f"Hybrid: {gpu_layers}/{n_layers} layers"
+        if moe_cpu_layers >= 0:
+            note = f"MoE: {n_layers - moe_cpu_layers}/{n_layers} expert layers on GPU"
 
     # mlock pins weights in RAM, so it is only safe when the machine can hold
     # the host-side weights AND the host-side KV cache with headroom. Checking
     # against model size alone ignores a 5 GB KV cache (Q8_0 at 64K), which
     # turns an mlock into an OOM on a 15 GB / no-swap box.
-    cpu_weights_gb = max(0.0, model_size_gb - layer_gb * gpu_layers)
-    cpu_kv_gb = per_layer_kv_gb * max(0, kv_layers - gpu_layers)
+    if moe_cpu_layers >= 0:
+        # A MoE plan offloads every layer for its dense tensors, so all KV
+        # lives on the GPU; only the routed experts of the CPU prefix remain
+        # in system RAM.
+        layer_experts = meta.get("expert_layer_bytes") or []
+        cpu_weights_gb = sum(int(value) for value in layer_experts[:moe_cpu_layers]) / 1024**3
+        cpu_kv_gb = 0.0
+    else:
+        cpu_weights_gb = max(0.0, model_size_gb - layer_gb * gpu_layers)
+        cpu_kv_gb = per_layer_kv_gb * max(0, kv_layers - gpu_layers)
     host_headroom_gb = hw.ram_free_gb - cpu_weights_gb - cpu_kv_gb
     # 3 GB of headroom leaves room for llama.cpp compute buffers; pinning with
     # less has OOM-killed this class of machine mid-load (no swap).
@@ -3181,6 +3438,9 @@ def plan(
         ram_estimate_gb=ram_estimate_gb,
         kv_cache_gb=kv_cache_gb,
         kv_layers=kv_layers,
+        moe_cpu_layers=moe_cpu_layers,
+        n_ubatch=moe_ubatch,
+        n_layers=n_layers,
     )
 
 # registry.py
@@ -3509,6 +3769,50 @@ def _supports_load_mode(binary: str) -> bool:
     return "--load-mode" in f"{probe.stdout}{probe.stderr}"
 
 
+def supports_n_cpu_moe(binary: str) -> bool:
+    """Whether this llama-server knows `-ncmoe` / `--n-cpu-moe`.
+
+    A build without the flag exits after allocating the model, so the planner
+    must know before choosing the server backend. Some builds print the short
+    form, others only the long one; accept either.
+    """
+    try:
+        probe = subprocess.run([binary, "--help"], capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.SubprocessError):
+        return False
+    help_text = f"{probe.stdout}{probe.stderr}"
+    return "-ncmoe" in help_text or "--n-cpu-moe" in help_text
+
+
+def supports_spec_type(binary: str) -> bool:
+    """Whether this llama-server knows `--spec-type` (the n-gram drafters).
+
+    Older builds have neither the flag nor the n-gram drafters, and passing an
+    unknown option kills the child, so the flag is only added after a probe.
+    """
+    try:
+        probe = subprocess.run([binary, "--help"], capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return "--spec-type" in f"{probe.stdout}{probe.stderr}"
+
+
+def _supports_fit(binary: str) -> bool:
+    """Whether this llama-server knows `-fit` / `--fit`.
+
+    Recent builds default `--fit on`, which adjusts unset arguments to leave
+    `--fit-target` MiB free (1024 by default). That would override the
+    planner's ngl/ncmoe placement, so Vipera turns it off — but only on builds
+    that understand the flag.
+    """
+    try:
+        probe = subprocess.run([binary, "--help"], capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.SubprocessError):
+        return False
+    help_text = f"{probe.stdout}{probe.stderr}"
+    return "-fit" in help_text or "--fit" in help_text
+
+
 def server_command(
     binary: str,
     model_path: str,
@@ -3516,14 +3820,35 @@ def server_command(
     port: int,
     *,
     load_mode_supported: bool | None = None,
+    fit_supported: bool | None = None,
+    spec_type: str | None = None,
+    spec_type_supported: bool | None = None,
 ) -> list[str]:
     """Translate a Plan into llama-server flags.
 
     `--jinja` is required for tool calling and for models whose chat template
     is not one of the hard-coded ones; it is harmless for plain chat.
 
-    `load_mode_supported` skips the `--help` probe; `None` probes the binary.
+    `load_mode_supported`, `fit_supported` and `spec_type_supported` skip the
+    `--help` probes; `None` probes the binary.
+
+    `spec_type` is llama-server's own speculative decoding. Measured on the
+    reference 4 GB card (Hermes-4-14B Q3_K_M, 17/40 layers): `ngram-map-k`
+    decodes 8.54 t/s against 6.23 t/s with it off (+37%) when the prompt is a
+    file the model then rewrites, and 6.33 against 6.40 (-1%, i.e. noise) on
+    fresh prose — the n-gram drafter only pays where the output repeats the
+    input, and costs a hash lookup where it does not.
     """
+    # A MoE plan keeps every layer on the GPU for its dense tensors and moves
+    # only routed experts with -ncmoe. That means -ngl is the full stack, not
+    # the classic gpu_layers value (which exists for the in-process fallback).
+    gpu_layers = (
+        plan.n_layers if plan.moe_cpu_layers >= 0 and plan.n_layers > 0 else plan.gpu_layers
+    )
+    # -ub is the prefill lever (measured: 896 was the best all-round point on
+    # the reference 4 GB card); -b must be at least as large as -ub.
+    ubatch = plan.n_ubatch or min(plan.n_batch, 512)
+    batch = max(plan.n_batch, ubatch)
     command = [
         binary,
         "-m",
@@ -3535,17 +3860,31 @@ def server_command(
         "-c",
         str(plan.context),
         "-ngl",
-        str(plan.gpu_layers),
+        str(gpu_layers),
         "-t",
         str(plan.cpu_threads),
         "-b",
-        str(plan.n_batch),
+        str(batch),
         "-ub",
-        str(min(plan.n_batch, 512)),
+        str(ubatch),
         "-fa",
         "on" if plan.flash_attn else "off",
         "--jinja",
     ]
+    if fit_supported is None:
+        fit_supported = _supports_fit(binary)
+    if fit_supported:
+        # The planner owns placement; auto-fit would shrink it to leave 1 GiB
+        # free and silently invalidate both the banner and the A/B numbers.
+        command.extend(["-fit", "off"])
+    if plan.moe_cpu_layers >= 0:
+        command.extend(["-ncmoe", str(plan.moe_cpu_layers)])
+    if spec_type and spec_type != "none":
+        supported = (
+            supports_spec_type(binary) if spec_type_supported is None else spec_type_supported
+        )
+        if supported:
+            command.extend(["--spec-type", spec_type])
     if plan.kv_cache != "f16":
         command.extend(["-ctk", plan.kv_cache, "-ctv", plan.kv_cache])
     if plan.use_mlock:
@@ -3579,6 +3918,12 @@ class ServerEngine:
                 "the Python binding does not ship one."
             ) from exc
 
+        # Probe once per engine: the load ladder may spawn the child several
+        # times, and each extra --help run is wasted startup time.
+        self._fit_supported = _supports_fit(self._binary)
+        self._spec_type = config.load_config().get("spec_type", "none")
+        self._spec_type_supported = supports_spec_type(self._binary)
+
         # Same staged fallback as the in-process engine: walk the offload down
         # before giving up the placement entirely, because CPU-only is the
         # slowest outcome and a one-layer-too-optimistic plan pays a few
@@ -3607,7 +3952,15 @@ class ServerEngine:
     def _start(self, plan: Plan) -> None:
         port = _free_port()
         log_path = config.LOGS_DIR / f"llama-server-{port}.log"
-        command = server_command(self._binary, self._model_path, plan, port)
+        command = server_command(
+            self._binary,
+            self._model_path,
+            plan,
+            port,
+            fit_supported=self._fit_supported,
+            spec_type=self._spec_type,
+            spec_type_supported=self._spec_type_supported,
+        )
         # The handle is handed to Popen and must outlive this function.
         handle = open(log_path, "wb")  # noqa: SIM115
         try:
@@ -3675,6 +4028,8 @@ class ServerEngine:
                 plan,
                 gpu_layers=0,
                 offload_kqv=False,
+                moe_cpu_layers=-1,
+                n_ubatch=0,
                 note="CPU ONLY (llama-server ignored --gpu-layers)",
             )
         return plan
@@ -4080,7 +4435,6 @@ def pick_model(title: str = "SELECT A MODEL") -> str:
         raise typer.Exit(1)
 
     return installed[choice - 1]["name"]
-
 ```
 
 ---

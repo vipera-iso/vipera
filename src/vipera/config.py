@@ -21,10 +21,18 @@ DEFAULT_CONFIG = {
     "kv_cache": "q8_0",
     "flash_attn": True,
     "n_batch": 512,
+    # 0 = auto (server backend uses 896 for MoE plans, min(n_batch, 512)
+    # otherwise). -ub is the prefill lever; -b is raised to at least this.
+    "n_ubatch": 0,
     "temperature": 0.7,
     "max_tokens": 2048,
     "top_p": 0.95,
     "repeat_penalty": 1.1,
+    # llama-server's own still-free speed lever: --spec-type ngram-*. The
+    # in-process engine has no equivalent (llama-cpp-python's prompt-lookup
+    # draft measured -29% decode on this box), so the value only applies to the
+    # `server` backend. "none" turns it off.
+    "spec_type": "ngram-map-k",
 }
 
 _KV_CACHE_TYPES = {"f32", "bf16", "f16", "q4_0", "q4_1", "q5_0", "q5_1", "q8_0", "iq4_nl"}
@@ -41,6 +49,7 @@ _TYPE_MAP = {
     "port": int,
     "ctx": int,
     "n_batch": int,
+    "n_ubatch": int,
     "max_tokens": int,
     "temperature": float,
     "top_p": float,

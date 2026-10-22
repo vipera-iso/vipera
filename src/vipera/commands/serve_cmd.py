@@ -10,7 +10,7 @@ from rich.panel import Panel
 from rich.text import Text
 
 from vipera.config import VIPERA_HOME, load_config
-from vipera.engine import ChatEngine, create_engine
+from vipera.engine import ChatEngine, create_engine, resolve_backend
 from vipera.hardware import detect
 from vipera.planner import plan
 from vipera.registry import get_model
@@ -157,10 +157,15 @@ def start(
             ctx=ctx,
             kv_cache=cfg.get("kv_cache", "q8_0"),
             n_batch=cfg.get("n_batch", 512),
+            n_ubatch=cfg.get("n_ubatch", 0),
         )
     except ValueError as e:
         console.print(f"[{C_RED}] ✗ {e}[/]")
         raise typer.Exit(1) from e
+
+    # Decide before the banner: an MoE plan either upgrades to llama-server or
+    # falls back to the classic split, and the panel must show the truth.
+    backend, p = resolve_backend(p, backend)
 
     n_layers_total = int(m["meta"].get("n_layers") or 0) or max(p.gpu_layers, 1)
     quant = m["meta"].get("quant") or "?"
@@ -172,10 +177,18 @@ def start(
     content.append(f"    └─ backend {backend}\n\n", style=C_DIM)
 
     content.append("  ▸ ALLOCATING VRAM\n", style=C_ACCENT)
+    offload_layers = p.n_layers if p.requires_server else p.gpu_layers
     content.append(
-        "    ├─ layer offload " + "·" * 28 + f" {p.gpu_layers}/{n_layers_total}\n",
+        "    ├─ layer offload " + "·" * 28 + f" {offload_layers}/{n_layers_total}\n",
         style=C_TEXT,
     )
+    if p.requires_server:
+        gpu_experts = p.n_layers - p.moe_cpu_layers
+        ubatch = f" · ub {p.n_ubatch}" if p.n_ubatch else ""
+        content.append(
+            "    ├─ moe experts " + "·" * 27 + f" {gpu_experts}/{p.n_layers} layers{ubatch}\n",
+            style=C_TEXT,
+        )
     kv_suffix = f" · {p.kv_cache_gb:.2f} GB" if p.kv_cache_gb > 0 else ""
     content.append(
         f"    ├─ kv cache ({p.kv_cache}) " + "·" * 24 + f" [ OK ]{kv_suffix}\n",

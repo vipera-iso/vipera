@@ -4,7 +4,7 @@ from typing import ClassVar
 
 import pytest
 
-from vipera.engine import Engine, create_engine
+from vipera.engine import Engine, create_engine, load_attempts, resolve_backend
 from vipera.planner import Plan
 
 
@@ -230,6 +230,15 @@ def test_create_engine_defaults_to_the_in_process_engine(fake_llama):
     assert engine.plan.context == 65536
 
 
+def test_engine_does_not_ask_llama_for_a_draft_model(fake_llama):
+    # Prompt-lookup drafting inside llama-cpp-python measured -29% decode
+    # (4.27 t/s against 6.05), so the in-process engine leaves it alone: the
+    # server backend passes llama.cpp's own --spec-type instead.
+    Engine(_plan(), "model.gguf")
+
+    assert "draft_model" not in fake_llama.calls[0]
+
+
 def test_create_engine_selects_the_server_backend(monkeypatch):
     seen = {}
 
@@ -244,3 +253,47 @@ def test_create_engine_selects_the_server_backend(monkeypatch):
 
     assert isinstance(engine, StubServer)
     assert seen["path"] == "model.gguf"
+
+
+def test_resolve_backend_upgrades_an_moe_plan(monkeypatch, capsys):
+    monkeypatch.setattr("vipera.optimizer.find_llama_tool", lambda *a, **kw: "/bin/llama-server")
+    monkeypatch.setattr("vipera.server_backend.supports_n_cpu_moe", lambda binary: True)
+
+    backend, plan = resolve_backend(
+        _plan(moe_cpu_layers=12, n_layers=24, n_ubatch=896), "inprocess"
+    )
+
+    assert backend == "server"
+    assert plan.requires_server is True
+    assert plan.moe_cpu_layers == 12
+    assert "expert placement" in capsys.readouterr().out
+
+
+def test_resolve_backend_falls_back_when_ncmoe_is_missing(monkeypatch, capsys):
+    monkeypatch.setattr("vipera.optimizer.find_llama_tool", lambda *a, **kw: "/bin/llama-server")
+    monkeypatch.setattr("vipera.server_backend.supports_n_cpu_moe", lambda binary: False)
+
+    backend, plan = resolve_backend(
+        _plan(gpu_layers=14, moe_cpu_layers=12, n_layers=24, n_ubatch=896), "inprocess"
+    )
+
+    assert backend == "inprocess"
+    # The fallback must not keep claiming the MoE optimization.
+    assert plan.requires_server is False
+    assert plan.moe_cpu_layers == -1
+    assert plan.n_ubatch == 0
+    assert plan.gpu_layers == 14
+    assert "falling back" in capsys.readouterr().out
+
+
+def test_moe_load_attempts_step_experts_down_then_go_cpu():
+    plan = _plan(gpu_layers=14, moe_cpu_layers=12, n_layers=24, n_ubatch=896, note="MoE")
+
+    attempts = load_attempts(plan)
+    moe = [candidate for candidate, _ in attempts if candidate.requires_server]
+    cpu = [candidate for candidate, _ in attempts if candidate.gpu_layers == 0]
+
+    assert [candidate.moe_cpu_layers for candidate in moe] == [12, 13, 14, 24]
+    assert cpu
+    assert all(candidate.moe_cpu_layers == -1 for candidate in cpu)
+    assert all(candidate.n_ubatch == 0 for candidate in cpu)

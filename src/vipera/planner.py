@@ -22,6 +22,20 @@ class Plan:
     # 0.0 / 0 mean "not estimated" (hand-built Plans in tests stay valid).
     kv_cache_gb: float = 0.0
     kv_layers: int = 0
+    # --n-cpu-moe value: the first N layers keep their routed experts on the
+    # CPU. -1 means "no MoE plan"; 0 means every expert stays on the GPU.
+    # The classic gpu_layers field stays untouched so an in-process fallback
+    # still loads a split that fits.
+    moe_cpu_layers: int = -1
+    # llama.cpp ubatch for the server backend. 0 keeps the historical
+    # min(n_batch, 512) behaviour.
+    n_ubatch: int = 0
+    n_layers: int = 0
+
+    @property
+    def requires_server(self) -> bool:
+        """True when the plan needs llama-server flags the binding lacks."""
+        return self.moe_cpu_layers >= 0
 
 
 _VALID_PROFILES = ("auto", "cpu", "gpu", "lowmem")
@@ -115,6 +129,84 @@ def _estimate_kv_cache_gb(meta: dict, ctx: int, kv_cache: str) -> float:
     return (ctx / 8192.0) * 1.5 * (bytes_per_elem / 2.0)
 
 
+# --- MoE placement ----------------------------------------------------------
+#
+# `--n-cpu-moe N` keeps the routed experts of the FIRST N layers on the CPU and
+# leaves the rest on the GPU. This is the opposite direction from the Hugging
+# Face guide, and was verified on a GTX 1650 by reading VRAM at different N:
+# N=24 (all experts CPU) used 972 MiB, N=20 used 1844 MiB (the four experts
+# layers 20-23, not 0-3), and N=12 used 3412 MiB (layers 12-23). The help text
+# in llama.cpp is right; the guide is not.
+#
+# The budget separates the non-expert weights (attention, embeddings, shared
+# experts, router) from the routed experts, because only the latter move with
+# --n-cpu-moe. A shared expert or router must stay on the GPU with attention.
+#
+# Runtime overhead (CUDA context + compute buffers) measured on the reference
+# box with LFM2.5-8B-A1B Q4_K_M, ctx 65536, q4_0 KV:
+#   ub 512  -> 321 MiB
+#   ub 896  -> 405 MiB
+#   ub 1024 -> 432 MiB
+# A linear fit (0.20 GB + 0.00022 GB per ubatch token) reproduces all three.
+_MOE_UBATCH = 896
+_MOE_OVERHEAD_BASE_GB = 0.20
+_MOE_OVERHEAD_PER_UB_GB = 0.00022
+# Driver/fragmentation headroom. The 0.3 GB dense reserve already covers the
+# compute buffer, so charging it again here would drop one expert layer.
+_MOE_VRAM_RESERVE_GB = 0.15
+
+
+def _moe_cpu_layers(
+    meta: dict,
+    hw: HardwareInfo,
+    n_layers: int,
+    ctx: int,
+    kv_cache: str,
+    n_ubatch: int,
+) -> int | None:
+    """Pick the --n-cpu-moe value that fits, or None when MoE placement is unsafe.
+
+    Greedily keeps the suffix of layers whose routed experts fit in VRAM.
+    Because --n-cpu-moe counts from layer 0, the suffix is exactly what stays on
+    the GPU. Requires the per-layer expert sizes from ``analyze_gguf``; without
+    them the estimate would be a guess that can offload one layer too many and
+    fail context creation.
+    """
+    expert_bytes = int(meta.get("expert_bytes") or 0)
+    layer_experts = meta.get("expert_layer_bytes")
+    if expert_bytes <= 0 or not isinstance(layer_experts, list) or len(layer_experts) != n_layers:
+        return None
+    sizes = [int(value or 0) for value in layer_experts]
+    if sum(sizes) <= 0:
+        return None
+
+    size_bytes = int(meta.get("size_bytes") or 4_000_000_000)
+    non_expert_gb = max(0.0, (size_bytes - expert_bytes) / 1024**3)
+    kv_gb = _estimate_kv_cache_gb(meta, ctx, kv_cache)
+    overhead_gb = _MOE_OVERHEAD_BASE_GB + _MOE_OVERHEAD_PER_UB_GB * n_ubatch
+    budget_gb = (
+        hw.vram_free_gb - _MOE_VRAM_RESERVE_GB - non_expert_gb - kv_gb - overhead_gb
+    )
+    if budget_gb <= 0:
+        return None
+
+    budget_bytes = int(budget_gb * 1024**3)
+    used = 0
+    gpu_layers = 0
+    for size in reversed(sizes):
+        if used + size > budget_bytes:
+            break
+        used += size
+        gpu_layers += 1
+
+    # At least one layer that actually carries routed experts must stay on the
+    # GPU. "All experts on CPU" measured 40.8 t/s vs 56.7 for the MoE split on
+    # the reference card, so the classic split is the better fallback.
+    if not any(size > 0 for size in sizes[n_layers - gpu_layers :]):
+        return None
+    return n_layers - gpu_layers
+
+
 def plan(
     meta: dict,
     hw: HardwareInfo,
@@ -122,6 +214,7 @@ def plan(
     ctx: int = 8192,
     kv_cache: str = "q8_0",
     n_batch: int = 512,
+    n_ubatch: int = 0,
 ) -> Plan:
     if profile not in _VALID_PROFILES:
         raise ValueError(f"unknown profile '{profile}' (valid: {', '.join(_VALID_PROFILES)})")
@@ -196,6 +289,21 @@ def plan(
     if want_gpu and safe_vram > 0 and layer_total_gb > 0:
         gpu_layers = min(n_layers, int(safe_vram / layer_total_gb))
 
+    # The classic split offloads whole layers, so a layer's experts travel with
+    # it. MoE models do better by keeping every attention block on the GPU and
+    # moving only routed experts, which is a flag the Python binding does not
+    # expose. Only propose that plan when at least one classic layer fits (the
+    # in-process fallback needs a valid gpu_layers) and at least one expert
+    # layer fits.
+    moe_cpu_layers = -1
+    moe_ubatch = 0
+    if want_gpu and gpu_layers > 0:
+        candidate_ubatch = n_ubatch if n_ubatch > 0 else _MOE_UBATCH
+        candidate = _moe_cpu_layers(meta, hw, n_layers, ctx, kv_cache, candidate_ubatch)
+        if candidate is not None:
+            moe_cpu_layers = candidate
+            moe_ubatch = candidate_ubatch
+
     if gpu_layers == 0:
         offload_kqv = False
         n_batch = min(n_batch, 128)
@@ -220,13 +328,23 @@ def plan(
         offload_kqv = True
         n_batch = min(n_batch, 512)
         note = "Full GPU" if gpu_layers == n_layers else f"Hybrid: {gpu_layers}/{n_layers} layers"
+        if moe_cpu_layers >= 0:
+            note = f"MoE: {n_layers - moe_cpu_layers}/{n_layers} expert layers on GPU"
 
     # mlock pins weights in RAM, so it is only safe when the machine can hold
     # the host-side weights AND the host-side KV cache with headroom. Checking
     # against model size alone ignores a 5 GB KV cache (Q8_0 at 64K), which
     # turns an mlock into an OOM on a 15 GB / no-swap box.
-    cpu_weights_gb = max(0.0, model_size_gb - layer_gb * gpu_layers)
-    cpu_kv_gb = per_layer_kv_gb * max(0, kv_layers - gpu_layers)
+    if moe_cpu_layers >= 0:
+        # A MoE plan offloads every layer for its dense tensors, so all KV
+        # lives on the GPU; only the routed experts of the CPU prefix remain
+        # in system RAM.
+        layer_experts = meta.get("expert_layer_bytes") or []
+        cpu_weights_gb = sum(int(value) for value in layer_experts[:moe_cpu_layers]) / 1024**3
+        cpu_kv_gb = 0.0
+    else:
+        cpu_weights_gb = max(0.0, model_size_gb - layer_gb * gpu_layers)
+        cpu_kv_gb = per_layer_kv_gb * max(0, kv_layers - gpu_layers)
     host_headroom_gb = hw.ram_free_gb - cpu_weights_gb - cpu_kv_gb
     # 3 GB of headroom leaves room for llama.cpp compute buffers; pinning with
     # less has OOM-killed this class of machine mid-load (no swap).
@@ -248,4 +366,7 @@ def plan(
         ram_estimate_gb=ram_estimate_gb,
         kv_cache_gb=kv_cache_gb,
         kv_layers=kv_layers,
+        moe_cpu_layers=moe_cpu_layers,
+        n_ubatch=moe_ubatch,
+        n_layers=n_layers,
     )

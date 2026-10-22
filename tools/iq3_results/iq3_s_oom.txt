@@ -1,0 +1,5 @@
+# IQ3_S sweep crashed mid-ladder (CUDA OOM in the compute pool).
+# Reproduce: measure_knobs on hermes-iq3s.gguf with the default layer sweep.
+#3  0x00007f066f64a8d3 in ggml_abort () from /home/user/.venvs/vipera/lib/python3.12/site-packages/llama_cpp/lib/libggml-base.so.0
+#4  0x00007f06312cd987 in ggml_cuda_error(char const*, char const*, char const*, int, char const*) () from /home/user/.venvs/vipera/lib/python3.12/site-packages/llama_cpp/lib/libggml-cuda.so.0
+#5  0x00007f06312e6778 in ggml_cuda_pool_vmm::alloc(unsigned long, unsigned long*) () from /home/user/.venvs/vipera/lib/python3.12/site-packages/llama_cpp/lib/libggml-cuda.so.0

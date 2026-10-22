@@ -42,6 +42,7 @@ def _build(model: str) -> ChatEngine:
         ctx=cfg.get("ctx", 8192),
         kv_cache=cfg.get("kv_cache", "q8_0"),
         n_batch=cfg.get("n_batch", 512),
+        n_ubatch=cfg.get("n_ubatch", 0),
     )
     with console.status(f"[{C_ACCENT}] Loading {model}…"):
         return create_engine(p, m["path"], cfg.get("backend", "inprocess"))

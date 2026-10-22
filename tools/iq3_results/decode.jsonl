@@ -1,0 +1,3 @@
+{"label": "q3km-imatrix", "over": {}, "ngl": 17, "spec": 0, "vram_mib": 3668, "threads": 4, "median_tps": 6.229, "runs_tps": [6.372, 6.202, 6.229], "median_ttft_s": 3.098}
+{"label": "hermes-iq3xxs", "over": {}, "ngl": 21, "spec": 0, "vram_mib": 3644, "threads": 4, "median_tps": 3.533, "runs_tps": [3.533, 3.58, 3.473], "median_ttft_s": 2.276}
+{"label": "iq3xxs-17", "over": {"ngl": 17}, "ngl": 17, "spec": 0, "vram_mib": 3092, "threads": 4, "median_tps": 3.434, "runs_tps": [3.451, 3.417], "median_ttft_s": 2.901}

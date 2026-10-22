@@ -97,7 +97,11 @@ _QUANT_RANK = {
 # Mamba, RWKV) mix both; the planner only needs the split.
 # `attn_k` also covers MLA/KDA-adjacent names: attn_k_b, attn_kv_a_mqa, attn_k_norm.
 _KV_TENSOR_MARKERS = ("attn_k", "attn_v", "attn_qkv")
-_RECURRENT_TENSOR_MARKERS = ("ssm_", "linear_attn", "kda", "mamba", "conv1d")
+# `conv` also covers `conv1d` and the `shortconv.*` stacks LFM2.5 uses for its
+# non-KV layers: those layers hold no K/V tensors at all, so without the marker
+# they are skipped, `hybrid` never trips and the planner prices all layers as
+# KV-bearing.
+_RECURRENT_TENSOR_MARKERS = ("ssm_", "linear_attn", "kda", "mamba", "conv")
 
 _CRITICAL_TENSORS = ("ffn_down", "attn_v")
 _CRITICAL_THRESHOLD = "Q4_K"
@@ -235,13 +239,22 @@ def _as_int(value: Any) -> int | None:
 
 
 def _field_first_int(fields: dict, key: str) -> int | None:
-    """Return the first element of an int-array field, or None.
+    """Return the representative element of an int-array field, or None.
 
     Per-layer arrays such as attention.head_count are uniform for the
-    architectures we support, so the first entry describes the model.
+    architectures we support, so the first entry describes the model. Hybrid
+    stacks are the exception: lfm2moe writes ``attention.head_count_kv`` as
+    0 on the conv-only layers and 8 on the attention ones, and taking the first
+    entry reports zero KV heads, which makes the planner fall back to the full
+    head count and price every layer as 4x its real KV. First non-zero entry
+    wins; an all-zero array stays zero so the caller can fall back as before.
     """
     value = _field_value(fields, key)
     if isinstance(value, (list, tuple)):
+        for item in value:
+            parsed = _as_int(item)
+            if parsed:
+                return parsed
         return _as_int(value[0]) if value else None
     return _as_int(value)
 
@@ -306,6 +319,13 @@ def analyze_gguf(path: str) -> dict[str, Any]:
     quant_counts: dict[str, int] = defaultdict(int)
     warnings: list[dict[str, str]] = []
     max_layer = -1
+    # MoE weights split in two classes because llama.cpp's --n-cpu-moe only
+    # moves routed experts (*_exps). Shared experts (*_shexp) and the router
+    # (ffn_gate_inp) run for every token and must stay on the GPU with the
+    # attention block, so folding them into expert_bytes would over-offload.
+    expert_bytes = 0
+    shared_expert_bytes = 0
+    expert_layer_bytes: dict[int, int] = defaultdict(int)
 
     for tensor in getattr(reader, "tensors", []):
         tensor_name = str(tensor.name)
@@ -331,6 +351,12 @@ def analyze_gguf(path: str) -> dict[str, Any]:
         category_sizes[category] += size
         quant_sizes[quant] += size
         quant_counts[quant] += 1
+        if "_exps" in tensor_name:
+            expert_bytes += size
+            if layer is not None:
+                expert_layer_bytes[layer] += size
+        elif "_shexp" in tensor_name:
+            shared_expert_bytes += size
         if layer is not None:
             max_layer = max(max_layer, layer)
 
@@ -354,6 +380,8 @@ def analyze_gguf(path: str) -> dict[str, Any]:
 
     if n_layers is None:
         n_layers = max_layer + 1
+
+    expert_layer_sizes = [int(expert_layer_bytes.get(i, 0)) for i in range(n_layers)]
 
     attention = _attention_profile([t["name"] for t in tensor_map], n_layers)
 
@@ -380,6 +408,13 @@ def analyze_gguf(path: str) -> dict[str, Any]:
             "dominant_quant": dominant_quant,
             "tensor_count": len(tensor_map),
             "file_size_bytes": os.path.getsize(model_path),
+            # Routed experts are the only tensors --n-cpu-moe can move. The
+            # per-layer list uses the model's layer indices so the planner can
+            # fit the exact bytes of the layers that stay on the GPU.
+            "expert_bytes": expert_bytes,
+            "shared_expert_bytes": shared_expert_bytes,
+            "expert_layer_bytes": expert_layer_sizes,
+            "expert_layers": sum(1 for value in expert_layer_sizes if value > 0),
             **attention,
         },
         "tensor_map": tensor_map,

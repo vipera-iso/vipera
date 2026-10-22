@@ -64,6 +64,10 @@ def _read_meta(path: Path, name: str | None = None) -> dict:
         "hybrid_attention": False,
         "kv_layers": 0,
         "recurrent_layers": 0,
+        "expert_bytes": 0,
+        "shared_expert_bytes": 0,
+        "expert_layer_bytes": [],
+        "expert_layers": 0,
     }
 
     m = _QUANT_RE.search(name or path.name)
@@ -93,6 +97,12 @@ def _read_meta(path: Path, name: str | None = None) -> dict:
         meta["hybrid_attention"] = bool(am.get("hybrid_attention"))
         meta["kv_layers"] = int(am.get("kv_layers") or 0)
         meta["recurrent_layers"] = int(am.get("recurrent_layers") or 0)
+        meta["expert_bytes"] = int(am.get("expert_bytes") or 0)
+        meta["shared_expert_bytes"] = int(am.get("shared_expert_bytes") or 0)
+        meta["expert_layers"] = int(am.get("expert_layers") or 0)
+        layer_experts = am.get("expert_layer_bytes") or []
+        if isinstance(layer_experts, list):
+            meta["expert_layer_bytes"] = [int(value) for value in layer_experts]
         # Size of one repeating transformer layer, excluding the non-repeating
         # tensors (token_embd, output.weight, ...). The planner budgets VRAM per
         # layer from this; size_bytes/n_layers would charge those tensors to

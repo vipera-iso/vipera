@@ -85,6 +85,44 @@ def test_analyze_metadata_and_layout(tmp_path, mocked_gguf):
     assert by_name["output_norm.weight"]["category"] == "norm"
 
 
+class FakeMoEReader(FakeReader):
+    """Two layers with a router, a shared expert, and routed experts."""
+
+    def __init__(self):
+        super().__init__()
+        self.tensors = [
+            FakeTensor("blk.0.ffn_gate_inp.weight", 1, [128, 4], 20, 512),
+            FakeTensor("blk.0.ffn_gate_shexp.weight", 1, [128, 256], 60, 32_768),
+            FakeTensor("blk.0.ffn_gate_exps.weight", 1, [128, 256, 4], 300, 131_072),
+            FakeTensor("blk.1.ffn_down_exps.weight", 1, [128, 256, 4], 400, 131_072),
+            FakeTensor("blk.1.ffn_up_shexp.weight", 1, [128, 256], 70, 32_768),
+        ]
+
+
+@pytest.fixture
+def mocked_moe_gguf(monkeypatch):
+    reader = FakeMoEReader()
+    module = types.ModuleType("gguf")
+    module.GGUFReader = lambda path: reader
+    monkeypatch.setitem(sys.modules, "gguf", module)
+    return reader
+
+
+def test_analyze_separates_routed_and_shared_experts(tmp_path, mocked_moe_gguf):
+    path = tmp_path / "moe.gguf"
+    path.write_bytes(b"")
+
+    result = analyze_gguf(str(path))
+
+    meta = result["metadata"]
+    # Router (ffn_gate_inp) and shared experts (ffn_*_shexp) are always active
+    # and must not be counted as offloadable routed experts.
+    assert meta["expert_bytes"] == 700
+    assert meta["shared_expert_bytes"] == 130
+    assert meta["expert_layers"] == 2
+    assert meta["expert_layer_bytes"] == [300, 400]
+
+
 def test_analyze_warns_about_low_quant_critical_tensors(tmp_path, mocked_gguf):
     path = tmp_path / "model-q2_k.gguf"
     path.write_bytes(b"")
@@ -139,6 +177,29 @@ def test_read_meta_records_size_of_one_repeating_layer(monkeypatch, tmp_path):
 
     assert meta["layer_bytes"] == 200  # mean of layers 0 and 1
     assert meta["n_layers"] == 2
+
+
+def test_read_meta_copies_expert_layout(monkeypatch, tmp_path):
+    analysis = {
+        "metadata": {
+            "n_layers": 2,
+            "expert_bytes": 700,
+            "shared_expert_bytes": 130,
+            "expert_layers": 2,
+            "expert_layer_bytes": [300, 400],
+        },
+        "layer_distribution": {0: 100, 1: 100},
+    }
+    path = tmp_path / "moe.gguf"
+    path.write_bytes(b"x")
+    monkeypatch.setattr("vipera.gguf_analyzer.analyze_gguf", lambda p: analysis)
+
+    meta = model_cmd._read_meta(path)
+
+    assert meta["expert_bytes"] == 700
+    assert meta["shared_expert_bytes"] == 130
+    assert meta["expert_layers"] == 2
+    assert meta["expert_layer_bytes"] == [300, 400]
 
 
 def test_read_meta_without_layer_info_leaves_layer_bytes_zero(monkeypatch, tmp_path):
@@ -299,8 +360,13 @@ def test_filename_quant_detects_nvfp4_and_tq2_0(tmp_path):
 # --- hybrid attention detection (KDA/BCSA/Mamba style) -----------------------
 
 
-def _write_gguf_multi(path, tensors, *, block_count):
-    """Write a GGUF v3 file holding several tensors: [(name, type_id, dims)]."""
+def _write_gguf_multi(path, tensors, *, block_count, extra_kv=()):
+    """Write a GGUF v3 file holding several tensors: [(name, type_id, dims)].
+
+    ``extra_kv`` appends pre-packed metadata entries (key + type tag + value)
+    after the two fixed ones, for fields the analyzer reads from GGUF metadata
+    instead of from tensor names.
+    """
     GGML_QUANT_SIZES, GGMLQuantizationType = _gguf_quant_table()
 
     infos, payload = b"", b""
@@ -316,8 +382,10 @@ def _write_gguf_multi(path, tensors, *, block_count):
 
     kv = _gguf_str("general.architecture") + struct.pack("<I", 8) + _gguf_str("llama")
     kv += _gguf_str("llama.block_count") + struct.pack("<I", 4) + struct.pack("<I", block_count)
+    for entry in extra_kv:
+        kv += entry
     header = b"GGUF" + struct.pack("<I", 3) + struct.pack("<Q", len(tensors))
-    header += struct.pack("<Q", 2)
+    header += struct.pack("<Q", 2 + len(extra_kv))
     body = header + kv + infos
     body += b"\x00" * ((-len(body)) % 32)
     path.write_bytes(body + payload)
@@ -361,6 +429,32 @@ def test_dense_model_is_not_marked_hybrid(tmp_path):
     assert meta["recurrent_layers"] == 0
 
 
+def test_conv_only_layers_mark_hybrid_attention(tmp_path):
+    # LFM2.5-style stacks: most blocks are `shortconv.*` and hold no K/V
+    # tensors at all, only a few blocks carry attention. Skipping the conv
+    # layers leaves `recurrent_layers` empty, `hybrid` never trips and the
+    # planner prices every layer as KV-bearing (3.00 GB instead of 0.19 GB).
+    tensors = [
+        ("blk.0.shortconv.conv.weight", 0, [16, 4]),
+        ("blk.0.shortconv.in_proj.weight", 0, [16, 16]),
+        ("blk.0.ffn_down.weight", 0, [16, 16]),
+        ("blk.1.shortconv.out_proj.weight", 0, [16, 16]),
+        ("blk.1.ffn_down.weight", 0, [16, 16]),
+        ("blk.2.attn_k.weight", 0, [16, 16]),
+        ("blk.2.attn_v.weight", 0, [16, 16]),
+        ("blk.2.ffn_down.weight", 0, [16, 16]),
+    ]
+    path = tmp_path / "conv-hybrid.gguf"
+    _write_gguf_multi(path, tensors, block_count=3)
+
+    meta = analyze_gguf(str(path))["metadata"]
+
+    assert meta["hybrid_attention"] is True
+    assert meta["kv_layers"] == 1
+    assert meta["recurrent_layers"] == 2
+    assert meta["n_layers"] == 3
+
+
 def test_recurrent_only_model_falls_back_to_dense_kv_budget(tmp_path):
     # No attention tensors at all: the split is not understood, so the planner
     # must keep the conservative dense estimate rather than assume zero KV.
@@ -393,3 +487,27 @@ def test_attention_profile_handles_fused_and_mla_tensor_names():
     assert profile["hybrid_attention"] is True
     assert profile["kv_layers"] == 2
     assert profile["recurrent_layers"] == 1
+
+
+def test_head_count_kv_array_skips_zero_layers(tmp_path):
+    # lfm2moe writes attention.head_count_kv per layer: 0 on the conv-only
+    # layers, 8 on the attention ones. Reading the first entry reports 0 KV
+    # heads, so the planner falls back to the full head count (32) and prices
+    # the KV cache 4x too high.
+    tensors = [
+        ("blk.0.attn_k.weight", 0, [16, 16]),
+        ("blk.0.attn_v.weight", 0, [16, 16]),
+    ]
+    head_count_kv = (
+        _gguf_str("llama.attention.head_count_kv")
+        + struct.pack("<I", 9)  # GGUF array
+        + struct.pack("<I", 5)  # element type: UINT32
+        + struct.pack("<Q", 4)  # element count
+        + struct.pack("<4I", 0, 0, 8, 0)
+    )
+    path = tmp_path / "kv-heads.gguf"
+    _write_gguf_multi(path, tensors, block_count=4, extra_kv=(head_count_kv,))
+
+    meta = analyze_gguf(str(path))["metadata"]
+
+    assert meta["n_kv_heads"] == 8

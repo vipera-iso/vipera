@@ -1,0 +1,3 @@
+{"label": "code-nospec", "over": {}, "ngl": 17, "spec": 0, "vram_mib": 3668, "threads": 4, "median_tps": 6.047, "runs_tps": [6.089, 5.833, 6.047], "median_ttft_s": 5.588}
+{"label": "code-spec2", "over": {"spec": 2}, "ngl": 17, "spec": 2, "vram_mib": 3670, "threads": 4, "median_tps": 4.268, "runs_tps": [4.317, 4.077, 4.268], "median_ttft_s": 6.048}
+{"label": "code-spec3", "over": {"spec": 3, "spec_pred": 8}, "ngl": 17, "spec": 3, "vram_mib": 3670, "threads": 4, "median_tps": 4.138, "runs_tps": [3.909, 4.138, 4.146], "median_ttft_s": 6.04}

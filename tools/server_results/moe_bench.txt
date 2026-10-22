@@ -1,0 +1,14 @@
+# llama-bench, llama.cpp b11827 (CUDA 12.8 build) + libcudart 12.9 userspace
+# LFM2.5-8B-A1B-Q4_K_M.gguf (4.79 GiB, 24 layers, 32 experts top-4)
+# GTX 1650 4 GB, 4 threads, -r 2, decode -p 0 -n 96, prefill -p 512 -n 0
+#   llama-bench -m LFM2.5-8B-A1B-Q4_K_M.gguf <flags> -t 4 -p 0 -n 96 -r 2
+
+ngl=0                      tg96  37.22 +- 0.01    pp512 177.13 +- 0.78
+ngl=16                     tg96  68.99 +- 0.08    pp512 211.34 +- 0.22
+ngl=24 ncmoe=20            tg96  52.96 +- 2.24
+ngl=24 ncmoe=16            tg96  60.27 +- 0.78
+ngl=24 ncmoe=12            tg96  69.16 +- 0.13    pp512 206.11 +- 0.53
+ngl=16 ncmoe=99            tg96  44.49 +- 0.88
+ngl=99 ot=exps=CPU         tg96  47.47 +- 0.04
+ngl=24                     fails: cudaMalloc 3680.85 MiB (OOM)
+ngl=99 ncmoe=99            fails: cudaMalloc 4908.88 MiB (OOM; -ncmoe ignored at ngl=99)

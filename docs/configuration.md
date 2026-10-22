@@ -68,6 +68,7 @@ to the defaults. Corrupt JSON does not produce an error.
 | `kv_cache` | `str` | `q8_0` | `serve start`, `chat`, `bench` | KV cache type: `f32`, `bf16`, `f16`, `q8_0`, `q5_1`, `q5_0`, `q4_1`, `q4_0`, `iq4_nl`. Honored on CPU-only plans too; flash attention is enabled only for the quantized types, which require it. |
 | `flash_attn` | `bool` | `true` | nothing currently | Planner decides flash attention from VRAM instead. |
 | `n_batch` | `int` | `512` | `serve start`, `chat`, `bench` | Prompt batch size; capped by the plan. |
+| `spec_type` | `str` | `ngram-map-k` | `serve start`, `chat`, `bench` with `backend: server` | llama-server's `--spec-type`, i.e. draft-free n-gram speculation. `none` turns it off; `ngram-simple`, `ngram-map-k`, `ngram-map-k4v`, `ngram-mod`, `ngram-cache` are the draft-free values. Measured +37% decode when the answer rewrites text from the prompt, -1% on fresh prose; ignored by `inprocess` (no equivalent exists: the Python binding's prompt lookup measured -29%). Background in [techniques](OPTIMIZE-techniques.md). |
 | `temperature` | `float` | `0.7` | nothing currently | Per-request default comes from `server.ChatRequest`. |
 | `max_tokens` | `int` | `2048` | nothing currently | Per-request default comes from `server.ChatRequest`. |
 | `top_p` | `float` | `0.95` | nothing currently | Per-request default comes from `server.ChatRequest`. |
@@ -102,7 +103,7 @@ vipera system config backend inprocess
 
 When loading, known keys are coerced:
 
-- `port`, `ctx`, `n_batch`, `max_tokens` → `int`
+- `port`, `ctx`, `n_batch`, `max_tokens`, `n_ubatch` → `int`
 - `temperature`, `top_p` → `float`
 - `flash_attn` → `bool`
 - While loading, strings `"1"`, `"true"`, `"yes"`, `"on"` (case-insensitive)

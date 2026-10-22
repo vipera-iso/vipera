@@ -42,8 +42,12 @@ _KV = {
 }
 
 MODEL = sys.argv[1] if len(sys.argv) > 1 else "NousResearch_Hermes-4-14B-Q4_K_M-2"
-CASES = json.loads(sys.argv[2]) if len(sys.argv) > 2 else [["control", {}]]
-MAX_TOKENS = 64
+_raw_cases = sys.argv[2] if len(sys.argv) > 2 else '[["control", {}]]'
+# A long prompt makes the JSON too big for argv, so allow "@/path/to.json".
+if _raw_cases.startswith("@"):
+    _raw_cases = Path(_raw_cases[1:]).read_text()
+CASES = json.loads(_raw_cases)
+MAX_TOKENS = int(os.environ.get("MAX_TOKENS", "64"))
 REPS = int(os.environ.get("REPS", "3"))
 
 
@@ -90,6 +94,16 @@ def one(over):
     kv = _KV.get(over.get("kv", p.kv_cache))
     fa = over.get("fa", p.flash_attn)
     t0 = time.perf_counter()
+    # spec>0 turns on speculative decoding by prompt lookup: the same idea as
+    # llama-server's --spec-type ngram, but the binding's draft_model hook only
+    # accepts a LlamaDraftModel callable, not a second Llama.
+    extra = {}
+    if over.get("spec"):
+        from llama_cpp.llama_speculative import LlamaPromptLookupDecoding
+
+        extra["draft_model"] = LlamaPromptLookupDecoding(
+            max_ngram_size=int(over["spec"]), num_pred_tokens=int(over.get("spec_pred", 10))
+        )
     try:
         llm = Llama(
             model_path=entry["path"],
@@ -107,6 +121,7 @@ def one(over):
             use_mlock=over.get("mlock", p.use_mlock),
             op_offload=over.get("op_offload", True),
             verbose=False,
+            **extra,
         )
     except Exception as exc:
         return {"error": f"{type(exc).__name__}: {exc}"[:160], "ngl": ngl}
@@ -134,6 +149,7 @@ def one(over):
         "planned_ngl": p.gpu_layers,
         "ngl": ngl,
         "threads": threads,
+        "spec": over.get("spec", 0),
         "kv": over.get("kv", p.kv_cache),
         "load_s": round(load_s, 2),
         "ttft_s": round(first - t0, 3),
@@ -180,6 +196,7 @@ def main():
                     "label": label,
                     "over": {k: v for k, v in over.items() if k != "prompt"},
                     "ngl": rows[-1]["ngl"],
+                    "spec": rows[-1]["spec"],
                     "vram_mib": rows[-1]["vram_load_mib"],
                     "threads": rows[-1]["threads"],
                     "median_tps": round(statistics.median(tps), 3),

@@ -79,12 +79,16 @@ work without an async inference API.
 
 ## Planner
 
-`plan(meta, hw, profile="auto", ctx=8192, kv_cache="q8_0", n_batch=512)`
+`plan(meta, hw, profile="auto", ctx=8192, kv_cache="q8_0", n_batch=512, n_ubatch=0)`
 produces:
 
 | Field | Meaning |
 |---|---|
-| `gpu_layers` | Number of transformer layers offloaded to the GPU. |
+| `gpu_layers` | Classic whole-layer split. Also the in-process fallback when an MoE plan cannot use the server backend. |
+| `moe_cpu_layers` | `--n-cpu-moe` value: routed experts of the first N layers stay on the CPU. `-1` means no MoE plan. |
+| `n_ubatch` | Server `-ub` value. `0` means `min(n_batch, 512)`; MoE plans use 896. |
+| `n_layers` | Total transformer layers, used by the server to keep every dense tensor on the GPU. |
+| `requires_server` | True when `moe_cpu_layers >= 0`; `llama-cpp-python` cannot pass `--n-cpu-moe`. |
 | `cpu_threads` | Worker threads passed to `llama.cpp` (one per physical core, minimum 1). |
 | `context` | `n_ctx`, possibly reduced on low-memory machines. |
 | `kv_cache` | KV cache type string, mapped to a `llama.cpp` enum in the engine. |
@@ -92,7 +96,7 @@ produces:
 | `n_batch` | Prompt batch size, capped by placement. |
 | `offload_kqv` | Whether the KV cache may live in VRAM. |
 | `use_mlock` | Whether to lock the model in RAM. |
-| `note` | Human-readable placement summary (`CPU ONLY`, `Full GPU`, `Hybrid: n/N layers`). |
+| `note` | Human-readable placement summary (`CPU ONLY`, `Full GPU`, `Hybrid: n/N layers`, `MoE: n/N expert layers on GPU`). |
 
 The algorithm, in order:
 
@@ -146,11 +150,30 @@ The algorithm, in order:
    card cut the offload from 14 layers to 10); KQV offload on;
    `n_batch = min(n_batch, 512)`. The note distinguishes full and hybrid
    offload.
+8. **MoE path.** When the analyzer supplied per-layer routed-expert sizes,
+   `_moe_cpu_layers()` keeps the largest suffix of expert layers that fits
+   `vram_free - 0.15 GB reserve - non-expert weights - KV - runtime overhead`.
+   The overhead is `0.20 GB + 0.00022 GB * ubatch`, fitted to measured
+   `ubatch` values. `--n-cpu-moe N` keeps the **first** N layers' experts on
+   the CPU, so the suffix is what stays on the GPU. The plan keeps
+   `gpu_layers` at the classic value for the in-process fallback; the server
+   backend uses `n_layers` for `-ngl` and adds `-ncmoe N`. On the reference
+   GTX 1650 this selects `ncmoe=12`, `-ngl 24`, `-ub 896`; the last 12 expert
+   layers (2441 MiB) fit and the last 13 (2659 MiB) do not.
+
+   Measured on that card with LFM2.5-8B-A1B-Q4_K_M, the MoE placement is a
+   **tie**, not a speed win: 69.16 t/s (prefill 206 t/s) against 68.99 t/s
+   (211 t/s) for the classic 16-layer split. The model is small enough that 16
+   layers already carry their experts to the GPU, so `-ncmoe` only moves the
+   same bytes around. It is kept because it loads where a full `-ngl` does not
+   and because it degrades one layer at a time; see
+   [techniques](../OPTIMIZE-techniques.md) §3.
 
 `profile=cpu` forces zero offload and `profile=lowmem` returns a fixed
-2048-context plan; the other profiles only influence the placement note. The
-planner does not emit MoE-specific flags (`--n-cpu-moe` or equivalents); MoE
-models are placed by the same per-layer arithmetic.
+2048-context plan; the other profiles only influence the placement note.
+Dense models and registry entries that predate the expert metadata keep the
+classic per-layer arithmetic. For MoE models, `requires_server` tells callers
+that the in-process binding cannot execute the plan.
 
 ### Hybrid attention
 
@@ -274,20 +297,37 @@ which lets `llama.cpp` use its default.
 
 `ServerEngine` (`server_backend.py`) exposes the same surface as `Engine`.
 It translates the `Plan` into `llama-server` flags (`-c`, `-ngl`, `-t`, `-b`,
-`-ub`, `-fa`, `-ctk`/`-ctv`, `--jinja`), starts the child on a free loopback
+`-ub`, `-fa`, `-ctk`/`-ctv`, `--jinja`, and, when the plan asks for them,
+`-ncmoe`, `-fit off` and `--spec-type`), starts the child on a free loopback
 port, polls `/health` for up to 900 s, and talks the OpenAI HTTP API
 (`/v1/chat/completions`, streaming or not, plus `/tokenize`).
 
+For an MoE plan, `-ngl` is the full `n_layers` (all dense tensors and the KV
+cache stay on the GPU) and `-ncmoe` moves only the routed experts of the first
+N layers to the CPU. `resolve_backend()` upgrades `backend="inprocess"` to the
+server when the plan requires it and the binary advertises `-ncmoe`; if the
+binary is missing or too old, it clears the MoE fields and warns instead of
+silently running a different plan.
+
 Differences from the in-process engine:
 
-- `Plan.use_mlock` is not forwarded: `llama-server` rejects `--mlock` (only
-  `llama-cli` has it) and its replacement, `--load-mode`, changed name across
-  releases.
+- `Plan.use_mlock` is forwarded as `-lm mlock` only when the binary advertises
+  `--load-mode`; older builds omit it rather than fail the start.
+- `-fit off` is passed when the binary advertises `-fit`. Recent builds default
+  `--fit on` with a 1024 MiB target, which would silently shrink `-ngl`/
+  `-ncmoe` and invalidate the planner's placement.
+- The `spec_type` config key becomes `--spec-type` when the binary advertises
+  it. It is the only speculative decoding Vipera ships: the in-process
+  prompt-lookup drafter measured -29% decode (4.27 t/s against 6.05), while
+  `ngram-map-k` in the server measured 8.54 t/s against 6.23 (+37%) on a
+  rewrite-the-file prompt and -1% on fresh prose.
 - The child's stdout/stderr go to `~/.vipera/logs/llama-server-<port>.log`; a
   failed start raises with the log tail instead of an opaque exception.
-- A GPU start failure walks the same placement ladder as the in-process engine
-  (`n`, `n-1`, `n-2`, `n/2` layers) before going CPU-only (`gpu_layers=0`, KQV
-  offload off, `n_batch` capped at 128). The context and KV type are kept.
+- A GPU start failure walks the placement ladder. For an MoE plan it raises
+  `moe_cpu_layers` one layer at a time (then all the way to every expert on the
+  CPU) before the CPU-only stages, which clear the MoE fields. For a classic
+  plan it uses `n`, `n-1`, `n-2`, `n/2` layers. The context and KV type are
+  kept.
 - `close()` terminates the child (SIGTERM, then SIGKILL after 10 s) and is
   registered with `atexit`; `serve stop` stops the gateway, which stops it.
 - `stream_options.include_usage` is forwarded when a caller asks for it, so

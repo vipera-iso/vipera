@@ -226,10 +226,14 @@ Luôn kèm
 | T4 | 16K | planner 8 → fail → CPU ~2 t/s | **≥ 4.5 t/s** | **4.87** (Q3, q8_0, ngl 12; planner chọn 8 → 4.55) | ✓ (n=1) — planner thiếu 4 layer |
 | T5 | Agent loop @64K (Hermes) | 0.13 t/s | **không cải thiện được** → chuyển lane | 0.13 t/s (chưa đổi gì) | giữ — P3.1 |
 | T6 | Agent loop @64K lane hybrid | LFM2.5 15.5 / DeepSeek 5.5 t/s | **giữ + đo lại** với cùng prompt agent thật | chưa đo | pending P3.2 |
-| T7 | Spec ngram (server backend) | chưa có | **+10%** decode | chưa đo | pending P2.3 |
+| T7 | Spec ngram (server backend) | chưa có | **+10%** decode | **8.54 t/s** vs 6.23 (rewrite prompt, `--spec-type ngram-map-k`, 3 lần/arm); 6.33 vs 6.40 trên prose | ✓ **+37%** / −1% → đã bật qua `spec_type` (2026-10-23) |
 
 **Đòn bẩy đã hết ở tầng `-ngl`/`threads`:** để lên 7 t/s @8K chỉ còn
 P2.3 (`--spec-type ngram-*`, không tốn VRAM) và P1.5 (`n_batch` cho prefill).
+P2.3 **đã đo và đạt** (T7): ngram chỉ có tác dụng khi câu trả lời lặp lại prompt
+— đúng ca viết code/diff, đúng là ca của Vipera. Chi tiết + các kết quả âm tính
+của cùng phiên (MoE offload, cache-reuse, IQ3, prompt-lookup trong process) nằm
+ở [`OPTIMIZE-techniques.md`](OPTIMIZE-techniques.md) §3–§5.
 `threads = cores` (+19–21%, median-3) **đã được cộng vào** planner ngày
 2026-10-22, cùng với reserve VRAM hiệu chuẩn và placement ladder — đó là
 4.65 → 6.25 t/s, không phải một thí nghiệm riêng nữa.
