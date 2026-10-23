@@ -254,10 +254,12 @@ def test_inspect_cli_renders_summary(monkeypatch, capsys, tmp_path):
     model_cmd.inspect_model(str(tmp_path / "model.gguf"), tensors=False)
     output = capsys.readouterr().out
 
-    assert "GGUF ANATOMY" in output
+    assert "gguf anatomy" in output
     assert "llama" in output
     assert "Q2_K" in output
-    assert "QUALITY WARNINGS" in output
+    # The warnings block is a ruled note, not a titled panel: assert the line
+    # it prints for the flagged tensor instead of a heading.
+    assert "blk.0.attn_v.weight: Q2_K" in output
 
 
 # --- 2026 GGUF quant types (35, 39, 40, 41, 42) -----------------------------

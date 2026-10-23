@@ -5,74 +5,62 @@
 # Vipera
 
 **A local AI gateway that plans before it runs.**
-One `.gguf` in, an OpenAI-compatible HTTP server out.
+
+One `.gguf` in, an OpenAI-compatible HTTP server out — on hardware where the
+model does not quite fit.
 
 [![CI](https://github.com/vipera-iso/vipera/actions/workflows/ci.yml/badge.svg)](https://github.com/vipera-iso/vipera/actions/workflows/ci.yml)
 [![Docs](https://github.com/vipera-iso/vipera/actions/workflows/docs.yml/badge.svg)](https://github.com/vipera-iso/vipera/actions/workflows/docs.yml)
 [![Python](https://img.shields.io/badge/python-3.11%20%7C%203.12-blue)](pyproject.toml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-yellow.svg)](LICENSE)
 [![Status: beta](https://img.shields.io/badge/status-beta-orange)](CHANGELOG.md)
-[![PRs welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](CONTRIBUTING.md)
-
-[Quick start](#quick-start) · [CLI](docs/cli.md) · [HTTP API](docs/http-api.md) · [Docs](docs/index.md) · [Benchmarks](docs/benchmarks.md)
-
-<img src="docs/assets/demo.gif" alt="vipera system doctor, then serve start, then a streaming chat completion" width="720" />
 
 </div>
 
-## Why Vipera
+## The problem it solves
 
-- **It plans before it runs.** `vipera system doctor` checks the machine before
-  a five-minute failed load, and the planner turns a hardware profile into
-  `gpu_layers`, KV cache type, `n_batch`, `mlock`, and KQV offload. No
-  hardcoded defaults.
-- **It falls back honestly.** If a GPU load fails, the engine retries a
-  CPU-safe plan, stage by stage, and prints what changed. It does not crash and
-  does not degrade silently.
-- **The CLI and the API are the same stack.** `vipera chat` and
-  `/v1/chat/completions` share one engine instance, so a benchmark run in the
-  terminal describes the server you actually serve.
+A 14B model on a 4 GB card looks like a CPU-only model. It is not: 17 of its 40
+layers fit in VRAM at 8K context, and putting them there is the difference
+between 6.6 and 0.2 tokens/second.
 
-## When to reach for Vipera (and when not to)
-
-| You want… | Use |
-|---|---|
-| A model that spills VRAM or RAM, placed layer by layer instead of failing at load | Vipera |
-| An OpenAI-compatible endpoint from a `.gguf` with no separate inference stack | Vipera |
-| A reviewable answer to "why were these flags chosen" | Vipera ([planner](src/vipera/planner.py), [plan docs](docs/architecture.md#planner)) |
-| Peak tokens/second on hardware you already tuned | `llama.cpp/server` directly |
-| A desktop app with a model browser and chat UI | LM Studio |
-| Multi-model routing, auth, TLS, or a web dashboard | Something else — Vipera is one model per process, loopback by default |
-
-## Quick start
-
-> [!NOTE]
-> The distribution is named `vipera-ai`. The PyPI project named `vipera` is an
-> unrelated PDF tool, so install `vipera-ai`, not `vipera`. Step-by-step help:
-> [installation guide](docs/install.md).
+Vipera measures the machine, budgets VRAM and RAM **per layer**, and hands
+`llama.cpp` a plan it can justify:
 
 ```bash
-# 1. install from PyPI (llama-cpp-python must build for your platform)
-pip install "vipera-ai[llama,gguf,nvidia]"
+vipera system doctor        # what the machine actually has
+vipera serve start          # plan, load, serve
+curl localhost:8686/health  # {"status": "ok", "model": "..."}
+```
 
-# or straight from the repository
-# pip install "vipera-ai[llama,gguf,nvidia] @ git+https://github.com/vipera-iso/vipera.git"
+Measured on a GTX 1650 4 GB, Hermes-4-14B Q3_K_M at 8K context:
 
-# 2. fetch a GGUF from HuggingFace
-vipera model search
+| | layers on GPU | VRAM used | decode |
+|---|---:|---:|---:|
+| CPU only | 0/40 | — | 0.2 t/s |
+| Vipera's plan | 17/40 | 3.37 GB | 6.57 t/s |
 
-# 3. serve it
-vipera serve start
-# → http://127.0.0.1:8686/v1/chat/completions
+The whole plan is printed before the model loads, and every flag in it is
+traceable to a measurement: [`planner.py`](src/vipera/planner.py) carries the
+numbers in comments, [`docs/benchmarks.md`](docs/benchmarks.md) carries the runs.
+
+## Install and run
+
+> [!NOTE]
+> The distribution is `vipera-ai`. The PyPI project named `vipera` is an
+> unrelated PDF tool. Step-by-step help: [installation guide](docs/install.md).
+
+```bash
+pip install "vipera-ai[llama,gguf,nvidia]"   # llama-cpp-python builds for your platform
+vipera model search                          # fetch a GGUF from Hugging Face
+vipera serve start                           # → http://127.0.0.1:8686/v1
 ```
 
 ```python
 from openai import OpenAI
 
 client = OpenAI(base_url="http://127.0.0.1:8686/v1", api_key="none")
-
 stream = client.chat.completions.create(
-    model="qwen2.5-7b-instruct",  # the alias shown by GET /v1/models
+    model="qwen2.5-7b-instruct",  # the alias from GET /v1/models; omit to use the loaded model
     messages=[{"role": "user", "content": "Explain MoE in one paragraph."}],
     stream=True,
 )
@@ -80,63 +68,23 @@ for chunk in stream:
     print(chunk.choices[0].delta.content or "", end="")
 ```
 
-The `model` field must match the loaded alias (`GET /v1/models`); omit it to
-use the loaded model.
+Verified clients: `openai-python`, LangChain, LlamaIndex, Continue, the OpenAI
+Playground.
 
-**Verified clients:** `openai-python` · LangChain · LlamaIndex · Continue · OpenAI Playground
+## Should you use it?
 
-## Compared to the alternatives
-
-| | **Vipera** | Ollama | `llama.cpp/server` | LM Studio |
-|---|:---:|:---:|:---:|:---:|
-| GGUF-native | ✅ | ✅ | ✅ | ✅ |
-| OpenAI-compatible API | ✅ | ✅ | ✅ | ✅ |
-| Hardware-aware planner | ✅ | ⚠️ partial | ❌ | ⚠️ partial |
-| Real SSE streaming | ✅ | ✅ | ✅ | ✅ |
-| First-class CLI (no GUI) | ✅ | ✅ | ✅ | ❌ |
-| HuggingFace search built-in | ✅ | ✅ | ❌ | ✅ |
-| Diagnostics (`doctor`) | ✅ | ⚠️ partial | ❌ | ❌ |
-| Python-native, embeddable | ✅ | ❌ | ❌ | ❌ |
-
-Row-by-row rationale, with source links, is in [docs/comparison.md](docs/comparison.md).
-
-## CLI
-
-| Command | Description |
+| You want | Use |
 |---|---|
-| `vipera` | Start the gateway with the default model. |
-| `vipera model search` | Search HuggingFace and download a GGUF. |
-| `vipera serve start` | Serve a model over the OpenAI API. |
-| `vipera chat repl` | Interactive terminal chat against a local model. |
-| `vipera bench run` | Measure prompt and generation throughput. |
-| `vipera system doctor` | Runtime, library, and hardware check. |
+| A model that spills VRAM or RAM, placed layer by layer instead of failing at load | **Vipera** |
+| An OpenAI-compatible endpoint from a `.gguf` with no separate inference stack | **Vipera** |
+| A reviewable answer to "why were these flags chosen" | **Vipera** ([planner](src/vipera/planner.py), [plan docs](docs/architecture.md#planner)) |
+| Peak tokens/second on hardware you already tuned | `llama.cpp/server` directly |
+| A desktop app with a model browser and chat UI | LM Studio |
+| Multi-model routing, auth, TLS, or a web dashboard | Not this — one model per process, loopback by default |
 
-Every command, flag, and default: [docs/cli.md](docs/cli.md).
+Feature-by-feature with sources: [docs/comparison.md](docs/comparison.md).
 
-## HTTP API
-
-| Method | Path | Description |
-|---|---|---|
-| `GET` | `/health` | `{"status": "ok", "model": "<alias>"}` |
-| `GET` | `/v1/models` | OpenAI-shaped model list. |
-| `POST` | `/v1/chat/completions` | Chat completion, streaming or not. |
-
-```bash
-curl http://127.0.0.1:8686/v1/chat/completions \
-  -H "Content-Type: application/json" \
-  -d '{"messages": [{"role": "user", "content": "Hello"}]}'
-```
-
-Schemas, SSE framing, and Python/JavaScript examples: [docs/http-api.md](docs/http-api.md).
-
-## Configuration
-
-Config lives at `~/.vipera/config.json`; change it with
-`vipera system config` or edit the JSON. The three keys that change behavior
-most are `ctx` (context size), `kv_cache` (`f16`, `q8_0`, `q4_0`), and
-`default_model`. Full table: [docs/configuration.md](docs/configuration.md).
-
-## Architecture
+## How it decides
 
 ```mermaid
 flowchart LR
@@ -163,37 +111,71 @@ flowchart LR
     R --> P
 ```
 
-- `hardware.py` — probes cores, RAM, GPU, VRAM. No side effects.
-- `planner.py` — `(model meta, hardware) → Plan`, budgeting VRAM per layer.
-- `engine.py` — wraps `llama_cpp.Llama`; owns the GPU → CPU fallback and `mlock` retry.
-- `server.py` — FastAPI + real SSE; sync generator flushed per token.
-- `registry.py`, `ui.py`, `commands/*` — JSON model store and the Rich CLI.
+| Module | Job |
+|---|---|
+| [`hardware.py`](src/vipera/hardware.py) | Cores, RAM, GPU, VRAM. No side effects. |
+| [`planner.py`](src/vipera/planner.py) | `(model meta, hardware) → Plan`: layers, KV dtype, batch, `mlock`, KQV offload. |
+| [`engine.py`](src/vipera/engine.py) | Drives `llama.cpp`; owns the GPU → CPU ladder and the bake-off between backends. |
+| [`server.py`](src/vipera/server.py) | FastAPI with real SSE, flushed per token. |
+| [`registry.py`](src/vipera/registry.py), [`ui.py`](src/vipera/ui.py) | Model store and the Rich terminal UI. |
 
-Deeper treatment, including the concurrency model and known gaps:
-[docs/architecture.md](docs/architecture.md).
+Concurrency model, fallback ladder, and known gaps:
+[docs/architecture.md](docs/architecture.md). The terminal's visual rules:
+[docs/design/visual-system.md](docs/design/visual-system.md).
 
-## Benchmarks
+## CLI
 
-| Reference config (DeepSeek-V2-Lite Q4_K_M, 15 GiB RAM, 4 GB VRAM) | Gen t/s |
-|---|---:|
-| CPU only, mmap | 16.0 |
-| CPU only, `mlock` | 22.9 |
+| Command | What it does |
+|---|---|
+| `vipera` | Start the gateway with the default model. |
+| `vipera serve start` | Serve a model over the OpenAI API. |
+| `vipera model search` | Search Hugging Face and download a GGUF. |
+| `vipera chat repl` | Chat against a local model in the terminal. |
+| `vipera bench run` | Measure prompt and generation throughput. |
+| `vipera system doctor` | Runtime, library, and hardware check. |
 
-Vipera optimizes for unknown hardware, not peak tokens/second on a known-good
-flag set: when a model fits in RAM there is nothing to plan, and placement only
-matters when it spills. Full tables, the 14B-on-4GB case, and the measurement
-method: [docs/benchmarks.md](docs/benchmarks.md).
+Every command, flag, and default: [docs/cli.md](docs/cli.md).
 
-Two layer-level numbers from that document, on a 14B CPU-only box:
+## HTTP API
 
-- **Q3_K_M + imatrix vs Q4_K_M**: 18.7% smaller (7.32 vs 9.00 GB), loads 25%
-faster, prefill 27% faster, and quality is **equivalent within the eval-set
-error** (PPL 6.9805 vs 7.0056 — a 0.11σ difference, not a win). Say "same
-quality, 19% lighter", not "better".
-- **`kv_cache: q8_0`**: halves KV memory for ~3% decode throughput. `q5_1` and
-`iq4_nl` cost 14–18%; use them only when KV size blocks the context you need.
+| Method | Path | Returns |
+|---|---|---|
+| `GET` | `/health` | `{"status": "ok", "model": "<alias>"}` |
+| `GET` | `/v1/models` | OpenAI-shaped model list |
+| `POST` | `/v1/chat/completions` | Chat completion, streaming or not |
 
-## Contributing and license
+```bash
+curl http://127.0.0.1:8686/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{"messages": [{"role": "user", "content": "Hello"}]}'
+```
+
+Schemas, SSE framing, and Python/JavaScript examples:
+[docs/http-api.md](docs/http-api.md).
+
+## Configuration
+
+Config lives at `~/.vipera/config.json`. Change it with `vipera system config`
+or edit the JSON. The keys that change behavior most: `ctx`, `kv_cache`
+(`f16`, `q8_0`, `q4_0`), `spec_type` (draft-free n-gram speculation, on by
+default), `default_model`.
+
+Full table: [docs/configuration.md](docs/configuration.md).
+
+## What the numbers look like
+
+Two findings from [docs/benchmarks.md](docs/benchmarks.md), both on consumer
+hardware:
+
+- **Quantize with an importance matrix, not blindly.** Q3_K_M + imatrix is
+  18.7% smaller than Q4_K_M (7.32 vs 9.00 GB), loads 25% faster, prefills 27%
+  faster, and lands within the eval-set error on perplexity (6.9805 vs 7.0056,
+  a 0.11σ gap). Say "same quality, 19% lighter", not "better".
+- **`kv_cache: q8_0`** halves KV memory for about 3% decode throughput. `q5_1`
+  and `iq4_nl` cost 14–18%: use them only when KV size blocks the context you
+  need.
+
+## Contributing
 
 ```bash
 git clone https://github.com/vipera-iso/vipera
@@ -203,9 +185,9 @@ python -m venv .venv && .venv/bin/pip install -e ".[dev,llama,gguf]"
 .venv/bin/pytest -q
 ```
 
-- [CONTRIBUTING.md](CONTRIBUTING.md) — dev setup, PR flow, demo GIF recording.
-- [SECURITY.md](SECURITY.md) — vulnerability reporting.
-- [CHANGELOG.md](CHANGELOG.md) — release history.
-- [Code of conduct](CODE_OF_CONDUCT.md) — Contributor Covenant 2.1.
+[CONTRIBUTING.md](CONTRIBUTING.md) (dev setup, PR flow, demo GIF) ·
+[SECURITY.md](SECURITY.md) (vulnerability reporting) ·
+[CHANGELOG.md](CHANGELOG.md) (release history) ·
+[Code of conduct](CODE_OF_CONDUCT.md)
 
 MIT © 2026 Vipera — see [LICENSE](LICENSE).

@@ -22,6 +22,7 @@ details.
 | [benchmarks.md](benchmarks.md) | Reference measurements, method, and when placement actually helps. |
 | [comparison.md](comparison.md) | Row-by-row comparison with Ollama, `llama.cpp/server`, and LM Studio. |
 | [development.md](development.md) | Dev setup, tests, lint/type checks, CI, release process, demo GIF. |
+| [design/visual-system.md](design/visual-system.md) | Colour tokens, theme resolution, type roles, layout, and the motion rules shared by the terminal, the README, and the docs site ([index.html](index.html)). |
 | [design/llama-server-backend.md](design/llama-server-backend.md) | Proposal (not implemented): subprocess `llama-server` backend, DFlash speculative decoding, draft validation, migration. |
 
 Supporting files in the repository root:

@@ -2,21 +2,20 @@ import platform
 import sys
 
 import typer
-from rich import box
-from rich.panel import Panel
 from rich.text import Text
 
-from vipera.config import DEFAULT_CONFIG, _coerce_strict, load_config, save_config
+from vipera.config import CONFIG_FILE, DEFAULT_CONFIG, _coerce_strict, load_config, save_config
 from vipera.hardware import detect
 from vipera.ui import (
-    C_ACCENT,
-    C_BORDER,
     C_DIM,
     C_GREEN,
     C_RED,
     C_TEXT,
     C_YELLOW,
     console,
+    ledger,
+    note,
+    section,
 )
 
 app = typer.Typer()
@@ -25,31 +24,17 @@ app = typer.Typer()
 @app.command("doctor")
 def doctor():
     """Run system diagnostics."""
-    content = Text()
-    counters = {"pass": 0, "warn": 0, "fail": 0}
+    counters = {"ok": 0, "warn": 0, "fail": 0}
 
-    ROW_W = 78
+    def row(label: str, val: str, status: str = "ok", col: str = C_GREEN):
+        counters[status] += 1
+        line = Text("   ")
+        line.append(f"{label:<20}", style=C_DIM)
+        line.append(f"{val:<38}", style=C_TEXT)
+        line.append(f"{status:>4}", style=col)
+        console.print(line)
 
-    def add_sec(title: str):
-        inner = f"[ {title} ]"
-        rest = ROW_W - 5 - len(inner)
-        content.append(f"  ┌─{inner}", style=C_ACCENT)
-        content.append("─" * max(0, rest) + "┐\n", style=C_BORDER)
-
-    def end_sec():
-        content.append("  └" + "─" * (ROW_W - 4) + "┘\n\n", style=C_BORDER)
-
-    def row(label: str, val: str, status: str = "PASS", col: str = C_GREEN):
-        counters[status.lower()] += 1
-        status_s = f"[ {status:^4} ]"
-        dots = "·" * max(1, 41 - len(val))
-        content.append(f"  │ {label:<20} ", style=C_TEXT)
-        content.append(val, style=C_TEXT)
-        content.append(f" {dots} ", style=C_TEXT)
-        content.append(status_s, style=col)
-        content.append(" │\n", style=C_TEXT)
-
-    add_sec("RUNTIME")
+    section("runtime")
     os_info = f"{platform.system()} {platform.release()} ({platform.machine()})"
     row("OS", os_info)
     py_ver = f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}"
@@ -73,13 +58,13 @@ def doctor():
             gpu_offload = None
 
         if gpu_offload is True:
-            row("gpu offload", "compiled in (CUDA/Metal)", "PASS", C_GREEN)
+            row("gpu offload", "compiled in (CUDA/Metal)", "ok", C_GREEN)
         elif gpu_offload is False:
-            row("gpu offload", "CPU-only build", "WARN", C_YELLOW)
+            row("gpu offload", "CPU-only build", "warn", C_YELLOW)
         else:
-            row("gpu offload", "unknown (binding too old)", "WARN", C_YELLOW)
+            row("gpu offload", "unknown (binding too old)", "warn", C_YELLOW)
     except ImportError:
-        row("llama-cpp-python", "missing", "FAIL", C_RED)
+        row("llama-cpp-python", "missing", "fail", C_RED)
         llama_missing = True
 
     gguf_missing = False
@@ -88,68 +73,58 @@ def doctor():
 
         row("gguf", "installed")
     except ImportError:
-        row("gguf", "missing", "WARN", C_YELLOW)
+        row("gguf", "missing", "warn", C_YELLOW)
         gguf_missing = True
-    end_sec()
 
-    add_sec("HARDWARE")
+    section("hardware")
     hw = detect()
     row("cpu", f"{hw.cpu_cores}C / {hw.cpu_threads}T")
 
     if hw.is_apple_silicon:
-        row("gpu", "Apple Silicon (Metal)", "PASS", C_GREEN)
+        row("gpu", "Apple Silicon (Metal)", "ok", C_GREEN)
         row("unified memory", f"{hw.ram_free_gb:.1f} GB free / {hw.ram_total_gb:.1f} GB total")
     elif hw.gpu_name != "None":
-        row("gpu", hw.gpu_name, "PASS", C_GREEN)
+        row("gpu", hw.gpu_name, "ok", C_GREEN)
         row("vram", f"{hw.vram_free_gb:.1f} GB free / {hw.vram_total_gb:.1f} GB total")
     else:
-        row("gpu", "None (CPU Only)", "WARN", C_YELLOW)
+        row("gpu", "None (CPU Only)", "warn", C_YELLOW)
         row("ram available", f"{hw.ram_free_gb:.1f} GB free / {hw.ram_total_gb:.1f} GB total")
-    end_sec()
 
-    summary = Text("  SUMMARY   ", style=C_ACCENT)
-    summary.append(f"[ {counters['pass']} PASSED ]", style=C_GREEN)
-    summary.append("  ─  ", style=C_BORDER)
-    summary.append(f"[ {counters['warn']} WARN ]", style=C_YELLOW)
-    summary.append("  ─  ", style=C_BORDER)
-    summary.append(f"[ {counters['fail']} FAIL ]\n", style=C_RED)
-    content.append(summary)
-
-    console.print(
-        Panel(
-            content,
-            title=Text(" VIPERA DIAGNOSTICS ", style=C_ACCENT),
-            border_style=C_ACCENT,
-            box=box.ROUNDED,
-            padding=(0, 1),
-        )
-    )
+    total = sum(counters.values())
+    summary = Text("   ")
+    summary.append(f"{total} checks", style=C_DIM)
+    summary.append("   ")
+    summary.append(f"{counters['ok']} ok", style=C_GREEN)
+    summary.append("   ")
+    summary.append(f"{counters['warn']} warn", style=C_YELLOW)
+    summary.append("   ")
+    summary.append(f"{counters['fail']} fail\n", style=C_RED)
+    console.print(summary)
 
     if llama_missing:
-        console.print(f"[{C_YELLOW}] ⚠ llama-cpp-python is required to load models.[/]")
-        console.print(f"[{C_DIM}]   Install:[/] python -m pip install llama-cpp-python")
-        console.print(f"[{C_DIM}]   Then restart the gateway.[/]\n")
+        note(
+            "llama-cpp-python is required to load models.\n"
+            "python -m pip install llama-cpp-python\n"
+            "then restart the gateway.",
+            tone="warn",
+        )
 
     if gpu_offload is False and hw.gpu_name != "None":
-        console.print(
-            f"[{C_YELLOW}] ⚠ A GPU was detected but this llama-cpp-python build has no "
-            f"GPU backend.[/]"
+        note(
+            "A GPU was detected but this llama-cpp-python build has no GPU backend.\n"
+            "gpu_layers is planned but ignored: every layer runs on the CPU.\n"
+            "Reinstall with the matching extra:\n"
+            "CMAKE_ARGS='-DGGML_CUDA=on' pip install --force-reinstall llama-cpp-python\n"
+            "then re-run this command.",
+            tone="warn",
         )
-        console.print(
-            f"[{C_DIM}]   gpu_layers is planned but ignored: every layer runs on the CPU. "
-            f"Reinstall with the matching extra:[/]"
-        )
-        console.print(
-            f"[{C_DIM}]   CMAKE_ARGS='-DGGML_CUDA=on' "
-            f"pip install --force-reinstall llama-cpp-python"
-        )
-        console.print(f"[{C_DIM}]   Then re-run this command.[/]\n")
 
     if gguf_missing:
-        console.print(
-            f"[{C_YELLOW}] ⚠ gguf is optional, but layer and parameter metadata need it.[/]"
+        note(
+            "gguf is optional, but layer and parameter metadata need it.\n"
+            "python -m pip install gguf",
+            tone="warn",
         )
-        console.print(f"[{C_DIM}]   Install:[/] python -m pip install gguf\n")
 
 
 @app.command("config")
@@ -161,21 +136,16 @@ def config_cmd(
     cfg = load_config()
 
     if key is None:
-        for k, v in cfg.items():
-            line = Text("  ")
-            line.append(f"{k:<20}", style=C_DIM)
-            line.append(f"{v}", style=C_TEXT)
-            console.print(line)
+        ledger([(k, str(v)) for k, v in cfg.items()])
         return
 
     if key not in DEFAULT_CONFIG:
         valid = ", ".join(sorted(DEFAULT_CONFIG.keys()))
-        console.print(f"[{C_RED}] ✗ Unknown key: {key}[/]")
-        console.print(f"[{C_DIM}]  Valid keys: {valid}[/]")
+        note(f"there is no `{key}` key.\nvalid keys: {valid}", tone="error")
         raise typer.Exit(1)
 
     if value is None:
-        console.print(f"[{C_ACCENT}]{key}[/] = [{C_GREEN}]{cfg[key]}[/]")
+        ledger([(key, str(cfg[key]))])
         return
 
     cfg[key] = value
@@ -185,4 +155,5 @@ def config_cmd(
         console.print(f"[{C_RED}] ✗ {exc}[/]")
         raise typer.Exit(1) from exc
     save_config(cfg)
-    console.print(f"[{C_GREEN}] ✓[/]  {key} = {cfg[key]}")
+    ledger([(key, str(cfg[key]))])
+    note(f"written to {CONFIG_FILE}", tone="ok")

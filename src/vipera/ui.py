@@ -1,4 +1,12 @@
-import random
+"""Terminal presentation for Vipera.
+
+The rules this file implements are written down in
+``docs/design/visual-system.md``. In short: the terminal shares one identity
+with ``docs/assets`` (ink / paper / cyan), numbers are right aligned and always
+carry units, and motion never delays work.
+"""
+
+import os
 import textwrap
 import time
 
@@ -6,29 +14,198 @@ import typer
 from rich import box
 from rich.console import Console
 from rich.live import Live
-from rich.panel import Panel
 from rich.prompt import IntPrompt
 from rich.table import Table
 from rich.text import Text
 
 from vipera import __version__
 
-console = Console(highlight=False, soft_wrap=True)
+# --------------------------------------------------------------------------
+# Theme
+# --------------------------------------------------------------------------
 
-C_PRIMARY = "#5B7C99"
-C_ACCENT = "#8FB4CC"
-C_HIGHLIGHT = "#B8C7D3"
-C_TEXT = "bold #E4E8EC"
-C_DIM = "#6B7A87"
-C_BORDER = "#3E5568"
+_PALETTES: dict[str, dict[str, str]] = {
+    "dark": {
+        "paper": "#F1F5F9",
+        "rule": "#1E293B",
+        "muted": "#94A3B8",
+        "accent": "#22D3EE",
+        "ok": "#34D399",
+        "warn": "#F5A524",
+        "error": "#F87171",
+    },
+    # Cyan-400 (#22D3EE) is 1.6:1 on white; the light theme uses cyan-700 so
+    # the brand colour stays readable instead of turning into a highlight.
+    "light": {
+        "paper": "#0B0F14",
+        "rule": "#CBD5E1",
+        "muted": "#52606D",
+        "accent": "#0E7490",
+        "ok": "#047857",
+        "warn": "#B45309",
+        "error": "#B91C1C",
+    },
+    # NO_COLOR, or VIPERA_THEME=none: every token becomes Rich's `default`
+    # style, so `[<style>]…[/]` markup in command modules stays valid but the
+    # output is plain enough to grep.
+    "none": {
+        "paper": "default",
+        "rule": "default",
+        "muted": "default",
+        "accent": "default",
+        "ok": "default",
+        "warn": "default",
+        "error": "default",
+    },
+}
 
-C_GREEN = "#7BA05B"
-C_RED = "#C25B5B"
-C_YELLOW = "#D4A574"
+
+def _resolve_theme() -> str:
+    """Pick a palette: explicit override, then NO_COLOR, then the terminal."""
+    forced = os.environ.get("VIPERA_THEME", "").strip().lower()
+    if forced in _PALETTES:
+        return forced
+    if os.environ.get("NO_COLOR"):
+        return "none"
+    # COLORFGBG is "fg;bg" with ANSI indexes. 7+ means a light background.
+    fgbg = os.environ.get("COLORFGBG", "")
+    if ";" in fgbg:
+        try:
+            if int(fgbg.rsplit(";", 1)[1]) >= 7:
+                return "light"
+        except ValueError:
+            pass
+    return "dark"
+
+
+THEME = _resolve_theme()
+_P = _PALETTES[THEME]
+
+# Semantic tokens. The C_* names are the ones command modules import, so they
+# stay put even though the palette behind them is now theme-dependent.
+C_TEXT = f"bold {_P['paper']}"
+C_DIM = _P["muted"]
+C_ACCENT = _P["accent"]
+C_BORDER = _P["rule"]
+C_GREEN = _P["ok"]
+C_RED = _P["error"]
+C_YELLOW = _P["warn"]
 C_SUCCESS = C_GREEN
 C_ERROR = C_RED
 C_WARN = C_YELLOW
+C_PRIMARY = C_ACCENT
+C_HIGHLIGHT = C_TEXT
 
+console = Console(highlight=False, soft_wrap=True)
+
+GUTTER = "▏"
+RULE_CHAR = "─"
+INDENT = "   "
+
+
+# --------------------------------------------------------------------------
+# Blocks
+# --------------------------------------------------------------------------
+
+
+def rule(width: int | None = None, indent: str = INDENT) -> None:
+    """A hairline. Used to close a section, never to decorate a gap."""
+    span = width if width is not None else min(72, max(8, console.width - len(indent)))
+    console.print(f"{indent}{RULE_CHAR * span}", style=C_BORDER)
+
+
+def section(title: str) -> None:
+    """Sentence-case heading with the hairline directly beneath it."""
+    console.print()
+    console.print(f"{INDENT}{title}", style=C_DIM)
+    rule()
+
+
+def ledger(rows: list[tuple[str, str]], indent: str = INDENT, key_width: int | None = None) -> None:
+    """Key/value block with a fixed label column.
+
+    The label column is as wide as the widest label, so values line up no
+    matter which block printed them.
+    """
+    if not rows:
+        return
+    width = key_width or max(len(key) for key, _ in rows)
+    for key, value in rows:
+        line = Text(indent)
+        line.append(key.ljust(width), style=C_DIM)
+        line.append("  ")
+        line.append(value, style=C_TEXT)
+        console.print(line)
+
+
+def catalog(rows: list[tuple[str, str]], indent: str = INDENT) -> None:
+    """A command list: the thing you type in paper, what it does in muted.
+
+    ``ledger`` puts the value in paper because values are the answer; here the
+    command is the answer and the description is the aside.
+    """
+    if not rows:
+        return
+    width = max(len(cmd) for cmd, _ in rows)
+    for command, description in rows:
+        line = Text(indent)
+        line.append(command.ljust(width), style=C_TEXT)
+        line.append("  ")
+        line.append(description, style=C_DIM)
+        console.print(line)
+
+
+def note(body: str, tone: str = "accent") -> None:
+    """A left-ruled block: guidance, warnings, next steps.
+
+    Boxes are reserved for things that stand on their own (a chat reply); a
+    note is attached to whatever came before it, so it gets a gutter, not a
+    frame.
+    """
+    colour = {"accent": C_ACCENT, "warn": C_YELLOW, "error": C_RED, "ok": C_GREEN}.get(
+        tone, C_ACCENT
+    )
+    for index, line in enumerate(body.split("\n")):
+        prefix = Text(f"{INDENT}{GUTTER} ", style=colour)
+        prefix.append(line, style=C_TEXT if index == 0 else C_DIM)
+        console.print(prefix)
+
+
+def gauge(
+    label: str,
+    used: float,
+    total: float,
+    unit: str = "GB",
+    width: int = 24,
+    fmt: str = "{:.2f}",
+) -> None:
+    """A capacity bar. The one place in the CLI where colour encodes amount."""
+    total = total or 1.0
+    fraction = max(0.0, min(1.0, used / total))
+    filled = round(fraction * width)
+    line = Text(INDENT)
+    line.append(f"{label:<10}", style=C_DIM)
+    line.append("█" * filled, style=C_ACCENT)
+    line.append("░" * (width - filled), style=C_BORDER)
+    line.append(f"  {fmt.format(used)} / {fmt.format(total)} {unit}", style=C_TEXT)
+    console.print(line)
+
+
+def _guttered(text: str, style: str) -> Text:
+    """Render multi-line text behind a hairline gutter."""
+    lines = text.split("\n")
+    out = Text()
+    for index, line in enumerate(lines):
+        out.append(f"{INDENT}{GUTTER} ", style=C_BORDER)
+        out.append(line, style=style)
+        if index < len(lines) - 1:
+            out.append("\n")
+    return out
+
+
+# --------------------------------------------------------------------------
+# Brand
+# --------------------------------------------------------------------------
 
 VIPERA_ART = r"""
    ██╗   ██╗██╗██████╗ ███████╗██████╗  █████╗
@@ -40,98 +217,67 @@ VIPERA_ART = r"""
 """
 
 
-def heartbeat_banner():
-    lines = VIPERA_ART.strip("\n").split("\n")
-    max_len = max(len(line) for line in lines)
-    padded = [line.ljust(max_len) for line in lines]
+def print_banner(host: str = "localhost", *, backend: str | None = None) -> None:
+    """Print the wordmark and the three facts needed before the first load.
 
-    def render(center: int) -> Text:
-        text = Text()
-        for line in padded:
-            for x, ch in enumerate(line):
-                dist = abs(x - center)
-                if dist <= 3:
-                    text.append(ch, style=C_HIGHLIGHT)
-                elif dist <= 12:
-                    text.append(ch, style=C_ACCENT)
-                elif dist <= 26:
-                    text.append(ch, style=C_PRIMARY)
-                else:
-                    text.append(ch, style=C_DIM)
-            text.append("\n")
-        return text
-
-    with Live(console=console, refresh_per_second=60, transient=True) as live:
-        for x in range(-25, max_len + 25, 2):
-            live.update(render(x))
-            time.sleep(0.008)
-        time.sleep(0.06)
-        for x in range(max_len + 25, -25, -3):
-            live.update(render(x))
-            time.sleep(0.008)
-
-        final = Text()
-        for line in padded:
-            final.append(line + "\n", style=C_PRIMARY)
-        live.update(final)
-        time.sleep(0.25)
-
-
-def print_banner(host: str = "localhost"):
+    This used to sweep a highlight across the letters for ~1.9 s. Nothing is
+    loaded during that time, so the animation only delayed the prompt.
+    """
     console.print()
-    heartbeat_banner()
-
-    rule = Text()
-    rule.append("   " + "▬" * 74 + "\n", style=C_BORDER)
-    rule.append("   ◆ ", style=C_ACCENT)
-    rule.append("NODE   ", style=C_DIM)
-    rule.append(host, style=C_TEXT)
-    rule.append("     ◆ ", style=C_ACCENT)
-    rule.append("VERSION  ", style=C_DIM)
-    rule.append(__version__, style=C_TEXT)
-    rule.append("     ◆ ", style=C_ACCENT)
-    rule.append("RUNTIME  ", style=C_DIM)
-    rule.append("llama.cpp\n", style=C_TEXT)
-    rule.append("   " + "▬" * 74, style=C_BORDER)
-    console.print(rule)
+    for line in VIPERA_ART.strip("\n").split("\n"):
+        console.print(line, style=C_ACCENT)
+    console.print()
+    rows = [("node", host), ("version", __version__)]
+    if backend:
+        rows.append(("backend", backend))
+    ledger(rows)
+    rule()
     console.print()
 
 
-def animated_loading_bar(prefix: str = "INITIALIZING", duration: float = 1.2):
-    width = 40
-    with Live(console=console, refresh_per_second=60, transient=True) as live:
-        steps = max(1, int(duration * 60))
+# --------------------------------------------------------------------------
+# Progress
+# --------------------------------------------------------------------------
+
+
+def animated_loading_bar(prefix: str = "initialising", duration: float = 1.2) -> None:
+    """Fill a gauge while a blocking step runs (import, quantize, bench)."""
+    width = 36
+    steps = max(1, int(duration * 30))
+    with Live(console=console, refresh_per_second=30, transient=True) as live:
         for step in range(steps + 1):
             progress = step / steps
-            filled = int(width * progress)
-            empty = width - filled
-            percent = int(progress * 100)
-
-            line = Text("  ▸ ")
-            line.append(f"{prefix:<15} ", style=C_TEXT)
+            filled = round(width * progress)
+            line = Text(INDENT)
+            line.append(f"{prefix:<14} ", style=C_DIM)
             line.append("█" * filled, style=C_ACCENT)
-            line.append("░" * empty, style=C_BORDER)
-            line.append(f"  {percent:>3}%")
+            line.append("░" * (width - filled), style=C_BORDER)
+            line.append(f"  {round(progress * 100):>3}%")
             live.update(line)
             time.sleep(duration / steps)
 
-    final = Text("  ▸ ")
-    final.append(f"{prefix:<15} ", style=C_TEXT)
+    final = Text(INDENT)
+    final.append(f"{prefix:<14} ", style=C_DIM)
     final.append("█" * width, style=C_ACCENT)
-    final.append("  100%  ", style=C_TEXT)
-    final.append("[ ", style=C_BORDER)
-    final.append("DONE", style=C_SUCCESS)
-    final.append(" ]", style=C_BORDER)
+    final.append("   100%", style=C_DIM)
     console.print(final)
     console.print()
 
 
-def _wrap_block(text: str, width: int = 68) -> str:
+# --------------------------------------------------------------------------
+# Chat
+# --------------------------------------------------------------------------
+
+_WRAP_WIDTH = 68
+_PAINT_INTERVAL = 0.03
+
+
+def _wrap_block(text: str, width: int = _WRAP_WIDTH) -> str:
     """Wrap text without destroying the indentation of code blocks."""
     out = []
     for line in text.split("\n"):
         if not line:
-            out.append(" " * width)
+            out.append("")
             continue
         line = line.expandtabs(4)
         stripped = line.lstrip()
@@ -145,21 +291,37 @@ def _wrap_block(text: str, width: int = 68) -> str:
             break_long_words=True,
             break_on_hyphens=False,
         )
-        for w in wrapper.wrap(stripped) or [indent]:
-            out.append(f"{w:<{width}}")
+        for wrapped in wrapper.wrap(stripped) or [indent]:
+            out.append(wrapped.rstrip())
     return "\n".join(out)
 
 
-_LIVE_UPDATE_INTERVAL = 0.03
+def _reply(text: str, cursor: bool = False) -> Text:
+    block = _guttered(_wrap_block(text), C_TEXT)
+    if cursor:
+        block.append("█" if int(time.time() * 3) % 2 == 0 else " ", style=C_ACCENT)
+    return block
 
 
-def typewriter_chat_stream(stream_generator, title_text: str = " AI "):
-    full_response = ""
-    start_time = time.time()
+def _stats(tokens: int, seconds: float) -> Text:
+    rate = tokens / seconds if seconds > 0 else 0.0
+    line = Text(INDENT)
+    line.append(f"{GUTTER} ", style=C_BORDER)
+    line.append(f"{tokens} tokens", style=C_DIM)
+    line.append("  ")
+    line.append(f"{rate:.1f} tok/s", style=C_DIM)
+    line.append("  ")
+    line.append(f"{seconds:.2f} s", style=C_DIM)
+    return line
+
+
+def _stream(stream_generator, title_text: str, refresh: int) -> str:
+    collected: list[str] = []
     chunk_count = 0
     last_paint = 0.0
+    started = time.time()
 
-    with Live(console=console, refresh_per_second=60, transient=True) as live:
+    with Live(console=console, refresh_per_second=refresh, transient=True) as live:
         for chunk in stream_generator:
             try:
                 delta = chunk["choices"][0]["delta"].get("content", "")
@@ -168,143 +330,78 @@ def typewriter_chat_stream(stream_generator, title_text: str = " AI "):
             if not delta:
                 continue
             chunk_count += 1
+            collected.append(delta)
 
-            for ch in delta:
-                full_response += ch
-                now = time.time()
+            # Painting is throttled; the model is not. The old code slept up to
+            # 18 ms per character, which capped a fast model at ~120 tok/s.
+            now = time.time()
+            if now - last_paint >= _PAINT_INTERVAL:
+                live.update(_reply("".join(collected), cursor=True))
+                last_paint = now
 
-                if now - last_paint >= _LIVE_UPDATE_INTERVAL:
-                    padded = _wrap_block(full_response)
-                    cursor = "█" if int(now * 3) % 2 == 0 else " "
-                    panel = Panel(
-                        Text(padded + cursor, style=C_TEXT),
-                        title=Text(title_text, style=C_ACCENT),
-                        title_align="left",
-                        border_style=C_ACCENT,
-                        box=box.ROUNDED,
-                        padding=(0, 1),
-                    )
-                    live.update(panel)
-                    last_paint = now
-
-                if ch in ".!?":
-                    sleep = 0.14
-                elif ch in ",;:":
-                    sleep = 0.05
-                else:
-                    sleep = random.uniform(0.004, 0.018)
-                time.sleep(sleep)
-
-    padded = _wrap_block(full_response)
-    final_panel = Panel(
-        Text(padded, style=C_TEXT),
-        title=Text(title_text, style=C_ACCENT),
-        title_align="left",
-        border_style=C_ACCENT,
-        box=box.ROUNDED,
-        padding=(0, 1),
-    )
-    console.print(final_panel)
-
-    dt = time.time() - start_time
-    tps = chunk_count / dt if dt > 0 else 0
-    stat = Text("    ")
-    stat.append("└─ ", style=C_BORDER)
-    stat.append(f"{chunk_count} tokens  ·  {tps:.1f} tok/s  ·  {dt:.2f}s\n", style=C_DIM)
-    console.print(stat)
-    return full_response
-
-
-def plain_chat_stream(stream_generator, title_text: str = " AI "):
-    """Stream a chat reply as fast as the model produces tokens."""
-    full = []
-    start_time = time.time()
-    chunk_count = 0
-
-    with Live(console=console, refresh_per_second=20, transient=True) as live:
-        for chunk in stream_generator:
-            try:
-                delta = chunk["choices"][0]["delta"].get("content", "")
-            except (KeyError, IndexError, TypeError):
-                continue
-            if not delta:
-                continue
-            chunk_count += 1
-            full.append(delta)
-            live.update(
-                Panel(
-                    Text("".join(full), style=C_TEXT),
-                    title=Text(title_text, style=C_ACCENT),
-                    title_align="left",
-                    border_style=C_ACCENT,
-                    box=box.ROUNDED,
-                    padding=(0, 1),
-                )
-            )
-
-    text = "".join(full)
-    console.print(
-        Panel(
-            Text(text, style=C_TEXT),
-            title=Text(title_text, style=C_ACCENT),
-            title_align="left",
-            border_style=C_ACCENT,
-            box=box.ROUNDED,
-            padding=(0, 1),
-        )
-    )
-
-    dt = time.time() - start_time
-    tps = chunk_count / dt if dt > 0 else 0
-    stat = Text("    ")
-    stat.append("└─ ", style=C_BORDER)
-    stat.append(f"{chunk_count} tokens  ·  {tps:.1f} tok/s  ·  {dt:.2f}s\n", style=C_DIM)
-    console.print(stat)
+    text = "".join(collected)
+    if title_text:
+        console.print(f"{INDENT}{title_text}", style=C_DIM)
+    console.print(_reply(text))
+    console.print(_stats(chunk_count, time.time() - started))
+    console.print()
     return text
 
 
-def pick_model(title: str = "SELECT A MODEL") -> str:
+def typewriter_chat_stream(stream_generator, title_text: str = "assistant") -> str:
+    """Stream a reply, repainting as tokens arrive."""
+    return _stream(stream_generator, title_text, refresh=30)
+
+
+def plain_chat_stream(stream_generator, title_text: str = "assistant") -> str:
+    """Stream a reply with a slower repaint, for slow terminals."""
+    return _stream(stream_generator, title_text, refresh=10)
+
+
+# --------------------------------------------------------------------------
+# Selection
+# --------------------------------------------------------------------------
+
+
+def pick_model(title: str = "select a model") -> str:
     from vipera.config import load_config
     from vipera.registry import list_models
 
     installed = list_models()
     if not installed:
-        console.print(f"[{C_RED}] ✗ No models installed. Run `vipera model search` first.[/]")
+        note("no models installed. run `vipera model search` first.", tone="error")
         raise typer.Exit(1)
 
     cfg = load_config()
     default_model = cfg.get("default_model")
-
-    t = Table(box=box.ROUNDED, title=title, title_justify="left")
-    t.add_column("ID", style=C_DIM, justify="center")
-    t.add_column("ALIAS", style=C_TEXT)
-    t.add_column("SIZE", style=C_DIM, justify="right")
-    t.add_column("QUANT", style=C_ACCENT)
-
     default_idx = 1
-    for i, m in enumerate(installed):
-        meta = m.get("meta", {})
-        size_str = f"{meta.get('size_bytes', 0) / 1e9:>5.1f} G"
-        is_default = " (default)" if m["name"] == default_model else ""
+
+    section(title)
+    t = Table(box=box.SIMPLE_HEAD, padding=(0, 2), pad_edge=False, show_edge=False)
+    t.add_column("#", style=C_DIM, justify="right")
+    t.add_column("model", style=C_TEXT)
+    t.add_column("size", style=C_DIM, justify="right")
+    t.add_column("quant", style=C_ACCENT, justify="right")
+
+    for i, model in enumerate(installed):
+        meta = model.get("meta", {})
+        marker = "" if model["name"] != default_model else "  default"
         t.add_row(
-            f"[{i + 1:02d}]",
-            f"{m['name']}{is_default}",
-            size_str,
+            f"{i + 1}",
+            f"{model['name']}{marker}",
+            f"{meta.get('size_bytes', 0) / 1e9:.2f} GB",
             meta.get("quant", "?"),
         )
-        if m["name"] == default_model:
+        if model["name"] == default_model:
             default_idx = i + 1
 
     console.print(t)
     console.print()
 
-    choice = IntPrompt.ask(
-        f"[{C_ACCENT}] ▸ Select a model ID[/]",
-        default=default_idx,
-    )
+    choice = IntPrompt.ask(f"{INDENT}{GUTTER} select a model", default=default_idx)
 
     if choice < 1 or choice > len(installed):
-        console.print(f"[{C_RED}] ✗ Invalid selection.[/]")
+        note("that number is not in the list.", tone="error")
         raise typer.Exit(1)
 
     return installed[choice - 1]["name"]

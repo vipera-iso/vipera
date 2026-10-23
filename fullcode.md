@@ -1,27 +1,23 @@
 # vipera — Full Source Code
 
 ```python
+
 # __init__.py
 __version__ = "1.2.0"
-
 # cli.py
 import typer
-from rich import box
-from rich.panel import Panel
-from rich.text import Text
 
 from vipera import __version__
 from vipera.commands import bench_cmd, chat_cmd, model_cmd, serve_cmd, system_cmd
 from vipera.config import load_config
 from vipera.registry import list_models
 from vipera.ui import (
-    C_ACCENT,
-    C_DIM,
-    C_RED,
-    C_TEXT,
+    catalog,
     console,
+    note,
     pick_model,
     print_banner,
+    section,
 )
 
 app = typer.Typer(
@@ -41,57 +37,48 @@ app.add_typer(system_cmd.app, name="system", help="Diagnostics & Config")
 @app.command("help")
 def show_help():
     """Detailed usage guide."""
-    guide = Text()
+    section("start")
+    catalog(
+        [
+            ("vipera", "start the gateway with the default model"),
+            ("vipera -s", "start the gateway and pick a model first"),
+            ("vipera model search", "search Hugging Face and download a GGUF"),
+            ("vipera chat repl", "chat against a local model"),
+        ]
+    )
 
-    guide.append("  ▸ QUICK START\n", style=C_ACCENT)
-    guide.append(
-        "    • vipera                          Start gateway (default model)\n", style=C_TEXT
+    section("models")
+    catalog(
+        [
+            ("vipera model list", "list installed models"),
+            ("vipera model import <path>", "import a local .gguf"),
+            ("vipera model inspect <path>", "read the GGUF layout and quants"),
+            ("vipera model imatrix <path>", "build an importance matrix"),
+            ("vipera model quantize <path>", "quantize with llama-quantize"),
+            ("vipera model optimize <path>", "inspect, then imatrix, then quantize"),
+            ("vipera model rm <name>", "remove a model"),
+        ]
     )
-    guide.append(
-        "    • vipera -s                       Start gateway with model picker\n", style=C_TEXT
-    )
-    guide.append(
-        "    • vipera model search             Search & download from HuggingFace\n", style=C_TEXT
-    )
-    guide.append("    • vipera chat repl                Chat in the terminal\n\n", style=C_TEXT)
 
-    guide.append("  ▸ MODELS (vipera model ...)\n", style=C_ACCENT)
-    guide.append("    • vipera model list               List installed models\n", style=C_TEXT)
-    guide.append("    • vipera model import <path>      Import a local .gguf file\n", style=C_TEXT)
-    guide.append(
-        "    • vipera model inspect <path>     Analyze GGUF layout & quants\n", style=C_TEXT
+    section("inference")
+    catalog(
+        [
+            ("vipera chat repl", "interactive chat"),
+            ('vipera chat oneshot "<prompt>"', "one question, then exit"),
+            ("vipera bench run", "measure prompt and generation throughput"),
+        ]
     )
-    guide.append("    • vipera model imatrix <path>     Build an importance matrix\n", style=C_TEXT)
-    guide.append(
-        "    • vipera model quantize <path>    Quantize with llama-quantize\n", style=C_TEXT
-    )
-    guide.append(
-        "    • vipera model optimize <path>    Inspect → imatrix → quantize\n", style=C_TEXT
-    )
-    guide.append("    • vipera model rm <name>          Remove a model\n\n", style=C_TEXT)
 
-    guide.append("  ▸ INFERENCE (vipera chat / bench ...)\n", style=C_ACCENT)
-    guide.append("    • vipera chat repl                Interactive chat\n", style=C_TEXT)
-    guide.append('    • vipera chat oneshot "<prompt>"  One-shot query\n', style=C_TEXT)
-    guide.append("    • vipera bench run                Benchmark model\n\n", style=C_TEXT)
-
-    guide.append("  ▸ SYSTEM (vipera system ...)\n", style=C_ACCENT)
-    guide.append(
-        "    • vipera system doctor            Hardware & library diagnostics\n", style=C_TEXT
+    section("system")
+    catalog(
+        [
+            ("vipera system doctor", "hardware, runtime, and library check"),
+            ("vipera system config", "read or change config.json keys"),
+        ]
     )
-    guide.append("    • vipera system config            View/edit config\n\n", style=C_TEXT)
 
-    guide.append("  💡 TIP: use `vipera -s` to switch the running model.\n", style=C_DIM)
-
-    console.print(
-        Panel(
-            guide,
-            title=Text(" VIPERA MANUAL ", style=C_ACCENT),
-            border_style=C_ACCENT,
-            box=box.ROUNDED,
-            padding=(1, 2),
-        )
-    )
+    console.print()
+    note("use `vipera -s` to switch the model the gateway starts with.")
 
 
 @app.callback()
@@ -113,20 +100,11 @@ def main(
 
     installed = list_models()
     if not installed:
-        console.print(
-            Panel(
-                Text(
-                    "  [ NO MODELS INSTALLED ]\n\n"
-                    "  Import a model first:\n"
-                    "  ► vipera model import <path_to_gguf> --name my-model\n\n"
-                    "  Or search Hugging Face:\n"
-                    "  ► vipera model search",
-                    style=C_RED,
-                ),
-                title=Text(" WARNING ", style=C_RED),
-                border_style=C_RED,
-                box=box.ROUNDED,
-            )
+        note(
+            "no models installed yet.\n"
+            "  vipera model search            download one from Hugging Face\n"
+            "  vipera model import <path>     import a local .gguf",
+            tone="error",
         )
         raise typer.Exit(1)
 
@@ -136,22 +114,18 @@ def main(
     if select or not model:
         if len(installed) == 1 and not select:
             model = installed[0]["name"]
-            console.print(f"[{C_ACCENT}]► Auto-selected the only installed model: {model}[/]\n")
+            console.print(f"   only one model is installed, using {model}")
+            console.print()
         else:
-            model = pick_model("SELECT A MODEL TO START")
+            model = pick_model("select a model to start")
     else:
-        console.print(f"[{C_ACCENT}]► Starting Gateway with default model: {model}[/]")
-        console.print(f"[{C_DIM}]  (Use `vipera -s` to choose a different model)[/]\n")
+        console.print(f"   starting the gateway with {model}")
+        console.print("   use `vipera -s` to choose another model")
+        console.print()
 
     ctx.invoke(serve_cmd.start, model=model)
-
-
-if __name__ == "__main__":
-    app()
-
 # commands/__init__.py
 # Subcommand package.
-
 # commands/bench_cmd.py
 import time
 
@@ -168,11 +142,13 @@ from vipera.ui import (
     C_ACCENT,
     C_DIM,
     C_GREEN,
-    C_RED,
     C_TEXT,
     animated_loading_bar,
     console,
+    ledger,
+    note,
     pick_model,
+    section,
 )
 
 app = typer.Typer()
@@ -265,24 +241,21 @@ def run(
     cfg = load_config()
     model = model or cfg.get("default_model")
     if not model:
-        model = pick_model("SELECT A MODEL TO BENCHMARK")
+        model = pick_model("select a model to benchmark")
 
     m = get_model(model)
     if not m:
-        console.print(f"[{C_RED}] ✗ Model not found: {model}[/]")
+        note(f"no model called {model}. run `vipera model list`.", tone="error")
         raise typer.Exit(1)
 
     hw = detect()
     try:
         ctx_list = [int(x) for x in ctx.split(",") if x.strip()]
     except ValueError as exc:
-        console.print(
-            f"[{C_RED}] ✗ --ctx must be comma-separated integers "
-            f"(example: 512,8192,65536), got: {ctx!r}[/]"
-        )
+        note(f"--ctx takes comma-separated integers (512,8192,65536); got {ctx!r}", tone="error")
         raise typer.Exit(1) from exc
     if not ctx_list or any(c <= 0 for c in ctx_list):
-        console.print(f"[{C_RED}] ✗ --ctx values must be positive integers, got: {ctx!r}[/]")
+        note(f"--ctx values must be positive integers; got {ctx!r}", tone="error")
         raise typer.Exit(1)
 
     backend = cfg.get("backend", "inprocess")
@@ -290,24 +263,28 @@ def run(
     # prompt-lookup draft measured -29%), so the setting only exists here as
     # context for reading the numbers: the server backend applies it itself.
     spec = cfg.get("spec_type", "none") if backend == "server" else "off"
-    console.print(
-        f"\n[{C_ACCENT}]▸ Benchmarking model:[/] [{C_TEXT}]{model}[/]"
-        f"  [{C_DIM}](backend: {backend}, spec: {spec})[/]"
-    )
-    console.print(
-        f"[{C_DIM}]  (Hardware: {hw.cpu_cores} cores, "
-        f"{hw.ram_free_gb:.1f} GB RAM free, GPU: {hw.gpu_name})[/]\n"
+    console.print()
+    ledger(
+        [
+            ("model", model),
+            ("backend", f"{backend}, spec {spec}"),
+            (
+                "machine",
+                f"{hw.cpu_cores} cores, {hw.ram_free_gb:.1f} GB RAM free, {hw.gpu_name}",
+            ),
+        ]
     )
 
-    t = Table(box=box.ROUNDED, title="BENCHMARK RESULTS", title_justify="left")
-    t.add_column("CTX", style=C_TEXT, justify="right")
-    t.add_column("GPU LAYERS", style=C_DIM, justify="center")
-    t.add_column("PROMPT TOK", style=C_DIM, justify="right")
-    t.add_column("TTFT", style=C_DIM, justify="right")
-    t.add_column("PREFILL T/s", style=C_GREEN, justify="right")
-    t.add_column("GEN TOK", style=C_DIM, justify="right")
-    t.add_column("GEN T/s", style=C_GREEN, justify="right")
-    t.add_column("TOTAL", style=C_TEXT, justify="right")
+    section("results")
+    t = Table(box=box.SIMPLE_HEAD, padding=(0, 2), pad_edge=False, show_edge=False)
+    t.add_column("ctx", style=C_TEXT, justify="right")
+    t.add_column("layers", style=C_DIM, justify="right")
+    t.add_column("prompt", style=C_DIM, justify="right")
+    t.add_column("ttft", style=C_DIM, justify="right")
+    t.add_column("prefill t/s", style=C_GREEN, justify="right")
+    t.add_column("gen", style=C_DIM, justify="right")
+    t.add_column("gen t/s", style=C_GREEN, justify="right")
+    t.add_column("total", style=C_TEXT, justify="right")
 
     for c in ctx_list:
         p = plan(
@@ -328,14 +305,14 @@ def run(
                 try:
                     engine = create_engine(p, m["path"], backend)
                 except Exception as e:
-                    console.print(f"[{C_RED}] ✗ Failed to load model with ctx={c}: {e}[/]")
+                    note(f"ctx {c} did not load: {e}", tone="error")
                     continue
 
-            animated_loading_bar(f"RUNNING CTX {c}", 0.5)
+            animated_loading_bar(f"ctx {c}", 0.5)
             result = _run_bench(engine, PROMPT, max_tokens)
 
             if "error" in result:
-                console.print(f"[{C_RED}] ✗ Benchmark error at ctx={c}: {result['error']}[/]")
+                note(f"ctx {c} failed during the run: {result['error']}", tone="error")
                 continue
 
             # Report the plan the engine actually loaded: a GPU load can fail
@@ -362,18 +339,13 @@ def run(
                 engine.close()
 
     console.print(t)
-    console.print(
-        f"[{C_DIM}]  * TTFT = time to first token. PREFILL T/s is prompt_tokens / TTFT "
-        f"(approximate). GEN T/s is measured after the first token. "
-        f"A '~' prefix on GEN TOK means the backend did not report usage and the "
-        f"count is a streamed-chunk approximation.[/]\n"
+    note(
+        "ttft is time to first token, and prefill t/s is prompt tokens over ttft.\n"
+        "gen t/s is measured after the first token. a `~` on gen means the backend\n"
+        "reported no usage and the count is a streamed-chunk approximation."
     )
-
 # commands/chat_cmd.py
 import typer
-from rich import box
-from rich.panel import Panel
-from rich.text import Text
 
 from vipera.config import load_config
 from vipera.engine import ChatEngine, create_engine
@@ -384,8 +356,8 @@ from vipera.ui import (
     C_ACCENT,
     C_DIM,
     C_RED,
-    C_SUCCESS,
     console,
+    note,
     pick_model,
     plain_chat_stream,
     typewriter_chat_stream,
@@ -421,23 +393,17 @@ def _build(model: str) -> ChatEngine:
 
 
 def repl_loop(engine: ChatEngine, typewriter: bool = False, chat_kwargs: dict | None = None):
-    console.print(
-        Panel(
-            Text("  System Ready. Type 'exit' or Ctrl+C to quit.", style=C_SUCCESS),
-            border_style=C_ACCENT,
-            box=box.ROUNDED,
-        )
-    )
+    note("ready. type `exit` or press ctrl-c to quit.", tone="ok")
 
     history = [{"role": "system", "content": "You are a helpful assistant."}]
     kwargs = chat_kwargs or {}
 
     while True:
-        console.print(f"\n  [{C_ACCENT}]User >[/] ", end="")
+        console.print(f"\n   [{C_ACCENT}]>[/] ", end="")
         try:
             user = input().strip()
         except (EOFError, KeyboardInterrupt):
-            console.print(f"\n  [{C_DIM}]Disconnected.[/]")
+            console.print(f"\n   [{C_DIM}]disconnected[/]")
             break
 
         if not user:
@@ -449,13 +415,10 @@ def repl_loop(engine: ChatEngine, typewriter: bool = False, chat_kwargs: dict | 
 
         try:
             stream = engine.chat(history, stream=True, **kwargs)
-            if typewriter:
-                reply = typewriter_chat_stream(stream, title_text=" AI ")
-            else:
-                reply = plain_chat_stream(stream, title_text=" AI ")
+            reply = typewriter_chat_stream(stream) if typewriter else plain_chat_stream(stream)
             history.append({"role": "assistant", "content": reply})
         except Exception as e:
-            console.print(f"\n  [{C_RED}]✗ Error: {e}[/]")
+            note(f"the model returned an error: {e}", tone="error")
             history.pop()
 
 
@@ -470,7 +433,7 @@ def repl(
     cfg = load_config()
     model = model or cfg.get("default_model")
     if not model:
-        model = pick_model("SELECT A MODEL TO CHAT")
+        model = pick_model("select a model to chat")
     engine = _build(model)
     try:
         repl_loop(engine, typewriter=typewriter, chat_kwargs=_chat_kwargs(cfg))
@@ -490,19 +453,18 @@ def oneshot(
     cfg = load_config()
     model = model or cfg.get("default_model")
     if not model:
-        model = pick_model("SELECT A MODEL TO CHAT")
+        model = pick_model("select a model to chat")
     engine = _build(model)
     try:
         stream = engine.chat(
             [{"role": "user", "content": prompt}], stream=True, **_chat_kwargs(cfg)
         )
         if typewriter:
-            typewriter_chat_stream(stream, title_text=" AI ")
+            typewriter_chat_stream(stream)
         else:
-            plain_chat_stream(stream, title_text=" AI ")
+            plain_chat_stream(stream)
     finally:
         engine.close()
-
 # commands/model_cmd.py
 import re
 import shlex
@@ -513,10 +475,8 @@ from pathlib import Path
 import typer
 from huggingface_hub import HfApi, hf_hub_download, list_repo_files
 from rich import box
-from rich.panel import Panel
 from rich.prompt import IntPrompt, Prompt
 from rich.table import Table
-from rich.text import Text
 
 from vipera.config import MODELS_DIR, ensure_dirs, load_config, save_config
 from vipera.gguf_analyzer import GGUFAnalysisError, analyze_gguf
@@ -536,12 +496,11 @@ from vipera.registry import add_model, get_model, list_models, remove_model
 from vipera.ui import (
     C_ACCENT,
     C_DIM,
-    C_GREEN,
-    C_RED,
     C_TEXT,
     C_YELLOW,
     animated_loading_bar,
     console,
+    note,
 )
 
 app = typer.Typer()
@@ -649,7 +608,7 @@ def import_model(
     ensure_dirs()
     src_path = Path(src).expanduser().resolve()
     if not src_path.exists():
-        console.print(f"[{C_RED}] ✗ File not found: {src_path}[/]")
+        console.print(f"file not found: {src_path}")
         raise typer.Exit(1)
 
     base_alias = (name or src_path.stem).removesuffix(".gguf")
@@ -660,7 +619,7 @@ def import_model(
         with console.status(f"[{C_ACCENT}] Copying {src_path.name}…"):
             shutil.copy2(src_path, dst)
 
-    animated_loading_bar("IMPORTING GGUF", 1.0)
+    animated_loading_bar("importing gguf", 1.0)
     meta = _read_meta(dst, src_path.name)
     add_model(alias, dst, meta)
 
@@ -669,7 +628,7 @@ def import_model(
     save_config(cfg)
 
     param_str = f"{meta.get('n_params', 0) / 1e9:.2f}B · " if meta.get("n_params") else ""
-    console.print(f"  [{C_GREEN}]✓ IMPORTED & SET AS DEFAULT[/]  [{C_TEXT}]{alias}[/]")
+    console.print(f"imported {alias} and set it as default")
     console.print(
         f"    [{C_DIM}]└─ {param_str}{meta['size_bytes'] / 1e9:.2f} GB  ·  "
         f"{meta.get('n_layers', 0)} layers  ·  {meta['quant']}[/]\n"
@@ -680,15 +639,8 @@ def import_model(
 def search_model():
     """Search and download GGUF models from Hugging Face."""
     ensure_dirs()
-    console.print(
-        Panel(
-            "  Enter a keyword to search for GGUF models on Hugging Face.",
-            title="[ SEARCH HUB ]",
-            border_style=C_ACCENT,
-            box=box.ROUNDED,
-        )
-    )
-    query = Prompt.ask(f"[{C_ACCENT}]  ▸ Keyword[/]")
+    note("search Hugging Face for GGUFs. a keyword is enough, e.g. `qwen2.5 7b`.")
+    query = Prompt.ask(f"[{C_ACCENT}]   keyword[/]")
     if not query:
         return
 
@@ -696,17 +648,17 @@ def search_model():
         try:
             models = list(api.list_models(search=query, filter="gguf", limit=10))
         except Exception as e:
-            console.print(f"[{C_RED}] ✗ Connection failed: {e}[/]")
+            console.print(f"could not reach Hugging Face: {e}")
             raise typer.Exit(1) from e
 
     if not models:
-        console.print(f"[{C_YELLOW}] ⚠ No models found.[/]")
+        note("nothing matched that keyword. try a shorter one.", tone="warn")
         raise typer.Exit(0)
 
-    t = Table(box=box.ROUNDED, title=f"SEARCH RESULTS · '{query}'", title_justify="left")
-    t.add_column("ID", style=C_DIM, justify="center")
-    t.add_column("REPO ID", style=C_TEXT)
-    t.add_column("DOWNLOADS", style=C_ACCENT, justify="right")
+    t = Table(box=box.SIMPLE_HEAD, title=f"results for {query}", title_style=C_DIM, title_justify="left")
+    t.add_column("id", style=C_DIM, justify="center")
+    t.add_column("repo id", style=C_TEXT)
+    t.add_column("downloads", style=C_ACCENT, justify="right")
     for i, m in enumerate(models):
         t.add_row(f"[{i + 1}]", m.id, f"{m.downloads:,}" if m.downloads else "0")
     console.print(t)
@@ -724,12 +676,12 @@ def search_model():
             raise typer.Exit(1) from e
 
     if not gguf_files:
-        console.print(f"[{C_RED}] ✗ No .gguf files found.[/]")
+        console.print("no .gguf files in that repository")
         raise typer.Exit(1)
 
-    ft = Table(box=box.ROUNDED, title=f"FILES · {selected_repo}", title_justify="left")
-    ft.add_column("ID", style=C_DIM, justify="center")
-    ft.add_column("FILE NAME", style=C_TEXT)
+    ft = Table(box=box.SIMPLE_HEAD, title=f"files in {selected_repo}", title_style=C_DIM, title_justify="left")
+    ft.add_column("id", style=C_DIM, justify="center")
+    ft.add_column("file name", style=C_TEXT)
     for i, f in enumerate(gguf_files):
         ft.add_row(f"[{i + 1}]", f)
     console.print(ft)
@@ -746,8 +698,8 @@ def search_model():
             filename=selected_file,
             local_dir=MODELS_DIR,
         )
-        console.print(f"\n[{C_GREEN}] ✓ Download complete![/]")
-        animated_loading_bar("FINALISING", 0.5)
+        console.print("download complete")
+        animated_loading_bar("finalising", 0.5)
 
         base_alias = Path(downloaded_path).stem
         alias = _unique_alias(base_alias)
@@ -759,7 +711,7 @@ def search_model():
         save_config(cfg)
 
         param_str = f"{meta.get('n_params', 0) / 1e9:.2f}B · " if meta.get("n_params") else ""
-        console.print(f"  [{C_GREEN}]✓ REGISTERED & SET AS DEFAULT[/]  [{C_TEXT}]{alias}[/]")
+        console.print(f"registered {alias} and set it as default")
         console.print(
             f"    [{C_DIM}]└─ {param_str}{meta['size_bytes'] / 1e9:.2f} GB  ·  {meta['quant']}[/]"
         )
@@ -769,7 +721,7 @@ def search_model():
     except KeyboardInterrupt:
         console.print(f"\n[{C_YELLOW}] ⚠ Download cancelled.[/]")
     except Exception as e:
-        console.print(f"\n[{C_RED}] ✗ Download failed: {e}[/]")
+        console.print(f"download failed: {e}")
 
 
 def _format_bytes(value: int) -> str:
@@ -790,13 +742,13 @@ def inspect_model(
     try:
         result = analyze_gguf(path)
     except GGUFAnalysisError as e:
-        console.print(f"[{C_RED}] ✗ {e}[/]")
+        console.print(f"{e}")
         raise typer.Exit(1) from e
 
     meta = result["metadata"]
-    summary = Table(box=box.ROUNDED, title="GGUF ANATOMY", title_justify="left")
-    summary.add_column("PROPERTY", style=C_DIM)
-    summary.add_column("VALUE", style=C_TEXT)
+    summary = Table(box=box.SIMPLE_HEAD, title="gguf anatomy", title_style=C_DIM, title_justify="left")
+    summary.add_column("property", style=C_DIM)
+    summary.add_column("value", style=C_TEXT)
     summary.add_row("file", result["path"])
     summary.add_row("architecture", str(meta.get("architecture") or "?"))
     summary.add_row("name", str(meta.get("name") or "?"))
@@ -824,11 +776,11 @@ def inspect_model(
     for tensor in result["tensor_map"]:
         tensor_counts[tensor["category"]] = tensor_counts.get(tensor["category"], 0) + 1
 
-    categories = Table(box=box.ROUNDED, title="SIZE BY CATEGORY", title_justify="left")
-    categories.add_column("CATEGORY", style=C_TEXT)
-    categories.add_column("TENSORS", style=C_DIM, justify="right")
-    categories.add_column("SIZE", style=C_ACCENT, justify="right")
-    categories.add_column("SHARE", style=C_DIM, justify="right")
+    categories = Table(box=box.SIMPLE_HEAD, title="size by category", title_style=C_DIM, title_justify="left")
+    categories.add_column("category", style=C_TEXT)
+    categories.add_column("tensors", style=C_DIM, justify="right")
+    categories.add_column("size", style=C_ACCENT, justify="right")
+    categories.add_column("share", style=C_DIM, justify="right")
     for category, size in sorted(
         result["category_sizes"].items(), key=lambda item: item[1], reverse=True
     ):
@@ -840,10 +792,10 @@ def inspect_model(
         )
     console.print(categories)
 
-    quant_table = Table(box=box.ROUNDED, title="QUANTIZATION MIX", title_justify="left")
-    quant_table.add_column("QUANT", style=C_ACCENT)
-    quant_table.add_column("TENSORS", style=C_DIM, justify="right")
-    quant_table.add_column("SIZE", style=C_TEXT, justify="right")
+    quant_table = Table(box=box.SIMPLE_HEAD, title="quantization mix", title_style=C_DIM, title_justify="left")
+    quant_table.add_column("quant", style=C_ACCENT)
+    quant_table.add_column("tensors", style=C_DIM, justify="right")
+    quant_table.add_column("size", style=C_TEXT, justify="right")
     for quant, size in sorted(
         result["quant_sizes"].items(), key=lambda item: item[1], reverse=True
     ):
@@ -858,25 +810,21 @@ def inspect_model(
     if warnings:
         lines = []
         for warning in warnings[:10]:
-            lines.append(f"  • {warning['tensor']}: {warning['quant']}")
+            lines.append(f"{warning['tensor']}: {warning['quant']}")
         if len(warnings) > 10:
-            lines.append(f"  … and {len(warnings) - 10} more")
-        console.print(
-            Panel(
-                "\n".join(lines),
-                title=Text(" QUALITY WARNINGS ", style=C_YELLOW),
-                border_style=C_YELLOW,
-                box=box.ROUNDED,
-            )
-        )
+            lines.append(f"and {len(warnings) - 10} more")
+        console.print()
+        note("\n".join(lines), tone="warn")
 
     if tensors:
-        tensor_table = Table(box=box.SIMPLE, title="TENSORS", title_justify="left")
-        tensor_table.add_column("LAYER", style=C_DIM, justify="right")
-        tensor_table.add_column("NAME", style=C_TEXT)
-        tensor_table.add_column("QUANT", style=C_ACCENT)
-        tensor_table.add_column("SHAPE", style=C_DIM, justify="right")
-        tensor_table.add_column("SIZE", style=C_DIM, justify="right")
+        tensor_table = Table(
+            box=box.SIMPLE_HEAD, title="tensors", title_style=C_DIM, title_justify="left"
+        )
+        tensor_table.add_column("layer", style=C_DIM, justify="right")
+        tensor_table.add_column("name", style=C_TEXT)
+        tensor_table.add_column("quant", style=C_ACCENT)
+        tensor_table.add_column("shape", style=C_DIM, justify="right")
+        tensor_table.add_column("size", style=C_DIM, justify="right")
         for tensor in result["tensor_map"]:
             layer = tensor["layer"]
             tensor_table.add_row(
@@ -892,7 +840,7 @@ def inspect_model(
 def _require_file(value: str | Path, label: str) -> Path:
     path = Path(value).expanduser()
     if not path.is_file():
-        console.print(f"[{C_RED}] ✗ {label} not found: {path}[/]")
+        console.print(f"{label} not found: {path}")
         raise typer.Exit(1)
     return path
 
@@ -901,7 +849,7 @@ def _prepare_output(value: str | None, fallback: Path) -> Path:
     if value:
         path = Path(value).expanduser()
         if path.exists():
-            console.print(f"[{C_RED}] ✗ output already exists: {path}[/]")
+            console.print(f"output already exists: {path}")
             raise typer.Exit(1)
         return path
     return unique_output_path(fallback)
@@ -915,10 +863,10 @@ def _run_tool(command: list[str], dry_run: bool, cleanup: Path | None = None) ->
     try:
         subprocess.run(command, check=True)
     except FileNotFoundError as e:
-        console.print(f"[{C_RED}] ✗ {e}[/]")
+        console.print(f"{e}")
         ok = False
     except subprocess.CalledProcessError as e:
-        console.print(f"[{C_RED}] ✗ command failed with exit code {e.returncode}[/]")
+        console.print(f"llama.cpp exited with code {e.returncode}")
         ok = False
     except KeyboardInterrupt:
         console.print(f"\n[{C_YELLOW}] ⚠ Interrupted.[/]")
@@ -944,7 +892,7 @@ def imatrix_cmd(
     model = _require_file(path, "model")
     calibration = _require_file(calibration_data, "calibration data")
     if ctx <= 0:
-        console.print(f"[{C_RED}] ✗ --ctx must be greater than zero[/]")
+        console.print("--ctx must be greater than zero")
         raise typer.Exit(1)
 
     try:
@@ -953,13 +901,13 @@ def imatrix_cmd(
         out = _prepare_output(output, default_out)
         command = build_imatrix_command(binary, model, calibration, out, ctx, threads)
     except OptimizerError as e:
-        console.print(f"[{C_RED}] ✗ {e}[/]")
+        console.print(f"{e}")
         raise typer.Exit(1) from e
 
     if not _run_tool(command, dry_run, cleanup=out):
         raise typer.Exit(1)
     if not dry_run:
-        console.print(f"[{C_GREEN}] ✓ imatrix written:[/] {out}")
+        console.print(f"imatrix written to {out}")
 
 
 @app.command("quantize")
@@ -996,7 +944,7 @@ def quantize_cmd(
     model = _require_file(path, "model")
     imatrix_path = _require_file(imatrix, "imatrix") if imatrix else None
     if prior_weight < 1:
-        console.print(f"[{C_RED}] ✗ --prior-weight must be at least 1[/]")
+        console.print("--prior-weight must be at least 1")
         raise typer.Exit(1)
 
     try:
@@ -1017,7 +965,7 @@ def quantize_cmd(
             token_embedding_type=token_embedding,
         )
     except OptimizerError as e:
-        console.print(f"[{C_RED}] ✗ {e}[/]")
+        console.print(f"{e}")
         raise typer.Exit(1) from e
 
     if prune_layers:
@@ -1026,7 +974,7 @@ def quantize_cmd(
         raise typer.Exit(1)
     if not dry_run:
         console.print(
-            f"[{C_GREEN}] ✓ quantized model:[/] {out} ({_format_bytes(out.stat().st_size)})"
+            f"quantized {out} ({_format_bytes(out.stat().st_size)})"
         )
 
 
@@ -1059,13 +1007,13 @@ def optimize_cmd(
     """Analyze, optionally build an imatrix, then quantize toward a size target."""
     model = _require_file(path, "model")
     if target_size is None and target_quant is None:
-        console.print(f"[{C_RED}] ✗ provide --target-size or --target-quant[/]")
+        console.print("provide --target-size or --target-quant")
         raise typer.Exit(1)
     if target_size is not None and target_size <= 0:
-        console.print(f"[{C_RED}] ✗ --target-size must be greater than zero[/]")
+        console.print("--target-size must be greater than zero")
         raise typer.Exit(1)
     if prior_weight < 1:
-        console.print(f"[{C_RED}] ✗ --prior-weight must be at least 1[/]")
+        console.print("--prior-weight must be at least 1")
         raise typer.Exit(1)
 
     try:
@@ -1083,14 +1031,14 @@ def optimize_cmd(
             quant = choice.quant
             estimated = choice.estimated_bytes
     except (GGUFAnalysisError, OptimizerError) as e:
-        console.print(f"[{C_RED}] ✗ {e}[/]")
+        console.print(f"{e}")
         raise typer.Exit(1) from e
 
     try:
         quantize_bin = find_llama_tool("quantize", bin_dir)
         supports_prior = prior_weight != 1 and tool_supports_flag(quantize_bin, "--prior-weight")
     except OptimizerError as e:
-        console.print(f"[{C_RED}] ✗ {e}[/]")
+        console.print(f"{e}")
         raise typer.Exit(1) from e
 
     stem = model.stem
@@ -1099,9 +1047,9 @@ def optimize_cmd(
     if imatrix_out.exists():
         imatrix_out = unique_output_path(imatrix_out)
 
-    plan = Table(box=box.ROUNDED, title="OPTIMIZATION PLAN", title_justify="left")
-    plan.add_column("PROPERTY", style=C_DIM)
-    plan.add_column("VALUE", style=C_TEXT)
+    plan = Table(box=box.SIMPLE_HEAD, title="optimization plan", title_style=C_DIM, title_justify="left")
+    plan.add_column("property", style=C_DIM)
+    plan.add_column("value", style=C_TEXT)
     plan.add_row("model", str(model))
     plan.add_row("current", f"{current_quant} · {_format_bytes(current_size)}")
     plan.add_row("target quant", quant)
@@ -1121,7 +1069,7 @@ def optimize_cmd(
                 imatrix_bin, model, calibration, imatrix_out, ctx_size=512
             )
         except OptimizerError as e:
-            console.print(f"[{C_RED}] ✗ {e}[/]")
+            console.print(f"{e}")
             raise typer.Exit(1) from e
         if not _run_tool(imatrix_cmd, dry_run, cleanup=imatrix_out):
             raise typer.Exit(1)
@@ -1141,7 +1089,7 @@ def optimize_cmd(
             token_embedding_type=token_embedding,
         )
     except OptimizerError as e:
-        console.print(f"[{C_RED}] ✗ {e}[/]")
+        console.print(f"{e}")
         raise typer.Exit(1) from e
 
     if prune_layers:
@@ -1153,7 +1101,7 @@ def optimize_cmd(
         raise typer.Exit(1)
     if not dry_run:
         console.print(
-            f"[{C_GREEN}] ✓ optimized model:[/] {out} ({_format_bytes(out.stat().st_size)})"
+            f"optimized {out} ({_format_bytes(out.stat().st_size)})"
         )
 
 
@@ -1165,13 +1113,13 @@ def list_cmd():
         console.print(f"[{C_DIM}]No models. Run `vipera model import` or `vipera model search`.[/]")
         return
 
-    t = Table(box=box.ROUNDED, title="LOCAL MODELS", title_justify="left")
-    t.add_column("ID", style=C_DIM, justify="center")
-    t.add_column("ALIAS", style=C_TEXT)
-    t.add_column("SIZE", style=C_DIM)
-    t.add_column("QUANT", style=C_ACCENT)
-    t.add_column("LAYERS", style=C_DIM, justify="right")
-    t.add_column("CTX", style=C_DIM, justify="right")
+    t = Table(box=box.SIMPLE_HEAD, title="local models", title_style=C_DIM, title_justify="left")
+    t.add_column("id", style=C_DIM, justify="center")
+    t.add_column("alias", style=C_TEXT)
+    t.add_column("size", style=C_DIM)
+    t.add_column("quant", style=C_ACCENT)
+    t.add_column("layers", style=C_DIM, justify="right")
+    t.add_column("ctx", style=C_DIM, justify="right")
 
     for i, m in enumerate(models):
         meta = m.get("meta", {})
@@ -1198,7 +1146,7 @@ def rm_cmd(
     """Remove a model."""
     m = get_model(name)
     if not m:
-        console.print(f"[{C_RED}] ✗ Not found: {name}[/]")
+        console.print(f"there is no model called {name}. `vipera model list` shows them.")
         raise typer.Exit(1)
     if not yes and not typer.confirm(f"Remove model '{name}'?"):
         raise typer.Abort()
@@ -1219,7 +1167,7 @@ def rm_cmd(
     else:
         path.unlink(missing_ok=True)
 
-    console.print(f"[{C_GREEN}] ✓ Removed: {name}[/]")
+    console.print(f"removed {name}")
 
 
 @app.command("recommend")
@@ -1230,7 +1178,7 @@ def recommend_quantization(
     try:
         result = analyze_gguf(path)
     except GGUFAnalysisError as e:
-        console.print(f"[{C_RED}] ✗ {e}[/]")
+        console.print(f"{e}")
         raise typer.Exit(1) from e
 
     meta = result["metadata"]
@@ -1240,7 +1188,7 @@ def recommend_quantization(
     console.print(f"\n[{C_ACCENT}]▸ Optimization Recommendations for {path}[/]\n")
 
     if not warnings:
-        console.print(f"  [{C_GREEN}]✓ This model has no critical low-precision tensors.[/]")
+        console.print("this model has no low-precision tensors worth fixing")
         console.print(f"  [{C_DIM}]You can safely quantize to {current_quant} or lower.[/]\n")
         return
 
@@ -1257,7 +1205,6 @@ def recommend_quantization(
         f"    --token-embedding q6_k \\\n"
         f"    --imatrix <your_imatrix.gguf>\n"
     )
-
 # commands/serve_cmd.py
 import os
 import socket
@@ -1266,9 +1213,6 @@ from pathlib import Path
 
 import psutil
 import typer
-from rich import box
-from rich.panel import Panel
-from rich.text import Text
 
 from vipera.config import VIPERA_HOME, load_config
 from vipera.engine import ChatEngine, create_engine, resolve_backend
@@ -1277,14 +1221,16 @@ from vipera.planner import plan
 from vipera.registry import get_model
 from vipera.ui import (
     C_ACCENT,
-    C_BORDER,
     C_DIM,
     C_GREEN,
     C_RED,
-    C_SUCCESS,
-    C_TEXT,
     C_YELLOW,
+    catalog,
     console,
+    gauge,
+    ledger,
+    note,
+    section,
 )
 
 
@@ -1333,30 +1279,14 @@ def _quick_bench(engine: ChatEngine) -> None:
 
             tps = gen_tok / dt if dt > 0 else 0
 
-            if tps >= 20:
-                speed_color, speed_status = C_SUCCESS, "FAST"
-            elif tps >= 8:
-                speed_color, speed_status = C_YELLOW, "OK"
-            else:
-                speed_color, speed_status = C_RED, "SLOW"
+            status = "fast" if tps >= 20 else "ok" if tps >= 8 else "slow"
 
-            bench_text = Text()
-            bench_text.append("  ● ", style=speed_color)
-            bench_text.append("SPEED TEST: ", style=C_TEXT)
-            bench_text.append(f"{tps:.1f} T/s", style=speed_color)
-            bench_text.append(f"  [{speed_status}]  ", style=speed_color)
-            bench_text.append(
-                f"({gen_tok} tokens in {dt:.2f}s, Prompt: {prompt_tok} t)",
-                style=C_DIM,
-            )
-
-            console.print(
-                Panel(
-                    bench_text,
-                    border_style=speed_color,
-                    box=box.ROUNDED,
-                    padding=(0, 1),
-                )
+            console.print()
+            ledger(
+                [
+                    ("speed", f"{tps:.1f} tok/s  {status}"),
+                    ("sample", f"{gen_tok} tokens in {dt:.2f} s, {prompt_tok} prompt tokens"),
+                ]
             )
             console.print()
 
@@ -1431,49 +1361,27 @@ def start(
     n_layers_total = int(m["meta"].get("n_layers") or 0) or max(p.gpu_layers, 1)
     quant = m["meta"].get("quant") or "?"
 
-    content = Text()
-    content.append("  ▸ MOUNTING MODEL\n", style=C_ACCENT)
-    content.append(f"    ├─ {model}\n", style=C_TEXT)
-    content.append(f"    ├─ {quant}\n", style=C_DIM)
-    content.append(f"    └─ backend {backend}\n\n", style=C_DIM)
-
-    content.append("  ▸ ALLOCATING VRAM\n", style=C_ACCENT)
     offload_layers = p.n_layers if p.requires_server else p.gpu_layers
-    content.append(
-        "    ├─ layer offload " + "·" * 28 + f" {offload_layers}/{n_layers_total}\n",
-        style=C_TEXT,
-    )
+
+    section("plan")
+    rows = [
+        ("model", model),
+        ("quant", quant),
+        ("backend", backend),
+        ("layers", f"{offload_layers}/{n_layers_total}"),
+        ("kv cache", f"{p.kv_cache}  {p.kv_cache_gb:.2f} GB" if p.kv_cache_gb > 0 else p.kv_cache),
+        ("flash attn", "on" if p.flash_attn else "off"),
+    ]
     if p.requires_server:
         gpu_experts = p.n_layers - p.moe_cpu_layers
-        ubatch = f" · ub {p.n_ubatch}" if p.n_ubatch else ""
-        content.append(
-            "    ├─ moe experts " + "·" * 27 + f" {gpu_experts}/{p.n_layers} layers{ubatch}\n",
-            style=C_TEXT,
-        )
-    kv_suffix = f" · {p.kv_cache_gb:.2f} GB" if p.kv_cache_gb > 0 else ""
-    content.append(
-        f"    ├─ kv cache ({p.kv_cache}) " + "·" * 24 + f" [ OK ]{kv_suffix}\n",
-        style=C_TEXT,
-    )
+        ubatch = f"  ubatch {p.n_ubatch}" if p.n_ubatch else ""
+        rows.insert(4, ("moe experts", f"{gpu_experts}/{p.n_layers} layers{ubatch}"))
     if p.kv_layers and p.kv_layers < n_layers_total:
-        content.append(
-            "    ├─ hybrid attention " + "·" * 21 + f" {p.kv_layers}/{n_layers_total} kv layers\n",
-            style=C_TEXT,
-        )
-    content.append(
-        "    └─ flash attention " + "·" * 27 + f" [ {'ON' if p.flash_attn else 'OFF'} ]\n",
-        style=C_TEXT,
-    )
-
-    console.print(
-        Panel(
-            content,
-            title=Text(" VIPERA DAEMON · BOOT ", style=C_ACCENT),
-            border_style=C_ACCENT,
-            box=box.ROUNDED,
-            padding=(0, 1),
-        )
-    )
+        rows.append(("hybrid attn", f"{p.kv_layers}/{n_layers_total} layers keep KV"))
+    ledger(rows)
+    console.print()
+    gauge("on the gpu", offload_layers, n_layers_total, unit="layers", fmt="{:.0f}")
+    console.print()
 
     try:
         with console.status(f"[{C_ACCENT}] Loading model into memory…"):
@@ -1496,22 +1404,16 @@ def start(
 
         fastapi_app = build_app(engine, model)
 
-        ready = Text()
-        ready.append("  ● ", style=C_SUCCESS)
-        ready.append("SYSTEM READY", style=C_TEXT)
-        ready.append("   ·   ", style=C_BORDER)
-        ready.append(f"http://{host}:{port}\n\n", style=C_ACCENT)
-        ready.append("  ▸ ", style=C_ACCENT)
-        ready.append("POST  ", style=C_DIM)
-        ready.append("/v1/chat/completions\n", style=C_TEXT)
-        ready.append("  ▸ ", style=C_ACCENT)
-        ready.append("GET   ", style=C_DIM)
-        ready.append("/v1/models\n", style=C_TEXT)
-        ready.append("  ▸ ", style=C_ACCENT)
-        ready.append("GET   ", style=C_DIM)
-        ready.append("/health", style=C_TEXT)
-
-        console.print(Panel(ready, border_style=C_SUCCESS, box=box.ROUNDED, padding=(0, 1)))
+        section("ready")
+        ledger([("openai", f"http://{host}:{port}/v1")])
+        catalog(
+            [
+                ("POST /v1/chat/completions", "chat, streaming or not"),
+                ("GET  /v1/models", "the loaded alias"),
+                ("GET  /health", "liveness"),
+            ]
+        )
+        note("ctrl-c stops the server.", tone="ok")
 
         _pid_file(port).write_text(str(os.getpid()))
         uvicorn.run(fastapi_app, host=host, port=port, log_level="warning")
@@ -1598,27 +1500,25 @@ def stop(
 
     pid_file.unlink(missing_ok=True)
     console.print(f"[{C_GREEN}] ✓ STOPPED[/] — port {port} (pid {pid})")
-
 # commands/system_cmd.py
 import platform
 import sys
 
 import typer
-from rich import box
-from rich.panel import Panel
 from rich.text import Text
 
-from vipera.config import DEFAULT_CONFIG, _coerce_strict, load_config, save_config
+from vipera.config import CONFIG_FILE, DEFAULT_CONFIG, _coerce_strict, load_config, save_config
 from vipera.hardware import detect
 from vipera.ui import (
-    C_ACCENT,
-    C_BORDER,
     C_DIM,
     C_GREEN,
     C_RED,
     C_TEXT,
     C_YELLOW,
     console,
+    ledger,
+    note,
+    section,
 )
 
 app = typer.Typer()
@@ -1627,31 +1527,17 @@ app = typer.Typer()
 @app.command("doctor")
 def doctor():
     """Run system diagnostics."""
-    content = Text()
-    counters = {"pass": 0, "warn": 0, "fail": 0}
+    counters = {"ok": 0, "warn": 0, "fail": 0}
 
-    ROW_W = 78
+    def row(label: str, val: str, status: str = "ok", col: str = C_GREEN):
+        counters[status] += 1
+        line = Text("   ")
+        line.append(f"{label:<20}", style=C_DIM)
+        line.append(f"{val:<38}", style=C_TEXT)
+        line.append(f"{status:>4}", style=col)
+        console.print(line)
 
-    def add_sec(title: str):
-        inner = f"[ {title} ]"
-        rest = ROW_W - 5 - len(inner)
-        content.append(f"  ┌─{inner}", style=C_ACCENT)
-        content.append("─" * max(0, rest) + "┐\n", style=C_BORDER)
-
-    def end_sec():
-        content.append("  └" + "─" * (ROW_W - 4) + "┘\n\n", style=C_BORDER)
-
-    def row(label: str, val: str, status: str = "PASS", col: str = C_GREEN):
-        counters[status.lower()] += 1
-        status_s = f"[ {status:^4} ]"
-        dots = "·" * max(1, 41 - len(val))
-        content.append(f"  │ {label:<20} ", style=C_TEXT)
-        content.append(val, style=C_TEXT)
-        content.append(f" {dots} ", style=C_TEXT)
-        content.append(status_s, style=col)
-        content.append(" │\n", style=C_TEXT)
-
-    add_sec("RUNTIME")
+    section("runtime")
     os_info = f"{platform.system()} {platform.release()} ({platform.machine()})"
     row("OS", os_info)
     py_ver = f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}"
@@ -1675,13 +1561,13 @@ def doctor():
             gpu_offload = None
 
         if gpu_offload is True:
-            row("gpu offload", "compiled in (CUDA/Metal)", "PASS", C_GREEN)
+            row("gpu offload", "compiled in (CUDA/Metal)", "ok", C_GREEN)
         elif gpu_offload is False:
-            row("gpu offload", "CPU-only build", "WARN", C_YELLOW)
+            row("gpu offload", "CPU-only build", "warn", C_YELLOW)
         else:
-            row("gpu offload", "unknown (binding too old)", "WARN", C_YELLOW)
+            row("gpu offload", "unknown (binding too old)", "warn", C_YELLOW)
     except ImportError:
-        row("llama-cpp-python", "missing", "FAIL", C_RED)
+        row("llama-cpp-python", "missing", "fail", C_RED)
         llama_missing = True
 
     gguf_missing = False
@@ -1690,68 +1576,58 @@ def doctor():
 
         row("gguf", "installed")
     except ImportError:
-        row("gguf", "missing", "WARN", C_YELLOW)
+        row("gguf", "missing", "warn", C_YELLOW)
         gguf_missing = True
-    end_sec()
 
-    add_sec("HARDWARE")
+    section("hardware")
     hw = detect()
     row("cpu", f"{hw.cpu_cores}C / {hw.cpu_threads}T")
 
     if hw.is_apple_silicon:
-        row("gpu", "Apple Silicon (Metal)", "PASS", C_GREEN)
+        row("gpu", "Apple Silicon (Metal)", "ok", C_GREEN)
         row("unified memory", f"{hw.ram_free_gb:.1f} GB free / {hw.ram_total_gb:.1f} GB total")
     elif hw.gpu_name != "None":
-        row("gpu", hw.gpu_name, "PASS", C_GREEN)
+        row("gpu", hw.gpu_name, "ok", C_GREEN)
         row("vram", f"{hw.vram_free_gb:.1f} GB free / {hw.vram_total_gb:.1f} GB total")
     else:
-        row("gpu", "None (CPU Only)", "WARN", C_YELLOW)
+        row("gpu", "None (CPU Only)", "warn", C_YELLOW)
         row("ram available", f"{hw.ram_free_gb:.1f} GB free / {hw.ram_total_gb:.1f} GB total")
-    end_sec()
 
-    summary = Text("  SUMMARY   ", style=C_ACCENT)
-    summary.append(f"[ {counters['pass']} PASSED ]", style=C_GREEN)
-    summary.append("  ─  ", style=C_BORDER)
-    summary.append(f"[ {counters['warn']} WARN ]", style=C_YELLOW)
-    summary.append("  ─  ", style=C_BORDER)
-    summary.append(f"[ {counters['fail']} FAIL ]\n", style=C_RED)
-    content.append(summary)
-
-    console.print(
-        Panel(
-            content,
-            title=Text(" VIPERA DIAGNOSTICS ", style=C_ACCENT),
-            border_style=C_ACCENT,
-            box=box.ROUNDED,
-            padding=(0, 1),
-        )
-    )
+    total = sum(counters.values())
+    summary = Text("   ")
+    summary.append(f"{total} checks", style=C_DIM)
+    summary.append("   ")
+    summary.append(f"{counters['ok']} ok", style=C_GREEN)
+    summary.append("   ")
+    summary.append(f"{counters['warn']} warn", style=C_YELLOW)
+    summary.append("   ")
+    summary.append(f"{counters['fail']} fail\n", style=C_RED)
+    console.print(summary)
 
     if llama_missing:
-        console.print(f"[{C_YELLOW}] ⚠ llama-cpp-python is required to load models.[/]")
-        console.print(f"[{C_DIM}]   Install:[/] python -m pip install llama-cpp-python")
-        console.print(f"[{C_DIM}]   Then restart the gateway.[/]\n")
+        note(
+            "llama-cpp-python is required to load models.\n"
+            "python -m pip install llama-cpp-python\n"
+            "then restart the gateway.",
+            tone="warn",
+        )
 
     if gpu_offload is False and hw.gpu_name != "None":
-        console.print(
-            f"[{C_YELLOW}] ⚠ A GPU was detected but this llama-cpp-python build has no "
-            f"GPU backend.[/]"
+        note(
+            "A GPU was detected but this llama-cpp-python build has no GPU backend.\n"
+            "gpu_layers is planned but ignored: every layer runs on the CPU.\n"
+            "Reinstall with the matching extra:\n"
+            "CMAKE_ARGS='-DGGML_CUDA=on' pip install --force-reinstall llama-cpp-python\n"
+            "then re-run this command.",
+            tone="warn",
         )
-        console.print(
-            f"[{C_DIM}]   gpu_layers is planned but ignored: every layer runs on the CPU. "
-            f"Reinstall with the matching extra:[/]"
-        )
-        console.print(
-            f"[{C_DIM}]   CMAKE_ARGS='-DGGML_CUDA=on' "
-            f"pip install --force-reinstall llama-cpp-python"
-        )
-        console.print(f"[{C_DIM}]   Then re-run this command.[/]\n")
 
     if gguf_missing:
-        console.print(
-            f"[{C_YELLOW}] ⚠ gguf is optional, but layer and parameter metadata need it.[/]"
+        note(
+            "gguf is optional, but layer and parameter metadata need it.\n"
+            "python -m pip install gguf",
+            tone="warn",
         )
-        console.print(f"[{C_DIM}]   Install:[/] python -m pip install gguf\n")
 
 
 @app.command("config")
@@ -1763,21 +1639,16 @@ def config_cmd(
     cfg = load_config()
 
     if key is None:
-        for k, v in cfg.items():
-            line = Text("  ")
-            line.append(f"{k:<20}", style=C_DIM)
-            line.append(f"{v}", style=C_TEXT)
-            console.print(line)
+        ledger([(k, str(v)) for k, v in cfg.items()])
         return
 
     if key not in DEFAULT_CONFIG:
         valid = ", ".join(sorted(DEFAULT_CONFIG.keys()))
-        console.print(f"[{C_RED}] ✗ Unknown key: {key}[/]")
-        console.print(f"[{C_DIM}]  Valid keys: {valid}[/]")
+        note(f"there is no `{key}` key.\nvalid keys: {valid}", tone="error")
         raise typer.Exit(1)
 
     if value is None:
-        console.print(f"[{C_ACCENT}]{key}[/] = [{C_GREEN}]{cfg[key]}[/]")
+        ledger([(key, str(cfg[key]))])
         return
 
     cfg[key] = value
@@ -1787,8 +1658,8 @@ def config_cmd(
         console.print(f"[{C_RED}] ✗ {exc}[/]")
         raise typer.Exit(1) from exc
     save_config(cfg)
-    console.print(f"[{C_GREEN}] ✓[/]  {key} = {cfg[key]}")
-
+    ledger([(key, str(cfg[key]))])
+    note(f"written to {CONFIG_FILE}", tone="ok")
 # config.py
 import contextlib
 import json
@@ -1941,7 +1812,6 @@ def save_config(cfg: dict) -> None:
     tmp = CONFIG_FILE.with_suffix(CONFIG_FILE.suffix + ".tmp")
     tmp.write_text(json.dumps(cfg, indent=2))
     os.replace(tmp, CONFIG_FILE)
-
 # engine.py
 import gc
 from dataclasses import replace
@@ -2268,7 +2138,6 @@ class Engine:
         self.llm = None
         del llm
         gc.collect()
-
 # gguf_analyzer.py
 """Inspect GGUF headers, tensor metadata, and per-layer size distribution.
 
@@ -2702,7 +2571,6 @@ def analyze_gguf(path: str) -> dict[str, Any]:
 
 # Backwards-compatible alias kept for callers that used the original name.
 analyze_gguf_structure = analyze_gguf
-
 # hardware.py
 import contextlib
 import platform
@@ -2769,7 +2637,6 @@ def detect() -> HardwareInfo:
         vram_free_gb=vram_free,
         is_apple_silicon=is_apple_silicon,
     )
-
 # optimizer.py
 """Helpers for llama.cpp quantization, imatrix, and target-size planning.
 
@@ -3068,7 +2935,6 @@ def unique_output_path(path: Path) -> Path:
         if not candidate.exists():
             return candidate
     raise OptimizerError(f"could not find a free output name for {path}")
-
 # planner.py
 from dataclasses import dataclass
 
@@ -3442,7 +3308,6 @@ def plan(
         n_ubatch=moe_ubatch,
         n_layers=n_layers,
     )
-
 # registry.py
 import json
 import os
@@ -3499,7 +3364,6 @@ def remove_model(name: str) -> bool:
         _save(data)
         return True
     return False
-
 # server.py
 import asyncio
 import contextlib
@@ -3696,7 +3560,6 @@ def build_app(engine, model_name: str) -> FastAPI:
                 lock.release()
 
     return app
-
 # server_backend.py
 """llama-server backend.
 
@@ -4123,9 +3986,16 @@ class ServerEngine:
         content = text.decode("utf-8", "replace") if isinstance(text, bytes) else text
         with self._post("/tokenize", {"content": content}) as resp:
             return [int(tok) for tok in json.loads(resp.read()).get("tokens") or []]
-
 # ui.py
-import random
+"""Terminal presentation for Vipera.
+
+The rules this file implements are written down in
+``docs/design/visual-system.md``. In short: the terminal shares one identity
+with ``docs/assets`` (ink / paper / cyan), numbers are right aligned and always
+carry units, and motion never delays work.
+"""
+
+import os
 import textwrap
 import time
 
@@ -4133,29 +4003,198 @@ import typer
 from rich import box
 from rich.console import Console
 from rich.live import Live
-from rich.panel import Panel
 from rich.prompt import IntPrompt
 from rich.table import Table
 from rich.text import Text
 
 from vipera import __version__
 
-console = Console(highlight=False, soft_wrap=True)
+# --------------------------------------------------------------------------
+# Theme
+# --------------------------------------------------------------------------
 
-C_PRIMARY = "#5B7C99"
-C_ACCENT = "#8FB4CC"
-C_HIGHLIGHT = "#B8C7D3"
-C_TEXT = "bold #E4E8EC"
-C_DIM = "#6B7A87"
-C_BORDER = "#3E5568"
+_PALETTES: dict[str, dict[str, str]] = {
+    "dark": {
+        "paper": "#F1F5F9",
+        "rule": "#1E293B",
+        "muted": "#94A3B8",
+        "accent": "#22D3EE",
+        "ok": "#34D399",
+        "warn": "#F5A524",
+        "error": "#F87171",
+    },
+    # Cyan-400 (#22D3EE) is 1.6:1 on white; the light theme uses cyan-700 so
+    # the brand colour stays readable instead of turning into a highlight.
+    "light": {
+        "paper": "#0B0F14",
+        "rule": "#CBD5E1",
+        "muted": "#52606D",
+        "accent": "#0E7490",
+        "ok": "#047857",
+        "warn": "#B45309",
+        "error": "#B91C1C",
+    },
+    # NO_COLOR, or VIPERA_THEME=none: every token becomes Rich's `default`
+    # style, so `[<style>]…[/]` markup in command modules stays valid but the
+    # output is plain enough to grep.
+    "none": {
+        "paper": "default",
+        "rule": "default",
+        "muted": "default",
+        "accent": "default",
+        "ok": "default",
+        "warn": "default",
+        "error": "default",
+    },
+}
 
-C_GREEN = "#7BA05B"
-C_RED = "#C25B5B"
-C_YELLOW = "#D4A574"
+
+def _resolve_theme() -> str:
+    """Pick a palette: explicit override, then NO_COLOR, then the terminal."""
+    forced = os.environ.get("VIPERA_THEME", "").strip().lower()
+    if forced in _PALETTES:
+        return forced
+    if os.environ.get("NO_COLOR"):
+        return "none"
+    # COLORFGBG is "fg;bg" with ANSI indexes. 7+ means a light background.
+    fgbg = os.environ.get("COLORFGBG", "")
+    if ";" in fgbg:
+        try:
+            if int(fgbg.rsplit(";", 1)[1]) >= 7:
+                return "light"
+        except ValueError:
+            pass
+    return "dark"
+
+
+THEME = _resolve_theme()
+_P = _PALETTES[THEME]
+
+# Semantic tokens. The C_* names are the ones command modules import, so they
+# stay put even though the palette behind them is now theme-dependent.
+C_TEXT = f"bold {_P['paper']}"
+C_DIM = _P["muted"]
+C_ACCENT = _P["accent"]
+C_BORDER = _P["rule"]
+C_GREEN = _P["ok"]
+C_RED = _P["error"]
+C_YELLOW = _P["warn"]
 C_SUCCESS = C_GREEN
 C_ERROR = C_RED
 C_WARN = C_YELLOW
+C_PRIMARY = C_ACCENT
+C_HIGHLIGHT = C_TEXT
 
+console = Console(highlight=False, soft_wrap=True)
+
+GUTTER = "▏"
+RULE_CHAR = "─"
+INDENT = "   "
+
+
+# --------------------------------------------------------------------------
+# Blocks
+# --------------------------------------------------------------------------
+
+
+def rule(width: int | None = None, indent: str = INDENT) -> None:
+    """A hairline. Used to close a section, never to decorate a gap."""
+    span = width if width is not None else min(72, max(8, console.width - len(indent)))
+    console.print(f"{indent}{RULE_CHAR * span}", style=C_BORDER)
+
+
+def section(title: str) -> None:
+    """Sentence-case heading with the hairline directly beneath it."""
+    console.print()
+    console.print(f"{INDENT}{title}", style=C_DIM)
+    rule()
+
+
+def ledger(rows: list[tuple[str, str]], indent: str = INDENT, key_width: int | None = None) -> None:
+    """Key/value block with a fixed label column.
+
+    The label column is as wide as the widest label, so values line up no
+    matter which block printed them.
+    """
+    if not rows:
+        return
+    width = key_width or max(len(key) for key, _ in rows)
+    for key, value in rows:
+        line = Text(indent)
+        line.append(key.ljust(width), style=C_DIM)
+        line.append("  ")
+        line.append(value, style=C_TEXT)
+        console.print(line)
+
+
+def catalog(rows: list[tuple[str, str]], indent: str = INDENT) -> None:
+    """A command list: the thing you type in paper, what it does in muted.
+
+    ``ledger`` puts the value in paper because values are the answer; here the
+    command is the answer and the description is the aside.
+    """
+    if not rows:
+        return
+    width = max(len(cmd) for cmd, _ in rows)
+    for command, description in rows:
+        line = Text(indent)
+        line.append(command.ljust(width), style=C_TEXT)
+        line.append("  ")
+        line.append(description, style=C_DIM)
+        console.print(line)
+
+
+def note(body: str, tone: str = "accent") -> None:
+    """A left-ruled block: guidance, warnings, next steps.
+
+    Boxes are reserved for things that stand on their own (a chat reply); a
+    note is attached to whatever came before it, so it gets a gutter, not a
+    frame.
+    """
+    colour = {"accent": C_ACCENT, "warn": C_YELLOW, "error": C_RED, "ok": C_GREEN}.get(
+        tone, C_ACCENT
+    )
+    for index, line in enumerate(body.split("\n")):
+        prefix = Text(f"{INDENT}{GUTTER} ", style=colour)
+        prefix.append(line, style=C_TEXT if index == 0 else C_DIM)
+        console.print(prefix)
+
+
+def gauge(
+    label: str,
+    used: float,
+    total: float,
+    unit: str = "GB",
+    width: int = 24,
+    fmt: str = "{:.2f}",
+) -> None:
+    """A capacity bar. The one place in the CLI where colour encodes amount."""
+    total = total or 1.0
+    fraction = max(0.0, min(1.0, used / total))
+    filled = round(fraction * width)
+    line = Text(INDENT)
+    line.append(f"{label:<10}", style=C_DIM)
+    line.append("█" * filled, style=C_ACCENT)
+    line.append("░" * (width - filled), style=C_BORDER)
+    line.append(f"  {fmt.format(used)} / {fmt.format(total)} {unit}", style=C_TEXT)
+    console.print(line)
+
+
+def _guttered(text: str, style: str) -> Text:
+    """Render multi-line text behind a hairline gutter."""
+    lines = text.split("\n")
+    out = Text()
+    for index, line in enumerate(lines):
+        out.append(f"{INDENT}{GUTTER} ", style=C_BORDER)
+        out.append(line, style=style)
+        if index < len(lines) - 1:
+            out.append("\n")
+    return out
+
+
+# --------------------------------------------------------------------------
+# Brand
+# --------------------------------------------------------------------------
 
 VIPERA_ART = r"""
    ██╗   ██╗██╗██████╗ ███████╗██████╗  █████╗
@@ -4167,98 +4206,67 @@ VIPERA_ART = r"""
 """
 
 
-def heartbeat_banner():
-    lines = VIPERA_ART.strip("\n").split("\n")
-    max_len = max(len(line) for line in lines)
-    padded = [line.ljust(max_len) for line in lines]
+def print_banner(host: str = "localhost", *, backend: str | None = None) -> None:
+    """Print the wordmark and the three facts needed before the first load.
 
-    def render(center: int) -> Text:
-        text = Text()
-        for line in padded:
-            for x, ch in enumerate(line):
-                dist = abs(x - center)
-                if dist <= 3:
-                    text.append(ch, style=C_HIGHLIGHT)
-                elif dist <= 12:
-                    text.append(ch, style=C_ACCENT)
-                elif dist <= 26:
-                    text.append(ch, style=C_PRIMARY)
-                else:
-                    text.append(ch, style=C_DIM)
-            text.append("\n")
-        return text
-
-    with Live(console=console, refresh_per_second=60, transient=True) as live:
-        for x in range(-25, max_len + 25, 2):
-            live.update(render(x))
-            time.sleep(0.008)
-        time.sleep(0.06)
-        for x in range(max_len + 25, -25, -3):
-            live.update(render(x))
-            time.sleep(0.008)
-
-        final = Text()
-        for line in padded:
-            final.append(line + "\n", style=C_PRIMARY)
-        live.update(final)
-        time.sleep(0.25)
-
-
-def print_banner(host: str = "localhost"):
+    This used to sweep a highlight across the letters for ~1.9 s. Nothing is
+    loaded during that time, so the animation only delayed the prompt.
+    """
     console.print()
-    heartbeat_banner()
-
-    rule = Text()
-    rule.append("   " + "▬" * 74 + "\n", style=C_BORDER)
-    rule.append("   ◆ ", style=C_ACCENT)
-    rule.append("NODE   ", style=C_DIM)
-    rule.append(host, style=C_TEXT)
-    rule.append("     ◆ ", style=C_ACCENT)
-    rule.append("VERSION  ", style=C_DIM)
-    rule.append(__version__, style=C_TEXT)
-    rule.append("     ◆ ", style=C_ACCENT)
-    rule.append("RUNTIME  ", style=C_DIM)
-    rule.append("llama.cpp\n", style=C_TEXT)
-    rule.append("   " + "▬" * 74, style=C_BORDER)
-    console.print(rule)
+    for line in VIPERA_ART.strip("\n").split("\n"):
+        console.print(line, style=C_ACCENT)
+    console.print()
+    rows = [("node", host), ("version", __version__)]
+    if backend:
+        rows.append(("backend", backend))
+    ledger(rows)
+    rule()
     console.print()
 
 
-def animated_loading_bar(prefix: str = "INITIALIZING", duration: float = 1.2):
-    width = 40
-    with Live(console=console, refresh_per_second=60, transient=True) as live:
-        steps = max(1, int(duration * 60))
+# --------------------------------------------------------------------------
+# Progress
+# --------------------------------------------------------------------------
+
+
+def animated_loading_bar(prefix: str = "initialising", duration: float = 1.2) -> None:
+    """Fill a gauge while a blocking step runs (import, quantize, bench)."""
+    width = 36
+    steps = max(1, int(duration * 30))
+    with Live(console=console, refresh_per_second=30, transient=True) as live:
         for step in range(steps + 1):
             progress = step / steps
-            filled = int(width * progress)
-            empty = width - filled
-            percent = int(progress * 100)
-
-            line = Text("  ▸ ")
-            line.append(f"{prefix:<15} ", style=C_TEXT)
+            filled = round(width * progress)
+            line = Text(INDENT)
+            line.append(f"{prefix:<14} ", style=C_DIM)
             line.append("█" * filled, style=C_ACCENT)
-            line.append("░" * empty, style=C_BORDER)
-            line.append(f"  {percent:>3}%")
+            line.append("░" * (width - filled), style=C_BORDER)
+            line.append(f"  {round(progress * 100):>3}%")
             live.update(line)
             time.sleep(duration / steps)
 
-    final = Text("  ▸ ")
-    final.append(f"{prefix:<15} ", style=C_TEXT)
+    final = Text(INDENT)
+    final.append(f"{prefix:<14} ", style=C_DIM)
     final.append("█" * width, style=C_ACCENT)
-    final.append("  100%  ", style=C_TEXT)
-    final.append("[ ", style=C_BORDER)
-    final.append("DONE", style=C_SUCCESS)
-    final.append(" ]", style=C_BORDER)
+    final.append("   100%", style=C_DIM)
     console.print(final)
     console.print()
 
 
-def _wrap_block(text: str, width: int = 68) -> str:
+# --------------------------------------------------------------------------
+# Chat
+# --------------------------------------------------------------------------
+
+_WRAP_WIDTH = 68
+_PAINT_INTERVAL = 0.03
+
+
+def _wrap_block(text: str, width: int = _WRAP_WIDTH) -> str:
     """Wrap text without destroying the indentation of code blocks."""
     out = []
     for line in text.split("\n"):
         if not line:
-            out.append(" " * width)
+            out.append("")
             continue
         line = line.expandtabs(4)
         stripped = line.lstrip()
@@ -4272,21 +4280,37 @@ def _wrap_block(text: str, width: int = 68) -> str:
             break_long_words=True,
             break_on_hyphens=False,
         )
-        for w in wrapper.wrap(stripped) or [indent]:
-            out.append(f"{w:<{width}}")
+        for wrapped in wrapper.wrap(stripped) or [indent]:
+            out.append(wrapped.rstrip())
     return "\n".join(out)
 
 
-_LIVE_UPDATE_INTERVAL = 0.03
+def _reply(text: str, cursor: bool = False) -> Text:
+    block = _guttered(_wrap_block(text), C_TEXT)
+    if cursor:
+        block.append("█" if int(time.time() * 3) % 2 == 0 else " ", style=C_ACCENT)
+    return block
 
 
-def typewriter_chat_stream(stream_generator, title_text: str = " AI "):
-    full_response = ""
-    start_time = time.time()
+def _stats(tokens: int, seconds: float) -> Text:
+    rate = tokens / seconds if seconds > 0 else 0.0
+    line = Text(INDENT)
+    line.append(f"{GUTTER} ", style=C_BORDER)
+    line.append(f"{tokens} tokens", style=C_DIM)
+    line.append("  ")
+    line.append(f"{rate:.1f} tok/s", style=C_DIM)
+    line.append("  ")
+    line.append(f"{seconds:.2f} s", style=C_DIM)
+    return line
+
+
+def _stream(stream_generator, title_text: str, refresh: int) -> str:
+    collected: list[str] = []
     chunk_count = 0
     last_paint = 0.0
+    started = time.time()
 
-    with Live(console=console, refresh_per_second=60, transient=True) as live:
+    with Live(console=console, refresh_per_second=refresh, transient=True) as live:
         for chunk in stream_generator:
             try:
                 delta = chunk["choices"][0]["delta"].get("content", "")
@@ -4295,143 +4319,78 @@ def typewriter_chat_stream(stream_generator, title_text: str = " AI "):
             if not delta:
                 continue
             chunk_count += 1
+            collected.append(delta)
 
-            for ch in delta:
-                full_response += ch
-                now = time.time()
+            # Painting is throttled; the model is not. The old code slept up to
+            # 18 ms per character, which capped a fast model at ~120 tok/s.
+            now = time.time()
+            if now - last_paint >= _PAINT_INTERVAL:
+                live.update(_reply("".join(collected), cursor=True))
+                last_paint = now
 
-                if now - last_paint >= _LIVE_UPDATE_INTERVAL:
-                    padded = _wrap_block(full_response)
-                    cursor = "█" if int(now * 3) % 2 == 0 else " "
-                    panel = Panel(
-                        Text(padded + cursor, style=C_TEXT),
-                        title=Text(title_text, style=C_ACCENT),
-                        title_align="left",
-                        border_style=C_ACCENT,
-                        box=box.ROUNDED,
-                        padding=(0, 1),
-                    )
-                    live.update(panel)
-                    last_paint = now
-
-                if ch in ".!?":
-                    sleep = 0.14
-                elif ch in ",;:":
-                    sleep = 0.05
-                else:
-                    sleep = random.uniform(0.004, 0.018)
-                time.sleep(sleep)
-
-    padded = _wrap_block(full_response)
-    final_panel = Panel(
-        Text(padded, style=C_TEXT),
-        title=Text(title_text, style=C_ACCENT),
-        title_align="left",
-        border_style=C_ACCENT,
-        box=box.ROUNDED,
-        padding=(0, 1),
-    )
-    console.print(final_panel)
-
-    dt = time.time() - start_time
-    tps = chunk_count / dt if dt > 0 else 0
-    stat = Text("    ")
-    stat.append("└─ ", style=C_BORDER)
-    stat.append(f"{chunk_count} tokens  ·  {tps:.1f} tok/s  ·  {dt:.2f}s\n", style=C_DIM)
-    console.print(stat)
-    return full_response
-
-
-def plain_chat_stream(stream_generator, title_text: str = " AI "):
-    """Stream a chat reply as fast as the model produces tokens."""
-    full = []
-    start_time = time.time()
-    chunk_count = 0
-
-    with Live(console=console, refresh_per_second=20, transient=True) as live:
-        for chunk in stream_generator:
-            try:
-                delta = chunk["choices"][0]["delta"].get("content", "")
-            except (KeyError, IndexError, TypeError):
-                continue
-            if not delta:
-                continue
-            chunk_count += 1
-            full.append(delta)
-            live.update(
-                Panel(
-                    Text("".join(full), style=C_TEXT),
-                    title=Text(title_text, style=C_ACCENT),
-                    title_align="left",
-                    border_style=C_ACCENT,
-                    box=box.ROUNDED,
-                    padding=(0, 1),
-                )
-            )
-
-    text = "".join(full)
-    console.print(
-        Panel(
-            Text(text, style=C_TEXT),
-            title=Text(title_text, style=C_ACCENT),
-            title_align="left",
-            border_style=C_ACCENT,
-            box=box.ROUNDED,
-            padding=(0, 1),
-        )
-    )
-
-    dt = time.time() - start_time
-    tps = chunk_count / dt if dt > 0 else 0
-    stat = Text("    ")
-    stat.append("└─ ", style=C_BORDER)
-    stat.append(f"{chunk_count} tokens  ·  {tps:.1f} tok/s  ·  {dt:.2f}s\n", style=C_DIM)
-    console.print(stat)
+    text = "".join(collected)
+    if title_text:
+        console.print(f"{INDENT}{title_text}", style=C_DIM)
+    console.print(_reply(text))
+    console.print(_stats(chunk_count, time.time() - started))
+    console.print()
     return text
 
 
-def pick_model(title: str = "SELECT A MODEL") -> str:
+def typewriter_chat_stream(stream_generator, title_text: str = "assistant") -> str:
+    """Stream a reply, repainting as tokens arrive."""
+    return _stream(stream_generator, title_text, refresh=30)
+
+
+def plain_chat_stream(stream_generator, title_text: str = "assistant") -> str:
+    """Stream a reply with a slower repaint, for slow terminals."""
+    return _stream(stream_generator, title_text, refresh=10)
+
+
+# --------------------------------------------------------------------------
+# Selection
+# --------------------------------------------------------------------------
+
+
+def pick_model(title: str = "select a model") -> str:
     from vipera.config import load_config
     from vipera.registry import list_models
 
     installed = list_models()
     if not installed:
-        console.print(f"[{C_RED}] ✗ No models installed. Run `vipera model search` first.[/]")
+        note("no models installed. run `vipera model search` first.", tone="error")
         raise typer.Exit(1)
 
     cfg = load_config()
     default_model = cfg.get("default_model")
-
-    t = Table(box=box.ROUNDED, title=title, title_justify="left")
-    t.add_column("ID", style=C_DIM, justify="center")
-    t.add_column("ALIAS", style=C_TEXT)
-    t.add_column("SIZE", style=C_DIM, justify="right")
-    t.add_column("QUANT", style=C_ACCENT)
-
     default_idx = 1
-    for i, m in enumerate(installed):
-        meta = m.get("meta", {})
-        size_str = f"{meta.get('size_bytes', 0) / 1e9:>5.1f} G"
-        is_default = " (default)" if m["name"] == default_model else ""
+
+    section(title)
+    t = Table(box=box.SIMPLE_HEAD, padding=(0, 2), pad_edge=False, show_edge=False)
+    t.add_column("#", style=C_DIM, justify="right")
+    t.add_column("model", style=C_TEXT)
+    t.add_column("size", style=C_DIM, justify="right")
+    t.add_column("quant", style=C_ACCENT, justify="right")
+
+    for i, model in enumerate(installed):
+        meta = model.get("meta", {})
+        marker = "" if model["name"] != default_model else "  default"
         t.add_row(
-            f"[{i + 1:02d}]",
-            f"{m['name']}{is_default}",
-            size_str,
+            f"{i + 1}",
+            f"{model['name']}{marker}",
+            f"{meta.get('size_bytes', 0) / 1e9:.2f} GB",
             meta.get("quant", "?"),
         )
-        if m["name"] == default_model:
+        if model["name"] == default_model:
             default_idx = i + 1
 
     console.print(t)
     console.print()
 
-    choice = IntPrompt.ask(
-        f"[{C_ACCENT}] ▸ Select a model ID[/]",
-        default=default_idx,
-    )
+    choice = IntPrompt.ask(f"{INDENT}{GUTTER} select a model", default=default_idx)
 
     if choice < 1 or choice > len(installed):
-        console.print(f"[{C_RED}] ✗ Invalid selection.[/]")
+        note("that number is not in the list.", tone="error")
         raise typer.Exit(1)
 
     return installed[choice - 1]["name"]

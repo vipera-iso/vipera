@@ -1,0 +1,406 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Vipera — a local AI gateway that plans before it runs</title>
+<meta name="description" content="Vipera turns a .gguf into an OpenAI-compatible server, budgeting VRAM per layer on hardware where the model only just fits." />
+<link rel="icon" href="assets/favicon.ico" />
+<meta property="og:image" content="assets/social-preview.png" />
+<style>
+  :root {
+    --ink: #0B0F14;
+    --panel: #11181F;
+    --rule: #1E293B;
+    --paper: #F1F5F9;
+    --muted: #94A3B8;
+    --accent: #22D3EE;
+    --ok: #34D399;
+    --warn: #F5A524;
+    --mono: ui-monospace, "SF Mono", "JetBrains Mono", "DejaVu Sans Mono", monospace;
+    --serif: "Iowan Old Style", "Palatino Linotype", Palatino, Georgia, serif;
+    --sans: Inter, "Helvetica Neue", "DejaVu Sans", sans-serif;
+    --measure: 34rem;
+  }
+
+  * { box-sizing: border-box; }
+
+  html { background: var(--ink); }
+
+  body {
+    margin: 0;
+    color: var(--paper);
+    font: 400 1.0625rem/1.7 var(--serif);
+    -webkit-font-smoothing: antialiased;
+  }
+
+  a { color: var(--paper); text-decoration-color: var(--rule); text-underline-offset: 0.2em; }
+  a:hover { text-decoration-color: var(--accent); }
+  a:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; border-radius: 2px; }
+
+  .wrap { width: min(100% - 3rem, 71rem); margin-inline: auto; }
+
+  /* ---- masthead ---- */
+
+  .masthead {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 1.5rem;
+    padding: 1.75rem 0;
+    border-bottom: 1px solid var(--rule);
+  }
+
+  .wordmark {
+    display: flex;
+    align-items: center;
+    gap: 0.6rem;
+    font: 600 1.05rem/1 var(--sans);
+    letter-spacing: -0.01em;
+    text-decoration: none;
+  }
+
+  .wordmark svg { width: 1.6rem; height: 1.6rem; display: block; }
+
+  .masthead nav {
+    display: flex;
+    gap: 1.4rem;
+    font: 400 0.85rem/1 var(--mono);
+    color: var(--muted);
+  }
+
+  .masthead nav a { color: var(--muted); text-decoration: none; }
+  .masthead nav a:hover { color: var(--paper); }
+
+  /* ---- hero ---- */
+
+  .hero { padding: 5rem 0 3.5rem; }
+
+  .hero h1 {
+    margin: 0;
+    max-width: 26ch;
+    font: 400 clamp(2.1rem, 5vw, 3.5rem)/1.1 var(--serif);
+    letter-spacing: -0.02em;
+  }
+
+  .hero h1 em { font-style: italic; color: var(--accent); }
+
+  .hero .standfirst {
+    max-width: var(--measure);
+    margin: 1.6rem 0 0;
+    color: var(--muted);
+    font-size: 1.1rem;
+  }
+
+  .run {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.5rem 1.25rem;
+    margin: 2rem 0 0;
+    padding: 1rem 1.15rem;
+    list-style: none;
+    border-left: 2px solid var(--accent);
+    background: var(--panel);
+    font: 400 0.9rem/1.9 var(--mono);
+    color: var(--muted);
+  }
+
+  .run b { color: var(--paper); font-weight: 400; }
+
+  /* ---- the layer strip: the product's own artefact ---- */
+
+  .strip { padding: 0 0 1rem; }
+
+  .strip-head {
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+    gap: 1rem;
+    margin-bottom: 0.6rem;
+    font: 400 0.78rem/1.2 var(--mono);
+    color: var(--muted);
+  }
+
+  .strip-grid {
+    display: grid;
+    grid-template-columns: repeat(40, 1fr);
+    gap: 3px;
+  }
+
+  .strip-grid span {
+    height: 2.2rem;
+    background: var(--rule);
+    transform-origin: bottom;
+    animation: seat 480ms cubic-bezier(.2, .7, .3, 1) backwards;
+  }
+
+  .strip-grid span.on { background: var(--accent); }
+
+  @keyframes seat {
+    from { transform: scaleY(0.15); opacity: 0.2; }
+    to { transform: scaleY(1); opacity: 1; }
+  }
+
+  .strip-legend {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(11rem, 1fr));
+    gap: 1.5rem;
+    margin-top: 1.5rem;
+    padding-top: 1.25rem;
+    border-top: 1px solid var(--rule);
+  }
+
+  .figure { display: flex; flex-direction: column; gap: 0.25rem; }
+
+  .figure b {
+    font: 400 1.5rem/1.1 var(--mono);
+    font-variant-numeric: tabular-nums;
+    color: var(--paper);
+  }
+
+  .figure.accent b { color: var(--accent); }
+
+  .figure span { font: 400 0.8rem/1.4 var(--mono); color: var(--muted); }
+
+  @media (prefers-reduced-motion: reduce) {
+    .strip-grid span { animation: none; }
+  }
+
+  /* ---- prose sections ---- */
+
+  section.body { padding: 4.5rem 0; border-top: 1px solid var(--rule); }
+
+  .body h2 {
+    margin: 0 0 1.25rem;
+    max-width: 24ch;
+    font: 400 clamp(1.5rem, 2.6vw, 2rem)/1.2 var(--serif);
+    letter-spacing: -0.01em;
+  }
+
+  .body p { max-width: var(--measure); margin: 0 0 1.1rem; }
+  .body p:last-child { margin-bottom: 0; }
+  .body p code, .body li code { font: 400 0.88em/1 var(--mono); color: var(--accent); }
+
+  .facts { display: grid; gap: 1.75rem; max-width: 62rem; }
+
+  @media (min-width: 52rem) { .facts { grid-template-columns: repeat(3, 1fr); } }
+
+  .facts dt { font: 400 1rem/1.4 var(--sans); color: var(--paper); margin-bottom: 0.4rem; }
+  .facts dd { margin: 0; color: var(--muted); font-size: 0.97rem; }
+
+  .term {
+    margin: 1.75rem 0 0;
+    padding: 1.1rem 1.25rem;
+    overflow-x: auto;
+    background: var(--panel);
+    border-left: 2px solid var(--accent);
+    font: 400 0.86rem/1.85 var(--mono);
+    color: var(--muted);
+  }
+
+  .term b { color: var(--paper); font-weight: 400; }
+  .term i { color: var(--accent); font-style: normal; }
+
+  ul.limits { max-width: var(--measure); margin: 0; padding-left: 1.1rem; color: var(--muted); }
+  ul.limits li { margin-bottom: 0.55rem; }
+  ul.limits li:last-child { margin-bottom: 0; }
+
+  footer {
+    padding: 2.5rem 0 3.5rem;
+    border-top: 1px solid var(--rule);
+    font: 400 0.82rem/1.9 var(--mono);
+    color: var(--muted);
+  }
+
+  footer .wrap { display: flex; flex-wrap: wrap; gap: 0.6rem 1.6rem; justify-content: space-between; }
+  footer a { color: var(--muted); text-decoration: none; }
+  footer a:hover { color: var(--paper); }
+</style>
+</head>
+<body>
+<header class="wrap masthead">
+  <a class="wordmark" href="./">
+    <svg viewBox="0 0 512 512" aria-hidden="true" focusable="false">
+      <path d="M136 140 L256 372 L376 140" fill="none" stroke="#F1F5F9" stroke-width="34" stroke-linecap="round" stroke-linejoin="round"/>
+      <path d="M256 372 L256 402" fill="none" stroke="#F1F5F9" stroke-width="16" stroke-linecap="round"/>
+      <path d="M256 402 C256 432 222 436 222 464 M256 402 C256 432 290 436 290 464" fill="none" stroke="#22D3EE" stroke-width="12" stroke-linecap="round"/>
+    </svg>
+    Vipera
+  </a>
+  <nav aria-label="Primary">
+    <a href="index.md">docs</a>
+    <a href="install.md">install</a>
+    <a href="benchmarks.md">benchmarks</a>
+    <a href="https://github.com/vipera-iso/vipera">source</a>
+  </nav>
+</header>
+
+<main class="wrap">
+
+  <section class="hero">
+    <h1>A local model server for hardware that only <em>just</em> fits it.</h1>
+    <p class="standfirst">
+      Vipera reads a <code>.gguf</code>, measures the machine, and decides how many
+      layers go to the GPU before it loads anything. Then it serves the result as an
+      OpenAI-compatible endpoint.
+    </p>
+    <ul class="run">
+      <li><b>pip install vipera-ai[llama,gguf,nvidia]</b></li>
+      <li><b>vipera model search</b></li>
+      <li><b>vipera serve start</b> → 127.0.0.1:8686/v1</li>
+    </ul>
+  </section>
+
+  <section class="strip" aria-labelledby="strip-caption">
+    <div class="strip-head">
+      <span id="strip-caption">Hermes-4-14B Q3_K_M · 40 layers · 4 GB card · 8K context</span>
+      <span>measured, not estimated</span>
+    </div>
+    <div class="strip-grid" role="img"
+         aria-label="Layer placement: 17 of 40 layers fit in VRAM, the remaining 23 stay in system RAM.">
+      <span class="on" style="animation-delay:0ms"></span>
+      <span class="on" style="animation-delay:12ms"></span>
+      <span class="on" style="animation-delay:24ms"></span>
+      <span class="on" style="animation-delay:36ms"></span>
+      <span class="on" style="animation-delay:48ms"></span>
+      <span class="on" style="animation-delay:60ms"></span>
+      <span class="on" style="animation-delay:72ms"></span>
+      <span class="on" style="animation-delay:84ms"></span>
+      <span class="on" style="animation-delay:96ms"></span>
+      <span class="on" style="animation-delay:108ms"></span>
+      <span class="on" style="animation-delay:120ms"></span>
+      <span class="on" style="animation-delay:132ms"></span>
+      <span class="on" style="animation-delay:144ms"></span>
+      <span class="on" style="animation-delay:156ms"></span>
+      <span class="on" style="animation-delay:168ms"></span>
+      <span class="on" style="animation-delay:180ms"></span>
+      <span class="on" style="animation-delay:192ms"></span>
+      <span style="animation-delay:204ms"></span>
+      <span style="animation-delay:216ms"></span>
+      <span style="animation-delay:228ms"></span>
+      <span style="animation-delay:240ms"></span>
+      <span style="animation-delay:252ms"></span>
+      <span style="animation-delay:264ms"></span>
+      <span style="animation-delay:276ms"></span>
+      <span style="animation-delay:288ms"></span>
+      <span style="animation-delay:300ms"></span>
+      <span style="animation-delay:312ms"></span>
+      <span style="animation-delay:324ms"></span>
+      <span style="animation-delay:336ms"></span>
+      <span style="animation-delay:348ms"></span>
+      <span style="animation-delay:360ms"></span>
+      <span style="animation-delay:372ms"></span>
+      <span style="animation-delay:384ms"></span>
+      <span style="animation-delay:396ms"></span>
+      <span style="animation-delay:408ms"></span>
+      <span style="animation-delay:420ms"></span>
+      <span style="animation-delay:432ms"></span>
+      <span style="animation-delay:444ms"></span>
+      <span style="animation-delay:456ms"></span>
+      <span style="animation-delay:468ms"></span>
+    </div>
+    <div class="strip-legend">
+      <div class="figure accent"><b>17 / 40</b><span>layers on the GPU</span></div>
+      <div class="figure"><b>3.37 GB</b><span>of 3.64 GB VRAM</span></div>
+      <div class="figure"><b>6.57 t/s</b><span>decode, 64 tokens generated</span></div>
+      <div class="figure"><b>0.2 t/s</b><span>the same model, CPU only</span></div>
+    </div>
+  </section>
+
+<section class="body">
+  <div class="wrap">
+    <h2>Why the answer is 17, and not zero</h2>
+    <p>
+      A 14B model at Q3 does not fit in 4 GB, so the safe answer is “CPU only” — and
+      0.2 tokens/second is technically an answer. Layers are independent, though. Seventeen
+      of them fit beside the CUDA context at 8K, and the rest run from system RAM.
+    </p>
+    <p>
+      Vipera prices each layer before it loads: the mean weight size, plus that layer's
+      slice of the KV cache, against the VRAM left after a reserve it calibrated by
+      measurement. If the context cannot be created, it walks the split down
+      (<code>17 → 16 → 15 → 7</code>) instead of dropping to CPU, and prints what it
+      changed at each step.
+    </p>
+    <p class="term">
+      <b>plan</b>  17/40 layers  <i>q8_0</i> KV  <i>flash attention on</i>  3.37 GB / 3.64 GB<br />
+      <b>load</b>  context 8192 created in 2.7 s<br />
+      <b>serve</b> 127.0.0.1:8686/v1  <i>6.57 tok/s</i>
+    </p>
+  </div>
+</section>
+
+<section class="body">
+  <div class="wrap">
+    <h2>What you get for installing it</h2>
+    <dl class="facts">
+      <div>
+        <dt>A plan you can read</dt>
+        <dd>Every flag comes from the hardware probe and the model metadata, and every number in
+          the planner has the measurement that produced it in a comment beside it.</dd>
+      </div>
+      <div>
+        <dt>A fallback that reports itself</dt>
+        <dd>A failed load degrades stage by stage and says which stage failed, instead of
+          crashing or quietly serving from the CPU.</dd>
+      </div>
+      <div>
+        <dt>One engine behind both surfaces</dt>
+        <dd><code>vipera chat</code>, <code>vipera bench</code> and
+          <code>/v1/chat/completions</code> share the same loaded model, so a benchmark
+          describes the server you actually run.</dd>
+      </div>
+    </dl>
+  </div>
+</section>
+
+<section class="body">
+  <div class="wrap">
+    <h2>Install</h2>
+    <p>
+      The distribution is <code>vipera-ai</code>. The PyPI project named
+      <code>vipera</code> is an unrelated PDF tool, so install the one with the hyphen.
+      <code>llama-cpp-python</code> builds against your platform, which is the slow part.
+    </p>
+    <p class="term">
+      <b>pip install "vipera-ai[llama,gguf,nvidia]"</b><br />
+      <b>vipera model search</b>        <i># pick a GGUF from Hugging Face</i><br />
+      <b>vipera serve start</b>         <i># http://127.0.0.1:8686/v1</i>
+    </p>
+    <p style="margin-top:1.75rem">
+      Bare metal, containers, CPU-only and Apple Silicon: <a href="install.md">install.md</a>.
+      Every flag: <a href="cli.md">cli.md</a>. Schemas and SSE framing:
+      <a href="http-api.md">http-api.md</a>.
+    </p>
+  </div>
+</section>
+
+<section class="body">
+  <div class="wrap">
+    <h2>What it does not do</h2>
+    <ul class="limits">
+      <li>No multi-model routing. One model per process, loopback by default.</li>
+      <li>No auth, TLS termination, or usage accounting. Put it behind a proxy that has them.</li>
+      <li>No web dashboard. The terminal is the interface, and it is meant to stay that way.</li>
+      <li>No promises about peak throughput on hardware you have already tuned — use
+        <code>llama.cpp/server</code> there.</li>
+    </ul>
+  </div>
+</section>
+
+</main>
+
+<footer>
+  <div class="wrap">
+    <span>MIT © 2026 Vipera</span>
+    <nav aria-label="Footer">
+      <a href="index.md">documentation</a>
+      <a href="architecture.md">architecture</a>
+      <a href="comparison.md">comparison</a>
+      <a href="design/visual-system.md">visual system</a>
+      <a href="https://github.com/vipera-iso/vipera">github</a>
+    </nav>
+  </div>
+</footer>
+</body>
+</html>

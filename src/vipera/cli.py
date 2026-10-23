@@ -1,20 +1,16 @@
 import typer
-from rich import box
-from rich.panel import Panel
-from rich.text import Text
 
 from vipera import __version__
 from vipera.commands import bench_cmd, chat_cmd, model_cmd, serve_cmd, system_cmd
 from vipera.config import load_config
 from vipera.registry import list_models
 from vipera.ui import (
-    C_ACCENT,
-    C_DIM,
-    C_RED,
-    C_TEXT,
+    catalog,
     console,
+    note,
     pick_model,
     print_banner,
+    section,
 )
 
 app = typer.Typer(
@@ -34,57 +30,48 @@ app.add_typer(system_cmd.app, name="system", help="Diagnostics & Config")
 @app.command("help")
 def show_help():
     """Detailed usage guide."""
-    guide = Text()
+    section("start")
+    catalog(
+        [
+            ("vipera", "start the gateway with the default model"),
+            ("vipera -s", "start the gateway and pick a model first"),
+            ("vipera model search", "search Hugging Face and download a GGUF"),
+            ("vipera chat repl", "chat against a local model"),
+        ]
+    )
 
-    guide.append("  ▸ QUICK START\n", style=C_ACCENT)
-    guide.append(
-        "    • vipera                          Start gateway (default model)\n", style=C_TEXT
+    section("models")
+    catalog(
+        [
+            ("vipera model list", "list installed models"),
+            ("vipera model import <path>", "import a local .gguf"),
+            ("vipera model inspect <path>", "read the GGUF layout and quants"),
+            ("vipera model imatrix <path>", "build an importance matrix"),
+            ("vipera model quantize <path>", "quantize with llama-quantize"),
+            ("vipera model optimize <path>", "inspect, then imatrix, then quantize"),
+            ("vipera model rm <name>", "remove a model"),
+        ]
     )
-    guide.append(
-        "    • vipera -s                       Start gateway with model picker\n", style=C_TEXT
-    )
-    guide.append(
-        "    • vipera model search             Search & download from HuggingFace\n", style=C_TEXT
-    )
-    guide.append("    • vipera chat repl                Chat in the terminal\n\n", style=C_TEXT)
 
-    guide.append("  ▸ MODELS (vipera model ...)\n", style=C_ACCENT)
-    guide.append("    • vipera model list               List installed models\n", style=C_TEXT)
-    guide.append("    • vipera model import <path>      Import a local .gguf file\n", style=C_TEXT)
-    guide.append(
-        "    • vipera model inspect <path>     Analyze GGUF layout & quants\n", style=C_TEXT
+    section("inference")
+    catalog(
+        [
+            ("vipera chat repl", "interactive chat"),
+            ('vipera chat oneshot "<prompt>"', "one question, then exit"),
+            ("vipera bench run", "measure prompt and generation throughput"),
+        ]
     )
-    guide.append("    • vipera model imatrix <path>     Build an importance matrix\n", style=C_TEXT)
-    guide.append(
-        "    • vipera model quantize <path>    Quantize with llama-quantize\n", style=C_TEXT
-    )
-    guide.append(
-        "    • vipera model optimize <path>    Inspect → imatrix → quantize\n", style=C_TEXT
-    )
-    guide.append("    • vipera model rm <name>          Remove a model\n\n", style=C_TEXT)
 
-    guide.append("  ▸ INFERENCE (vipera chat / bench ...)\n", style=C_ACCENT)
-    guide.append("    • vipera chat repl                Interactive chat\n", style=C_TEXT)
-    guide.append('    • vipera chat oneshot "<prompt>"  One-shot query\n', style=C_TEXT)
-    guide.append("    • vipera bench run                Benchmark model\n\n", style=C_TEXT)
-
-    guide.append("  ▸ SYSTEM (vipera system ...)\n", style=C_ACCENT)
-    guide.append(
-        "    • vipera system doctor            Hardware & library diagnostics\n", style=C_TEXT
+    section("system")
+    catalog(
+        [
+            ("vipera system doctor", "hardware, runtime, and library check"),
+            ("vipera system config", "read or change config.json keys"),
+        ]
     )
-    guide.append("    • vipera system config            View/edit config\n\n", style=C_TEXT)
 
-    guide.append("  💡 TIP: use `vipera -s` to switch the running model.\n", style=C_DIM)
-
-    console.print(
-        Panel(
-            guide,
-            title=Text(" VIPERA MANUAL ", style=C_ACCENT),
-            border_style=C_ACCENT,
-            box=box.ROUNDED,
-            padding=(1, 2),
-        )
-    )
+    console.print()
+    note("use `vipera -s` to switch the model the gateway starts with.")
 
 
 @app.callback()
@@ -106,20 +93,11 @@ def main(
 
     installed = list_models()
     if not installed:
-        console.print(
-            Panel(
-                Text(
-                    "  [ NO MODELS INSTALLED ]\n\n"
-                    "  Import a model first:\n"
-                    "  ► vipera model import <path_to_gguf> --name my-model\n\n"
-                    "  Or search Hugging Face:\n"
-                    "  ► vipera model search",
-                    style=C_RED,
-                ),
-                title=Text(" WARNING ", style=C_RED),
-                border_style=C_RED,
-                box=box.ROUNDED,
-            )
+        note(
+            "no models installed yet.\n"
+            "  vipera model search            download one from Hugging Face\n"
+            "  vipera model import <path>     import a local .gguf",
+            tone="error",
         )
         raise typer.Exit(1)
 
@@ -129,15 +107,13 @@ def main(
     if select or not model:
         if len(installed) == 1 and not select:
             model = installed[0]["name"]
-            console.print(f"[{C_ACCENT}]► Auto-selected the only installed model: {model}[/]\n")
+            console.print(f"   only one model is installed, using {model}")
+            console.print()
         else:
-            model = pick_model("SELECT A MODEL TO START")
+            model = pick_model("select a model to start")
     else:
-        console.print(f"[{C_ACCENT}]► Starting Gateway with default model: {model}[/]")
-        console.print(f"[{C_DIM}]  (Use `vipera -s` to choose a different model)[/]\n")
+        console.print(f"   starting the gateway with {model}")
+        console.print("   use `vipera -s` to choose another model")
+        console.print()
 
     ctx.invoke(serve_cmd.start, model=model)
-
-
-if __name__ == "__main__":
-    app()

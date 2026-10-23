@@ -5,9 +5,6 @@ from pathlib import Path
 
 import psutil
 import typer
-from rich import box
-from rich.panel import Panel
-from rich.text import Text
 
 from vipera.config import VIPERA_HOME, load_config
 from vipera.engine import ChatEngine, create_engine, resolve_backend
@@ -16,14 +13,16 @@ from vipera.planner import plan
 from vipera.registry import get_model
 from vipera.ui import (
     C_ACCENT,
-    C_BORDER,
     C_DIM,
     C_GREEN,
     C_RED,
-    C_SUCCESS,
-    C_TEXT,
     C_YELLOW,
+    catalog,
     console,
+    gauge,
+    ledger,
+    note,
+    section,
 )
 
 
@@ -72,30 +71,14 @@ def _quick_bench(engine: ChatEngine) -> None:
 
             tps = gen_tok / dt if dt > 0 else 0
 
-            if tps >= 20:
-                speed_color, speed_status = C_SUCCESS, "FAST"
-            elif tps >= 8:
-                speed_color, speed_status = C_YELLOW, "OK"
-            else:
-                speed_color, speed_status = C_RED, "SLOW"
+            status = "fast" if tps >= 20 else "ok" if tps >= 8 else "slow"
 
-            bench_text = Text()
-            bench_text.append("  ● ", style=speed_color)
-            bench_text.append("SPEED TEST: ", style=C_TEXT)
-            bench_text.append(f"{tps:.1f} T/s", style=speed_color)
-            bench_text.append(f"  [{speed_status}]  ", style=speed_color)
-            bench_text.append(
-                f"({gen_tok} tokens in {dt:.2f}s, Prompt: {prompt_tok} t)",
-                style=C_DIM,
-            )
-
-            console.print(
-                Panel(
-                    bench_text,
-                    border_style=speed_color,
-                    box=box.ROUNDED,
-                    padding=(0, 1),
-                )
+            console.print()
+            ledger(
+                [
+                    ("speed", f"{tps:.1f} tok/s  {status}"),
+                    ("sample", f"{gen_tok} tokens in {dt:.2f} s, {prompt_tok} prompt tokens"),
+                ]
             )
             console.print()
 
@@ -170,49 +153,27 @@ def start(
     n_layers_total = int(m["meta"].get("n_layers") or 0) or max(p.gpu_layers, 1)
     quant = m["meta"].get("quant") or "?"
 
-    content = Text()
-    content.append("  ▸ MOUNTING MODEL\n", style=C_ACCENT)
-    content.append(f"    ├─ {model}\n", style=C_TEXT)
-    content.append(f"    ├─ {quant}\n", style=C_DIM)
-    content.append(f"    └─ backend {backend}\n\n", style=C_DIM)
-
-    content.append("  ▸ ALLOCATING VRAM\n", style=C_ACCENT)
     offload_layers = p.n_layers if p.requires_server else p.gpu_layers
-    content.append(
-        "    ├─ layer offload " + "·" * 28 + f" {offload_layers}/{n_layers_total}\n",
-        style=C_TEXT,
-    )
+
+    section("plan")
+    rows = [
+        ("model", model),
+        ("quant", quant),
+        ("backend", backend),
+        ("layers", f"{offload_layers}/{n_layers_total}"),
+        ("kv cache", f"{p.kv_cache}  {p.kv_cache_gb:.2f} GB" if p.kv_cache_gb > 0 else p.kv_cache),
+        ("flash attn", "on" if p.flash_attn else "off"),
+    ]
     if p.requires_server:
         gpu_experts = p.n_layers - p.moe_cpu_layers
-        ubatch = f" · ub {p.n_ubatch}" if p.n_ubatch else ""
-        content.append(
-            "    ├─ moe experts " + "·" * 27 + f" {gpu_experts}/{p.n_layers} layers{ubatch}\n",
-            style=C_TEXT,
-        )
-    kv_suffix = f" · {p.kv_cache_gb:.2f} GB" if p.kv_cache_gb > 0 else ""
-    content.append(
-        f"    ├─ kv cache ({p.kv_cache}) " + "·" * 24 + f" [ OK ]{kv_suffix}\n",
-        style=C_TEXT,
-    )
+        ubatch = f"  ubatch {p.n_ubatch}" if p.n_ubatch else ""
+        rows.insert(4, ("moe experts", f"{gpu_experts}/{p.n_layers} layers{ubatch}"))
     if p.kv_layers and p.kv_layers < n_layers_total:
-        content.append(
-            "    ├─ hybrid attention " + "·" * 21 + f" {p.kv_layers}/{n_layers_total} kv layers\n",
-            style=C_TEXT,
-        )
-    content.append(
-        "    └─ flash attention " + "·" * 27 + f" [ {'ON' if p.flash_attn else 'OFF'} ]\n",
-        style=C_TEXT,
-    )
-
-    console.print(
-        Panel(
-            content,
-            title=Text(" VIPERA DAEMON · BOOT ", style=C_ACCENT),
-            border_style=C_ACCENT,
-            box=box.ROUNDED,
-            padding=(0, 1),
-        )
-    )
+        rows.append(("hybrid attn", f"{p.kv_layers}/{n_layers_total} layers keep KV"))
+    ledger(rows)
+    console.print()
+    gauge("on the gpu", offload_layers, n_layers_total, unit="layers", fmt="{:.0f}")
+    console.print()
 
     try:
         with console.status(f"[{C_ACCENT}] Loading model into memory…"):
@@ -235,22 +196,16 @@ def start(
 
         fastapi_app = build_app(engine, model)
 
-        ready = Text()
-        ready.append("  ● ", style=C_SUCCESS)
-        ready.append("SYSTEM READY", style=C_TEXT)
-        ready.append("   ·   ", style=C_BORDER)
-        ready.append(f"http://{host}:{port}\n\n", style=C_ACCENT)
-        ready.append("  ▸ ", style=C_ACCENT)
-        ready.append("POST  ", style=C_DIM)
-        ready.append("/v1/chat/completions\n", style=C_TEXT)
-        ready.append("  ▸ ", style=C_ACCENT)
-        ready.append("GET   ", style=C_DIM)
-        ready.append("/v1/models\n", style=C_TEXT)
-        ready.append("  ▸ ", style=C_ACCENT)
-        ready.append("GET   ", style=C_DIM)
-        ready.append("/health", style=C_TEXT)
-
-        console.print(Panel(ready, border_style=C_SUCCESS, box=box.ROUNDED, padding=(0, 1)))
+        section("ready")
+        ledger([("openai", f"http://{host}:{port}/v1")])
+        catalog(
+            [
+                ("POST /v1/chat/completions", "chat, streaming or not"),
+                ("GET  /v1/models", "the loaded alias"),
+                ("GET  /health", "liveness"),
+            ]
+        )
+        note("ctrl-c stops the server.", tone="ok")
 
         _pid_file(port).write_text(str(os.getpid()))
         uvicorn.run(fastapi_app, host=host, port=port, log_level="warning")

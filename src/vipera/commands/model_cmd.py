@@ -7,10 +7,8 @@ from pathlib import Path
 import typer
 from huggingface_hub import HfApi, hf_hub_download, list_repo_files
 from rich import box
-from rich.panel import Panel
 from rich.prompt import IntPrompt, Prompt
 from rich.table import Table
-from rich.text import Text
 
 from vipera.config import MODELS_DIR, ensure_dirs, load_config, save_config
 from vipera.gguf_analyzer import GGUFAnalysisError, analyze_gguf
@@ -30,12 +28,11 @@ from vipera.registry import add_model, get_model, list_models, remove_model
 from vipera.ui import (
     C_ACCENT,
     C_DIM,
-    C_GREEN,
-    C_RED,
     C_TEXT,
     C_YELLOW,
     animated_loading_bar,
     console,
+    note,
 )
 
 app = typer.Typer()
@@ -143,7 +140,7 @@ def import_model(
     ensure_dirs()
     src_path = Path(src).expanduser().resolve()
     if not src_path.exists():
-        console.print(f"[{C_RED}] ✗ File not found: {src_path}[/]")
+        console.print(f"file not found: {src_path}")
         raise typer.Exit(1)
 
     base_alias = (name or src_path.stem).removesuffix(".gguf")
@@ -154,7 +151,7 @@ def import_model(
         with console.status(f"[{C_ACCENT}] Copying {src_path.name}…"):
             shutil.copy2(src_path, dst)
 
-    animated_loading_bar("IMPORTING GGUF", 1.0)
+    animated_loading_bar("importing gguf", 1.0)
     meta = _read_meta(dst, src_path.name)
     add_model(alias, dst, meta)
 
@@ -163,7 +160,7 @@ def import_model(
     save_config(cfg)
 
     param_str = f"{meta.get('n_params', 0) / 1e9:.2f}B · " if meta.get("n_params") else ""
-    console.print(f"  [{C_GREEN}]✓ IMPORTED & SET AS DEFAULT[/]  [{C_TEXT}]{alias}[/]")
+    console.print(f"imported {alias} and set it as default")
     console.print(
         f"    [{C_DIM}]└─ {param_str}{meta['size_bytes'] / 1e9:.2f} GB  ·  "
         f"{meta.get('n_layers', 0)} layers  ·  {meta['quant']}[/]\n"
@@ -174,15 +171,8 @@ def import_model(
 def search_model():
     """Search and download GGUF models from Hugging Face."""
     ensure_dirs()
-    console.print(
-        Panel(
-            "  Enter a keyword to search for GGUF models on Hugging Face.",
-            title="[ SEARCH HUB ]",
-            border_style=C_ACCENT,
-            box=box.ROUNDED,
-        )
-    )
-    query = Prompt.ask(f"[{C_ACCENT}]  ▸ Keyword[/]")
+    note("search Hugging Face for GGUFs. a keyword is enough, e.g. `qwen2.5 7b`.")
+    query = Prompt.ask(f"[{C_ACCENT}]   keyword[/]")
     if not query:
         return
 
@@ -190,17 +180,17 @@ def search_model():
         try:
             models = list(api.list_models(search=query, filter="gguf", limit=10))
         except Exception as e:
-            console.print(f"[{C_RED}] ✗ Connection failed: {e}[/]")
+            console.print(f"could not reach Hugging Face: {e}")
             raise typer.Exit(1) from e
 
     if not models:
-        console.print(f"[{C_YELLOW}] ⚠ No models found.[/]")
+        note("nothing matched that keyword. try a shorter one.", tone="warn")
         raise typer.Exit(0)
 
-    t = Table(box=box.ROUNDED, title=f"SEARCH RESULTS · '{query}'", title_justify="left")
-    t.add_column("ID", style=C_DIM, justify="center")
-    t.add_column("REPO ID", style=C_TEXT)
-    t.add_column("DOWNLOADS", style=C_ACCENT, justify="right")
+    t = Table(box=box.SIMPLE_HEAD, title=f"results for {query}", title_style=C_DIM, title_justify="left")
+    t.add_column("id", style=C_DIM, justify="center")
+    t.add_column("repo id", style=C_TEXT)
+    t.add_column("downloads", style=C_ACCENT, justify="right")
     for i, m in enumerate(models):
         t.add_row(f"[{i + 1}]", m.id, f"{m.downloads:,}" if m.downloads else "0")
     console.print(t)
@@ -218,12 +208,12 @@ def search_model():
             raise typer.Exit(1) from e
 
     if not gguf_files:
-        console.print(f"[{C_RED}] ✗ No .gguf files found.[/]")
+        console.print("no .gguf files in that repository")
         raise typer.Exit(1)
 
-    ft = Table(box=box.ROUNDED, title=f"FILES · {selected_repo}", title_justify="left")
-    ft.add_column("ID", style=C_DIM, justify="center")
-    ft.add_column("FILE NAME", style=C_TEXT)
+    ft = Table(box=box.SIMPLE_HEAD, title=f"files in {selected_repo}", title_style=C_DIM, title_justify="left")
+    ft.add_column("id", style=C_DIM, justify="center")
+    ft.add_column("file name", style=C_TEXT)
     for i, f in enumerate(gguf_files):
         ft.add_row(f"[{i + 1}]", f)
     console.print(ft)
@@ -240,8 +230,8 @@ def search_model():
             filename=selected_file,
             local_dir=MODELS_DIR,
         )
-        console.print(f"\n[{C_GREEN}] ✓ Download complete![/]")
-        animated_loading_bar("FINALISING", 0.5)
+        console.print("download complete")
+        animated_loading_bar("finalising", 0.5)
 
         base_alias = Path(downloaded_path).stem
         alias = _unique_alias(base_alias)
@@ -253,7 +243,7 @@ def search_model():
         save_config(cfg)
 
         param_str = f"{meta.get('n_params', 0) / 1e9:.2f}B · " if meta.get("n_params") else ""
-        console.print(f"  [{C_GREEN}]✓ REGISTERED & SET AS DEFAULT[/]  [{C_TEXT}]{alias}[/]")
+        console.print(f"registered {alias} and set it as default")
         console.print(
             f"    [{C_DIM}]└─ {param_str}{meta['size_bytes'] / 1e9:.2f} GB  ·  {meta['quant']}[/]"
         )
@@ -263,7 +253,7 @@ def search_model():
     except KeyboardInterrupt:
         console.print(f"\n[{C_YELLOW}] ⚠ Download cancelled.[/]")
     except Exception as e:
-        console.print(f"\n[{C_RED}] ✗ Download failed: {e}[/]")
+        console.print(f"download failed: {e}")
 
 
 def _format_bytes(value: int) -> str:
@@ -284,13 +274,13 @@ def inspect_model(
     try:
         result = analyze_gguf(path)
     except GGUFAnalysisError as e:
-        console.print(f"[{C_RED}] ✗ {e}[/]")
+        console.print(f"{e}")
         raise typer.Exit(1) from e
 
     meta = result["metadata"]
-    summary = Table(box=box.ROUNDED, title="GGUF ANATOMY", title_justify="left")
-    summary.add_column("PROPERTY", style=C_DIM)
-    summary.add_column("VALUE", style=C_TEXT)
+    summary = Table(box=box.SIMPLE_HEAD, title="gguf anatomy", title_style=C_DIM, title_justify="left")
+    summary.add_column("property", style=C_DIM)
+    summary.add_column("value", style=C_TEXT)
     summary.add_row("file", result["path"])
     summary.add_row("architecture", str(meta.get("architecture") or "?"))
     summary.add_row("name", str(meta.get("name") or "?"))
@@ -318,11 +308,11 @@ def inspect_model(
     for tensor in result["tensor_map"]:
         tensor_counts[tensor["category"]] = tensor_counts.get(tensor["category"], 0) + 1
 
-    categories = Table(box=box.ROUNDED, title="SIZE BY CATEGORY", title_justify="left")
-    categories.add_column("CATEGORY", style=C_TEXT)
-    categories.add_column("TENSORS", style=C_DIM, justify="right")
-    categories.add_column("SIZE", style=C_ACCENT, justify="right")
-    categories.add_column("SHARE", style=C_DIM, justify="right")
+    categories = Table(box=box.SIMPLE_HEAD, title="size by category", title_style=C_DIM, title_justify="left")
+    categories.add_column("category", style=C_TEXT)
+    categories.add_column("tensors", style=C_DIM, justify="right")
+    categories.add_column("size", style=C_ACCENT, justify="right")
+    categories.add_column("share", style=C_DIM, justify="right")
     for category, size in sorted(
         result["category_sizes"].items(), key=lambda item: item[1], reverse=True
     ):
@@ -334,10 +324,10 @@ def inspect_model(
         )
     console.print(categories)
 
-    quant_table = Table(box=box.ROUNDED, title="QUANTIZATION MIX", title_justify="left")
-    quant_table.add_column("QUANT", style=C_ACCENT)
-    quant_table.add_column("TENSORS", style=C_DIM, justify="right")
-    quant_table.add_column("SIZE", style=C_TEXT, justify="right")
+    quant_table = Table(box=box.SIMPLE_HEAD, title="quantization mix", title_style=C_DIM, title_justify="left")
+    quant_table.add_column("quant", style=C_ACCENT)
+    quant_table.add_column("tensors", style=C_DIM, justify="right")
+    quant_table.add_column("size", style=C_TEXT, justify="right")
     for quant, size in sorted(
         result["quant_sizes"].items(), key=lambda item: item[1], reverse=True
     ):
@@ -352,25 +342,21 @@ def inspect_model(
     if warnings:
         lines = []
         for warning in warnings[:10]:
-            lines.append(f"  • {warning['tensor']}: {warning['quant']}")
+            lines.append(f"{warning['tensor']}: {warning['quant']}")
         if len(warnings) > 10:
-            lines.append(f"  … and {len(warnings) - 10} more")
-        console.print(
-            Panel(
-                "\n".join(lines),
-                title=Text(" QUALITY WARNINGS ", style=C_YELLOW),
-                border_style=C_YELLOW,
-                box=box.ROUNDED,
-            )
-        )
+            lines.append(f"and {len(warnings) - 10} more")
+        console.print()
+        note("\n".join(lines), tone="warn")
 
     if tensors:
-        tensor_table = Table(box=box.SIMPLE, title="TENSORS", title_justify="left")
-        tensor_table.add_column("LAYER", style=C_DIM, justify="right")
-        tensor_table.add_column("NAME", style=C_TEXT)
-        tensor_table.add_column("QUANT", style=C_ACCENT)
-        tensor_table.add_column("SHAPE", style=C_DIM, justify="right")
-        tensor_table.add_column("SIZE", style=C_DIM, justify="right")
+        tensor_table = Table(
+            box=box.SIMPLE_HEAD, title="tensors", title_style=C_DIM, title_justify="left"
+        )
+        tensor_table.add_column("layer", style=C_DIM, justify="right")
+        tensor_table.add_column("name", style=C_TEXT)
+        tensor_table.add_column("quant", style=C_ACCENT)
+        tensor_table.add_column("shape", style=C_DIM, justify="right")
+        tensor_table.add_column("size", style=C_DIM, justify="right")
         for tensor in result["tensor_map"]:
             layer = tensor["layer"]
             tensor_table.add_row(
@@ -386,7 +372,7 @@ def inspect_model(
 def _require_file(value: str | Path, label: str) -> Path:
     path = Path(value).expanduser()
     if not path.is_file():
-        console.print(f"[{C_RED}] ✗ {label} not found: {path}[/]")
+        console.print(f"{label} not found: {path}")
         raise typer.Exit(1)
     return path
 
@@ -395,7 +381,7 @@ def _prepare_output(value: str | None, fallback: Path) -> Path:
     if value:
         path = Path(value).expanduser()
         if path.exists():
-            console.print(f"[{C_RED}] ✗ output already exists: {path}[/]")
+            console.print(f"output already exists: {path}")
             raise typer.Exit(1)
         return path
     return unique_output_path(fallback)
@@ -409,10 +395,10 @@ def _run_tool(command: list[str], dry_run: bool, cleanup: Path | None = None) ->
     try:
         subprocess.run(command, check=True)
     except FileNotFoundError as e:
-        console.print(f"[{C_RED}] ✗ {e}[/]")
+        console.print(f"{e}")
         ok = False
     except subprocess.CalledProcessError as e:
-        console.print(f"[{C_RED}] ✗ command failed with exit code {e.returncode}[/]")
+        console.print(f"llama.cpp exited with code {e.returncode}")
         ok = False
     except KeyboardInterrupt:
         console.print(f"\n[{C_YELLOW}] ⚠ Interrupted.[/]")
@@ -438,7 +424,7 @@ def imatrix_cmd(
     model = _require_file(path, "model")
     calibration = _require_file(calibration_data, "calibration data")
     if ctx <= 0:
-        console.print(f"[{C_RED}] ✗ --ctx must be greater than zero[/]")
+        console.print("--ctx must be greater than zero")
         raise typer.Exit(1)
 
     try:
@@ -447,13 +433,13 @@ def imatrix_cmd(
         out = _prepare_output(output, default_out)
         command = build_imatrix_command(binary, model, calibration, out, ctx, threads)
     except OptimizerError as e:
-        console.print(f"[{C_RED}] ✗ {e}[/]")
+        console.print(f"{e}")
         raise typer.Exit(1) from e
 
     if not _run_tool(command, dry_run, cleanup=out):
         raise typer.Exit(1)
     if not dry_run:
-        console.print(f"[{C_GREEN}] ✓ imatrix written:[/] {out}")
+        console.print(f"imatrix written to {out}")
 
 
 @app.command("quantize")
@@ -490,7 +476,7 @@ def quantize_cmd(
     model = _require_file(path, "model")
     imatrix_path = _require_file(imatrix, "imatrix") if imatrix else None
     if prior_weight < 1:
-        console.print(f"[{C_RED}] ✗ --prior-weight must be at least 1[/]")
+        console.print("--prior-weight must be at least 1")
         raise typer.Exit(1)
 
     try:
@@ -511,7 +497,7 @@ def quantize_cmd(
             token_embedding_type=token_embedding,
         )
     except OptimizerError as e:
-        console.print(f"[{C_RED}] ✗ {e}[/]")
+        console.print(f"{e}")
         raise typer.Exit(1) from e
 
     if prune_layers:
@@ -520,7 +506,7 @@ def quantize_cmd(
         raise typer.Exit(1)
     if not dry_run:
         console.print(
-            f"[{C_GREEN}] ✓ quantized model:[/] {out} ({_format_bytes(out.stat().st_size)})"
+            f"quantized {out} ({_format_bytes(out.stat().st_size)})"
         )
 
 
@@ -553,13 +539,13 @@ def optimize_cmd(
     """Analyze, optionally build an imatrix, then quantize toward a size target."""
     model = _require_file(path, "model")
     if target_size is None and target_quant is None:
-        console.print(f"[{C_RED}] ✗ provide --target-size or --target-quant[/]")
+        console.print("provide --target-size or --target-quant")
         raise typer.Exit(1)
     if target_size is not None and target_size <= 0:
-        console.print(f"[{C_RED}] ✗ --target-size must be greater than zero[/]")
+        console.print("--target-size must be greater than zero")
         raise typer.Exit(1)
     if prior_weight < 1:
-        console.print(f"[{C_RED}] ✗ --prior-weight must be at least 1[/]")
+        console.print("--prior-weight must be at least 1")
         raise typer.Exit(1)
 
     try:
@@ -577,14 +563,14 @@ def optimize_cmd(
             quant = choice.quant
             estimated = choice.estimated_bytes
     except (GGUFAnalysisError, OptimizerError) as e:
-        console.print(f"[{C_RED}] ✗ {e}[/]")
+        console.print(f"{e}")
         raise typer.Exit(1) from e
 
     try:
         quantize_bin = find_llama_tool("quantize", bin_dir)
         supports_prior = prior_weight != 1 and tool_supports_flag(quantize_bin, "--prior-weight")
     except OptimizerError as e:
-        console.print(f"[{C_RED}] ✗ {e}[/]")
+        console.print(f"{e}")
         raise typer.Exit(1) from e
 
     stem = model.stem
@@ -593,9 +579,9 @@ def optimize_cmd(
     if imatrix_out.exists():
         imatrix_out = unique_output_path(imatrix_out)
 
-    plan = Table(box=box.ROUNDED, title="OPTIMIZATION PLAN", title_justify="left")
-    plan.add_column("PROPERTY", style=C_DIM)
-    plan.add_column("VALUE", style=C_TEXT)
+    plan = Table(box=box.SIMPLE_HEAD, title="optimization plan", title_style=C_DIM, title_justify="left")
+    plan.add_column("property", style=C_DIM)
+    plan.add_column("value", style=C_TEXT)
     plan.add_row("model", str(model))
     plan.add_row("current", f"{current_quant} · {_format_bytes(current_size)}")
     plan.add_row("target quant", quant)
@@ -615,7 +601,7 @@ def optimize_cmd(
                 imatrix_bin, model, calibration, imatrix_out, ctx_size=512
             )
         except OptimizerError as e:
-            console.print(f"[{C_RED}] ✗ {e}[/]")
+            console.print(f"{e}")
             raise typer.Exit(1) from e
         if not _run_tool(imatrix_cmd, dry_run, cleanup=imatrix_out):
             raise typer.Exit(1)
@@ -635,7 +621,7 @@ def optimize_cmd(
             token_embedding_type=token_embedding,
         )
     except OptimizerError as e:
-        console.print(f"[{C_RED}] ✗ {e}[/]")
+        console.print(f"{e}")
         raise typer.Exit(1) from e
 
     if prune_layers:
@@ -647,7 +633,7 @@ def optimize_cmd(
         raise typer.Exit(1)
     if not dry_run:
         console.print(
-            f"[{C_GREEN}] ✓ optimized model:[/] {out} ({_format_bytes(out.stat().st_size)})"
+            f"optimized {out} ({_format_bytes(out.stat().st_size)})"
         )
 
 
@@ -659,13 +645,13 @@ def list_cmd():
         console.print(f"[{C_DIM}]No models. Run `vipera model import` or `vipera model search`.[/]")
         return
 
-    t = Table(box=box.ROUNDED, title="LOCAL MODELS", title_justify="left")
-    t.add_column("ID", style=C_DIM, justify="center")
-    t.add_column("ALIAS", style=C_TEXT)
-    t.add_column("SIZE", style=C_DIM)
-    t.add_column("QUANT", style=C_ACCENT)
-    t.add_column("LAYERS", style=C_DIM, justify="right")
-    t.add_column("CTX", style=C_DIM, justify="right")
+    t = Table(box=box.SIMPLE_HEAD, title="local models", title_style=C_DIM, title_justify="left")
+    t.add_column("id", style=C_DIM, justify="center")
+    t.add_column("alias", style=C_TEXT)
+    t.add_column("size", style=C_DIM)
+    t.add_column("quant", style=C_ACCENT)
+    t.add_column("layers", style=C_DIM, justify="right")
+    t.add_column("ctx", style=C_DIM, justify="right")
 
     for i, m in enumerate(models):
         meta = m.get("meta", {})
@@ -692,7 +678,7 @@ def rm_cmd(
     """Remove a model."""
     m = get_model(name)
     if not m:
-        console.print(f"[{C_RED}] ✗ Not found: {name}[/]")
+        console.print(f"there is no model called {name}. `vipera model list` shows them.")
         raise typer.Exit(1)
     if not yes and not typer.confirm(f"Remove model '{name}'?"):
         raise typer.Abort()
@@ -713,7 +699,7 @@ def rm_cmd(
     else:
         path.unlink(missing_ok=True)
 
-    console.print(f"[{C_GREEN}] ✓ Removed: {name}[/]")
+    console.print(f"removed {name}")
 
 
 @app.command("recommend")
@@ -724,7 +710,7 @@ def recommend_quantization(
     try:
         result = analyze_gguf(path)
     except GGUFAnalysisError as e:
-        console.print(f"[{C_RED}] ✗ {e}[/]")
+        console.print(f"{e}")
         raise typer.Exit(1) from e
 
     meta = result["metadata"]
@@ -734,7 +720,7 @@ def recommend_quantization(
     console.print(f"\n[{C_ACCENT}]▸ Optimization Recommendations for {path}[/]\n")
 
     if not warnings:
-        console.print(f"  [{C_GREEN}]✓ This model has no critical low-precision tensors.[/]")
+        console.print("this model has no low-precision tensors worth fixing")
         console.print(f"  [{C_DIM}]You can safely quantize to {current_quant} or lower.[/]\n")
         return
 

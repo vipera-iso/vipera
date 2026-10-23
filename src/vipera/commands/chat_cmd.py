@@ -1,7 +1,4 @@
 import typer
-from rich import box
-from rich.panel import Panel
-from rich.text import Text
 
 from vipera.config import load_config
 from vipera.engine import ChatEngine, create_engine
@@ -12,8 +9,8 @@ from vipera.ui import (
     C_ACCENT,
     C_DIM,
     C_RED,
-    C_SUCCESS,
     console,
+    note,
     pick_model,
     plain_chat_stream,
     typewriter_chat_stream,
@@ -49,23 +46,17 @@ def _build(model: str) -> ChatEngine:
 
 
 def repl_loop(engine: ChatEngine, typewriter: bool = False, chat_kwargs: dict | None = None):
-    console.print(
-        Panel(
-            Text("  System Ready. Type 'exit' or Ctrl+C to quit.", style=C_SUCCESS),
-            border_style=C_ACCENT,
-            box=box.ROUNDED,
-        )
-    )
+    note("ready. type `exit` or press ctrl-c to quit.", tone="ok")
 
     history = [{"role": "system", "content": "You are a helpful assistant."}]
     kwargs = chat_kwargs or {}
 
     while True:
-        console.print(f"\n  [{C_ACCENT}]User >[/] ", end="")
+        console.print(f"\n   [{C_ACCENT}]>[/] ", end="")
         try:
             user = input().strip()
         except (EOFError, KeyboardInterrupt):
-            console.print(f"\n  [{C_DIM}]Disconnected.[/]")
+            console.print(f"\n   [{C_DIM}]disconnected[/]")
             break
 
         if not user:
@@ -77,13 +68,10 @@ def repl_loop(engine: ChatEngine, typewriter: bool = False, chat_kwargs: dict | 
 
         try:
             stream = engine.chat(history, stream=True, **kwargs)
-            if typewriter:
-                reply = typewriter_chat_stream(stream, title_text=" AI ")
-            else:
-                reply = plain_chat_stream(stream, title_text=" AI ")
+            reply = typewriter_chat_stream(stream) if typewriter else plain_chat_stream(stream)
             history.append({"role": "assistant", "content": reply})
         except Exception as e:
-            console.print(f"\n  [{C_RED}]✗ Error: {e}[/]")
+            note(f"the model returned an error: {e}", tone="error")
             history.pop()
 
 
@@ -98,7 +86,7 @@ def repl(
     cfg = load_config()
     model = model or cfg.get("default_model")
     if not model:
-        model = pick_model("SELECT A MODEL TO CHAT")
+        model = pick_model("select a model to chat")
     engine = _build(model)
     try:
         repl_loop(engine, typewriter=typewriter, chat_kwargs=_chat_kwargs(cfg))
@@ -118,15 +106,15 @@ def oneshot(
     cfg = load_config()
     model = model or cfg.get("default_model")
     if not model:
-        model = pick_model("SELECT A MODEL TO CHAT")
+        model = pick_model("select a model to chat")
     engine = _build(model)
     try:
         stream = engine.chat(
             [{"role": "user", "content": prompt}], stream=True, **_chat_kwargs(cfg)
         )
         if typewriter:
-            typewriter_chat_stream(stream, title_text=" AI ")
+            typewriter_chat_stream(stream)
         else:
-            plain_chat_stream(stream, title_text=" AI ")
+            plain_chat_stream(stream)
     finally:
         engine.close()

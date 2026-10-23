@@ -13,11 +13,13 @@ from vipera.ui import (
     C_ACCENT,
     C_DIM,
     C_GREEN,
-    C_RED,
     C_TEXT,
     animated_loading_bar,
     console,
+    ledger,
+    note,
     pick_model,
+    section,
 )
 
 app = typer.Typer()
@@ -110,24 +112,21 @@ def run(
     cfg = load_config()
     model = model or cfg.get("default_model")
     if not model:
-        model = pick_model("SELECT A MODEL TO BENCHMARK")
+        model = pick_model("select a model to benchmark")
 
     m = get_model(model)
     if not m:
-        console.print(f"[{C_RED}] ✗ Model not found: {model}[/]")
+        note(f"no model called {model}. run `vipera model list`.", tone="error")
         raise typer.Exit(1)
 
     hw = detect()
     try:
         ctx_list = [int(x) for x in ctx.split(",") if x.strip()]
     except ValueError as exc:
-        console.print(
-            f"[{C_RED}] ✗ --ctx must be comma-separated integers "
-            f"(example: 512,8192,65536), got: {ctx!r}[/]"
-        )
+        note(f"--ctx takes comma-separated integers (512,8192,65536); got {ctx!r}", tone="error")
         raise typer.Exit(1) from exc
     if not ctx_list or any(c <= 0 for c in ctx_list):
-        console.print(f"[{C_RED}] ✗ --ctx values must be positive integers, got: {ctx!r}[/]")
+        note(f"--ctx values must be positive integers; got {ctx!r}", tone="error")
         raise typer.Exit(1)
 
     backend = cfg.get("backend", "inprocess")
@@ -135,24 +134,28 @@ def run(
     # prompt-lookup draft measured -29%), so the setting only exists here as
     # context for reading the numbers: the server backend applies it itself.
     spec = cfg.get("spec_type", "none") if backend == "server" else "off"
-    console.print(
-        f"\n[{C_ACCENT}]▸ Benchmarking model:[/] [{C_TEXT}]{model}[/]"
-        f"  [{C_DIM}](backend: {backend}, spec: {spec})[/]"
-    )
-    console.print(
-        f"[{C_DIM}]  (Hardware: {hw.cpu_cores} cores, "
-        f"{hw.ram_free_gb:.1f} GB RAM free, GPU: {hw.gpu_name})[/]\n"
+    console.print()
+    ledger(
+        [
+            ("model", model),
+            ("backend", f"{backend}, spec {spec}"),
+            (
+                "machine",
+                f"{hw.cpu_cores} cores, {hw.ram_free_gb:.1f} GB RAM free, {hw.gpu_name}",
+            ),
+        ]
     )
 
-    t = Table(box=box.ROUNDED, title="BENCHMARK RESULTS", title_justify="left")
-    t.add_column("CTX", style=C_TEXT, justify="right")
-    t.add_column("GPU LAYERS", style=C_DIM, justify="center")
-    t.add_column("PROMPT TOK", style=C_DIM, justify="right")
-    t.add_column("TTFT", style=C_DIM, justify="right")
-    t.add_column("PREFILL T/s", style=C_GREEN, justify="right")
-    t.add_column("GEN TOK", style=C_DIM, justify="right")
-    t.add_column("GEN T/s", style=C_GREEN, justify="right")
-    t.add_column("TOTAL", style=C_TEXT, justify="right")
+    section("results")
+    t = Table(box=box.SIMPLE_HEAD, padding=(0, 2), pad_edge=False, show_edge=False)
+    t.add_column("ctx", style=C_TEXT, justify="right")
+    t.add_column("layers", style=C_DIM, justify="right")
+    t.add_column("prompt", style=C_DIM, justify="right")
+    t.add_column("ttft", style=C_DIM, justify="right")
+    t.add_column("prefill t/s", style=C_GREEN, justify="right")
+    t.add_column("gen", style=C_DIM, justify="right")
+    t.add_column("gen t/s", style=C_GREEN, justify="right")
+    t.add_column("total", style=C_TEXT, justify="right")
 
     for c in ctx_list:
         p = plan(
@@ -173,14 +176,14 @@ def run(
                 try:
                     engine = create_engine(p, m["path"], backend)
                 except Exception as e:
-                    console.print(f"[{C_RED}] ✗ Failed to load model with ctx={c}: {e}[/]")
+                    note(f"ctx {c} did not load: {e}", tone="error")
                     continue
 
-            animated_loading_bar(f"RUNNING CTX {c}", 0.5)
+            animated_loading_bar(f"ctx {c}", 0.5)
             result = _run_bench(engine, PROMPT, max_tokens)
 
             if "error" in result:
-                console.print(f"[{C_RED}] ✗ Benchmark error at ctx={c}: {result['error']}[/]")
+                note(f"ctx {c} failed during the run: {result['error']}", tone="error")
                 continue
 
             # Report the plan the engine actually loaded: a GPU load can fail
@@ -207,9 +210,8 @@ def run(
                 engine.close()
 
     console.print(t)
-    console.print(
-        f"[{C_DIM}]  * TTFT = time to first token. PREFILL T/s is prompt_tokens / TTFT "
-        f"(approximate). GEN T/s is measured after the first token. "
-        f"A '~' prefix on GEN TOK means the backend did not report usage and the "
-        f"count is a streamed-chunk approximation.[/]\n"
+    note(
+        "ttft is time to first token, and prefill t/s is prompt tokens over ttft.\n"
+        "gen t/s is measured after the first token. a `~` on gen means the backend\n"
+        "reported no usage and the count is a streamed-chunk approximation."
     )
