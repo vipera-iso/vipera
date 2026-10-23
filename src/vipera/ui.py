@@ -384,15 +384,15 @@ def pick_model(title: str = "select a model") -> str:
     t.add_column("quant", style=C_ACCENT, justify="right")
 
     for i, model in enumerate(installed):
-        meta = model.get("meta", {})
-        marker = "" if model["name"] != default_model else "  default"
+        meta = model.meta
+        marker = "" if model.alias != default_model else "  default"
         t.add_row(
             f"{i + 1}",
-            f"{model['name']}{marker}",
+            f"{model.alias}{marker}",
             f"{meta.get('size_bytes', 0) / 1e9:.2f} GB",
             meta.get("quant", "?"),
         )
-        if model["name"] == default_model:
+        if model.alias == default_model:
             default_idx = i + 1
 
     console.print(t)
@@ -404,4 +404,4 @@ def pick_model(title: str = "select a model") -> str:
         note("that number is not in the list.", tone="error")
         raise typer.Exit(1)
 
-    return installed[choice - 1]["name"]
+    return installed[choice - 1].alias

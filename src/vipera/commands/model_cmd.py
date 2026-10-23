@@ -5,7 +5,6 @@ import subprocess
 from pathlib import Path
 
 import typer
-from huggingface_hub import HfApi, hf_hub_download, list_repo_files
 from rich import box
 from rich.prompt import IntPrompt, Prompt
 from rich.table import Table
@@ -25,6 +24,7 @@ from vipera.optimizer import (
     unique_output_path,
 )
 from vipera.registry import add_model, get_model, list_models, remove_model
+from vipera.sources import hf as hf_source
 from vipera.ui import (
     C_ACCENT,
     C_DIM,
@@ -37,7 +37,6 @@ from vipera.ui import (
 
 app = typer.Typer()
 
-api = HfApi()
 
 _QUANT_RE = re.compile(
     r"(Q\d+_K(?:_[A-Z]+)?|Q\d+_\d|IQ\d+_\w+|F16|BF16|F32|Q\d+)",
@@ -178,7 +177,7 @@ def search_model():
 
     with console.status(f"[{C_ACCENT}] Searching for '{query}'…"):
         try:
-            models = list(api.list_models(search=query, filter="gguf", limit=10))
+            models = hf_source.search(query, limit=10)
         except Exception as e:
             console.print(f"could not reach Hugging Face: {e}")
             raise typer.Exit(1) from e
@@ -187,56 +186,66 @@ def search_model():
         note("nothing matched that keyword. try a shorter one.", tone="warn")
         raise typer.Exit(0)
 
-    t = Table(box=box.SIMPLE_HEAD, title=f"results for {query}", title_style=C_DIM, title_justify="left")
+    t = Table(
+        box=box.SIMPLE_HEAD, title=f"results for {query}", title_style=C_DIM, title_justify="left"
+    )
     t.add_column("id", style=C_DIM, justify="center")
     t.add_column("repo id", style=C_TEXT)
     t.add_column("downloads", style=C_ACCENT, justify="right")
     for i, m in enumerate(models):
-        t.add_row(f"[{i + 1}]", m.id, f"{m.downloads:,}" if m.downloads else "0")
+        t.add_row(f"[{i + 1}]", m.ref, f"{m.downloads:,}" if m.downloads else "0")
     console.print(t)
 
     choice = IntPrompt.ask(f"\n[{C_ACCENT}] ▸ Select a model ID[/]", default=1)
     if choice < 1 or choice > len(models):
         raise typer.Exit(1)
-    selected_repo = models[choice - 1].id
+    selected_repo = models[choice - 1].ref
 
     with console.status(f"[{C_ACCENT}] Fetching files…"):
         try:
-            files = list_repo_files(repo_id=selected_repo)
-            gguf_files = [f for f in files if f.endswith(".gguf")]
+            files = hf_source.resolve(selected_repo)
         except Exception as e:
             raise typer.Exit(1) from e
 
-    if not gguf_files:
+    if not files:
         console.print("no .gguf files in that repository")
         raise typer.Exit(1)
 
-    ft = Table(box=box.SIMPLE_HEAD, title=f"files in {selected_repo}", title_style=C_DIM, title_justify="left")
+    ft = Table(
+        box=box.SIMPLE_HEAD,
+        title=f"files in {selected_repo}",
+        title_style=C_DIM,
+        title_justify="left",
+    )
     ft.add_column("id", style=C_DIM, justify="center")
     ft.add_column("file name", style=C_TEXT)
-    for i, f in enumerate(gguf_files):
-        ft.add_row(f"[{i + 1}]", f)
+    ft.add_column("size", style=C_DIM, justify="right")
+    for i, f in enumerate(files):
+        size = _format_bytes(f.size_bytes) if f.size_bytes else "?"
+        ft.add_row(f"[{i + 1}]", f.path, size)
     console.print(ft)
 
     fc = IntPrompt.ask(f"\n[{C_ACCENT}] ▸ Select a file ID to download[/]", default=1)
-    if fc < 1 or fc > len(gguf_files):
+    if fc < 1 or fc > len(files):
         raise typer.Exit(1)
-    selected_file = gguf_files[fc - 1]
+    selected_file = files[fc - 1]
 
-    console.print(f"\n[{C_ACCENT}] ▸ Downloading: {selected_file}[/]")
+    console.print(f"\n[{C_ACCENT}] ▸ Downloading: {selected_file.path}[/]")
     try:
-        downloaded_path = hf_hub_download(
-            repo_id=selected_repo,
-            filename=selected_file,
-            local_dir=MODELS_DIR,
-        )
+        downloaded_path = hf_source.download(selected_repo, selected_file, MODELS_DIR)
         console.print("download complete")
         animated_loading_bar("finalising", 0.5)
 
         base_alias = Path(downloaded_path).stem
         alias = _unique_alias(base_alias)
         meta = _read_meta(Path(downloaded_path))
-        add_model(alias, downloaded_path, meta)
+        add_model(
+            alias,
+            downloaded_path,
+            meta,
+            source=hf_source.NAME,
+            source_ref=selected_repo,
+        )
 
         cfg = load_config()
         cfg["default_model"] = alias
@@ -278,7 +287,9 @@ def inspect_model(
         raise typer.Exit(1) from e
 
     meta = result["metadata"]
-    summary = Table(box=box.SIMPLE_HEAD, title="gguf anatomy", title_style=C_DIM, title_justify="left")
+    summary = Table(
+        box=box.SIMPLE_HEAD, title="gguf anatomy", title_style=C_DIM, title_justify="left"
+    )
     summary.add_column("property", style=C_DIM)
     summary.add_column("value", style=C_TEXT)
     summary.add_row("file", result["path"])
@@ -308,7 +319,9 @@ def inspect_model(
     for tensor in result["tensor_map"]:
         tensor_counts[tensor["category"]] = tensor_counts.get(tensor["category"], 0) + 1
 
-    categories = Table(box=box.SIMPLE_HEAD, title="size by category", title_style=C_DIM, title_justify="left")
+    categories = Table(
+        box=box.SIMPLE_HEAD, title="size by category", title_style=C_DIM, title_justify="left"
+    )
     categories.add_column("category", style=C_TEXT)
     categories.add_column("tensors", style=C_DIM, justify="right")
     categories.add_column("size", style=C_ACCENT, justify="right")
@@ -324,7 +337,9 @@ def inspect_model(
         )
     console.print(categories)
 
-    quant_table = Table(box=box.SIMPLE_HEAD, title="quantization mix", title_style=C_DIM, title_justify="left")
+    quant_table = Table(
+        box=box.SIMPLE_HEAD, title="quantization mix", title_style=C_DIM, title_justify="left"
+    )
     quant_table.add_column("quant", style=C_ACCENT)
     quant_table.add_column("tensors", style=C_DIM, justify="right")
     quant_table.add_column("size", style=C_TEXT, justify="right")
@@ -505,9 +520,7 @@ def quantize_cmd(
     if not _run_tool(command, dry_run, cleanup=out):
         raise typer.Exit(1)
     if not dry_run:
-        console.print(
-            f"quantized {out} ({_format_bytes(out.stat().st_size)})"
-        )
+        console.print(f"quantized {out} ({_format_bytes(out.stat().st_size)})")
 
 
 @app.command("optimize")
@@ -579,7 +592,9 @@ def optimize_cmd(
     if imatrix_out.exists():
         imatrix_out = unique_output_path(imatrix_out)
 
-    plan = Table(box=box.SIMPLE_HEAD, title="optimization plan", title_style=C_DIM, title_justify="left")
+    plan = Table(
+        box=box.SIMPLE_HEAD, title="optimization plan", title_style=C_DIM, title_justify="left"
+    )
     plan.add_column("property", style=C_DIM)
     plan.add_column("value", style=C_TEXT)
     plan.add_row("model", str(model))
@@ -632,9 +647,7 @@ def optimize_cmd(
     if not _run_tool(command, dry_run, cleanup=out):
         raise typer.Exit(1)
     if not dry_run:
-        console.print(
-            f"optimized {out} ({_format_bytes(out.stat().st_size)})"
-        )
+        console.print(f"optimized {out} ({_format_bytes(out.stat().st_size)})")
 
 
 @app.command("list")
@@ -660,7 +673,7 @@ def list_cmd():
         ctx_str = f"{ctx_val:,}" if ctx_val else "?"
         t.add_row(
             f"[{i + 1:02d}]",
-            m["name"],
+            m.alias,
             size_str,
             meta.get("quant", "?"),
             f"{meta.get('n_layers', 0) or '?'}",
@@ -691,8 +704,8 @@ def rm_cmd(
         cfg["default_model"] = None
         save_config(cfg)
 
-    path = Path(m["path"])
-    if any(other["path"] == m["path"] for other in list_models()):
+    path = m.path
+    if any(other.path == m.path for other in list_models()):
         # Two aliases can share one file (`model search` for the same download
         # twice); deleting it here would break the alias that remains.
         console.print(f"[{C_DIM}]  Kept {path}: another alias still uses it.[/]")
@@ -732,6 +745,9 @@ def recommend_quantization(
     console.print(f"  [{C_ACCENT}]Command to run:[/]")
     console.print(
         f"  vipera model quantize {path} \\\n"
+        # The source is already quantized and the target equals its current
+        # quant, so llama-quantize refuses unless this is passed.
+        f"    --allow-requantize \\\n"
         f"    --target-quant {current_quant} \\\n"
         f"    --output-tensor q6_k \\\n"
         f"    --token-embedding q6_k \\\n"

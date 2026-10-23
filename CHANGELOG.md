@@ -8,6 +8,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Multi-model serving** — `vipera serve --models a,b --max-loaded N` (or
+  `models`/`max_loaded` in the config) serves several aliases from one gateway.
+  A model is planned and mounted on its first request, and the least recently
+  used engine is closed once more than `--max-loaded` are resident. `GET
+  /v1/models` lists every served alias; a request naming anything else returns
+  404 with the available aliases. `GET /health` reports the loaded set.
+- **`python -m vipera`** — same entry point as the console script, used by the
+  end-to-end tests so they do not depend on `PATH`.
+- **Split test tiers** — `tests/unit`, `tests/integration` (real files and
+  processes) and `tests/e2e` (CLI in a subprocess), with `integration`/`e2e`
+  markers registered in `pyproject.toml`.
 - **Opt-in `llama-server` backend** — `backend: "server"` in the config runs
   the `llama-server` binary as a child process and serves the same
   OpenAI-compatible API from it (`src/vipera/server_backend.py`). The flags
@@ -32,6 +43,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   nominal bit width.
 
 ### Changed
+- **Backends split into `vipera/backends/`** — `protocol` (the `ChatEngine`
+  contract and the accepted chat parameters), `loading` (offload ladder and
+  retry rungs), `registry` (backend selection), `inprocess` (llama-cpp-python)
+  and `server` (the llama-server child). The server backend no longer imports
+  the engine module from inside a function to dodge a cycle. `vipera.engine`
+  and `vipera.server_backend` remain importable as shims for 1.x callers.
+- **Error codes** — `vipera.errors` adds `ViperaError` with stable codes.
+  `PlannerError` (E3001) and `BackendError` (E4001) subclass `ValueError` and
+  `RuntimeError`, so existing `except` clauses and callers keep working while
+  new code can match on the type.
+- **`flash_attn` is no longer a config key** — the planner decides it from
+  `kv_cache` (quantized KV requires it), so the key never had an effect and
+  only suggested it did. `vipera system config flash_attn ...` now rejects it.
+  Existing `config.json` files keep the stale key harmlessly; drop the line.
+- **`profile` in the config is now read** — `serve start` used to pass `auto`
+  unconditionally, ignoring a configured `profile`.
 - **Throughput: 4.55 → 6.3 t/s on the reference 14B** (8K, interleaved A/B,
   median-3). Three measured changes: `cpu_threads` is now one per physical core
   instead of `cores - 1` (+9%, and +19-21% at f16 KV); the VRAM reserve is
@@ -58,6 +85,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `GGUFAnalysisError: failed to read ...` instead of a traceback.
 
 ### Fixed
+- **Streaming no longer emits two usage frames** — with
+  `stream_options.include_usage`, the gateway forwarded llama-server's trailing
+  `choices: []` frame and then synthesized another one. Usage is now captured
+  and emitted exactly once, in the OpenAI shape.
+- **A `null` or mistyped config value no longer crashes the planner out of
+  sight** — `"ctx": null` survived the merge and raised `TypeError` deep inside
+  `plan()`; it now falls back to the default, and an uncastable value logs
+  `vipera: config ...` to stderr instead of being kept as a string.
+- **`model recommend` suggests a command that can run** — the emitted
+  `vipera model quantize` line targets the model's current quant, which
+  llama-quantize refuses to requantize without `--allow-requantize`.
+- **`Q8_K` sizes as 8-bit** — `_quant_bpw` had no `Q8` branch, so `Q8_K` fell
+  through to the Q4 fallback (4.58 bpw) and halved the estimate.
+- **The hybrid-attention docstring matches the code** — a layer matching both
+  markers counts as KV-bearing, not recurrent.
 - **`serve start` warns for every non-loopback `--host`** — `0.0.0.0` was
   treated as safe, so the most common "expose to the network" bind got no
   warning at all, and the grace-period message claimed the server was aborting

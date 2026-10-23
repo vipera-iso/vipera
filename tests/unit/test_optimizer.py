@@ -52,6 +52,14 @@ def test_estimate_size_for_known_quant():
     assert size > 4_800_000_000
 
 
+def test_size_estimate_treats_q8_k_as_eight_bit():
+    # Q8_K has no block-table entry, but it is still 8-bit. Falling through to
+    # the generic Q4 fallback halved the estimate and the shrink recommendation.
+    q8_k = estimate_size_for_quant(4_000_000_000, "Q4_K_M", "Q8_K")
+    q8_0 = estimate_size_for_quant(4_000_000_000, "Q4_K_M", "Q8_0")
+    assert q8_k == pytest.approx(q8_0)
+
+
 def test_parse_prune_layers():
     assert parse_prune_layers("0, 2,2, 5") == [0, 2, 5]
     with pytest.raises(OptimizerError):

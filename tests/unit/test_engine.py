@@ -247,7 +247,7 @@ def test_create_engine_selects_the_server_backend(monkeypatch):
             seen["plan"] = plan
             seen["path"] = path
 
-    monkeypatch.setattr("vipera.server_backend.ServerEngine", StubServer)
+    monkeypatch.setattr("vipera.backends.server.ServerEngine", StubServer)
 
     engine = create_engine(_plan(), "model.gguf", "server")
 
@@ -257,7 +257,7 @@ def test_create_engine_selects_the_server_backend(monkeypatch):
 
 def test_resolve_backend_upgrades_an_moe_plan(monkeypatch, capsys):
     monkeypatch.setattr("vipera.optimizer.find_llama_tool", lambda *a, **kw: "/bin/llama-server")
-    monkeypatch.setattr("vipera.server_backend.supports_n_cpu_moe", lambda binary: True)
+    monkeypatch.setattr("vipera.backends.server.supports_n_cpu_moe", lambda binary: True)
 
     backend, plan = resolve_backend(
         _plan(moe_cpu_layers=12, n_layers=24, n_ubatch=896), "inprocess"
@@ -271,7 +271,7 @@ def test_resolve_backend_upgrades_an_moe_plan(monkeypatch, capsys):
 
 def test_resolve_backend_falls_back_when_ncmoe_is_missing(monkeypatch, capsys):
     monkeypatch.setattr("vipera.optimizer.find_llama_tool", lambda *a, **kw: "/bin/llama-server")
-    monkeypatch.setattr("vipera.server_backend.supports_n_cpu_moe", lambda binary: False)
+    monkeypatch.setattr("vipera.backends.server.supports_n_cpu_moe", lambda binary: False)
 
     backend, plan = resolve_backend(
         _plan(gpu_layers=14, moe_cpu_layers=12, n_layers=24, n_ubatch=896), "inprocess"

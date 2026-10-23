@@ -106,7 +106,7 @@ def main(
 
     if select or not model:
         if len(installed) == 1 and not select:
-            model = installed[0]["name"]
+            model = installed[0].alias
             console.print(f"   only one model is installed, using {model}")
             console.print()
         else:

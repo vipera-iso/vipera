@@ -5,6 +5,11 @@ import shutil
 import sys
 from pathlib import Path
 
+from vipera.backends.names import is_known as _is_known_backend
+from vipera.backends.names import names as backend_names
+from vipera.protocols.names import is_known as _is_known_protocol
+from vipera.protocols.names import names as protocol_names
+
 VIPERA_HOME = Path(os.environ.get("VIPERA_HOME") or (Path.home() / ".vipera"))
 MODELS_DIR = VIPERA_HOME / "models"
 LOGS_DIR = VIPERA_HOME / "logs"
@@ -15,11 +20,21 @@ DEFAULT_CONFIG = {
     "host": "127.0.0.1",
     "port": 8686,
     "default_model": None,
+    # Aliases to serve together (lazy-loaded); None means single-model mode.
+    "models": None,
+    "max_loaded": 2,
     "backend": "inprocess",
+    # HTTP layers to mount: `openai` for /v1/*, `ollama` for /api/*.
+    "protocols": "openai",
+    # Load the model with embedding support. Off by default: llama.cpp needs
+    # the whole context built for it (--embeddings + pooling on the server
+    # backend), which a chat-only run should not pay for.
+    "embeddings": False,
     "profile": "auto",
     "ctx": 8192,
     "kv_cache": "q8_0",
-    "flash_attn": True,
+    # flash_attn is deliberately absent: the planner derives it from kv_cache
+    # (quantized KV requires it), so a config key would only look effective.
     "n_batch": 512,
     # 0 = auto (server backend uses 896 for MoE plans, min(n_batch, 512)
     # otherwise). -ub is the prefill lever; -b is raised to at least this.
@@ -38,29 +53,45 @@ DEFAULT_CONFIG = {
 _KV_CACHE_TYPES = {"f32", "bf16", "f16", "q4_0", "q4_1", "q5_0", "q5_1", "q8_0", "iq4_nl"}
 
 # "inprocess" drives llama-cpp-python in this process; "server" runs the
-# llama-server binary as a child and talks OpenAI/SSE to it. The default stays
-# inprocess until the server backend has been validated on real hardware.
-_BACKENDS = {"inprocess", "server"}
+# llama-server binary as a child and talks OpenAI/SSE to it. Additional names
+# can be installed as plugins (see vipera.backends.names).
 
 _TRUE_STRINGS = {"1", "true", "yes", "on"}
 _FALSE_STRINGS = {"0", "false", "no", "off", ""}
 
 _TYPE_MAP = {
     "port": int,
+    "embeddings": bool,
     "ctx": int,
     "n_batch": int,
     "n_ubatch": int,
+    "max_loaded": int,
     "max_tokens": int,
     "temperature": float,
     "top_p": float,
     "repeat_penalty": float,
-    "flash_attn": bool,
 }
 
 
 def ensure_dirs() -> None:
     for d in (VIPERA_HOME, MODELS_DIR, LOGS_DIR):
         d.mkdir(parents=True, exist_ok=True)
+
+
+def _split_protocols(value) -> list[str]:
+    """Normalize `protocols` from "a,b" or a JSON list into ordered names."""
+    if isinstance(value, str):
+        parts = value.split(",")
+    elif isinstance(value, (list, tuple)):
+        parts = list(value)
+    else:
+        return []
+    seen: list[str] = []
+    for part in parts:
+        name = str(part).strip().lower()
+        if name and name not in seen:
+            seen.append(name)
+    return seen
 
 
 def _coerce(cfg: dict) -> dict:
@@ -72,11 +103,28 @@ def _coerce(cfg: dict) -> dict:
                 else:
                     cfg[k] = cast(cfg[k])
             except (ValueError, TypeError):
-                pass
+                # Never let a typo survive as a string: plan() would receive it
+                # and fail with a TypeError far from the config file.
+                print(
+                    f"vipera: config {k}={cfg[k]!r} is not a valid {cast.__name__}; "
+                    f"using {DEFAULT_CONFIG[k]!r}",
+                    file=sys.stderr,
+                )
+                cfg[k] = DEFAULT_CONFIG[k]
     if cfg.get("kv_cache") not in _KV_CACHE_TYPES:
         cfg["kv_cache"] = DEFAULT_CONFIG["kv_cache"]
-    if cfg.get("backend") not in _BACKENDS:
+    if not _is_known_backend(cfg.get("backend")):
         cfg["backend"] = DEFAULT_CONFIG["backend"]
+    requested = _split_protocols(cfg.get("protocols"))
+    known = [name for name in requested if _is_known_protocol(name)]
+    for name in requested:
+        if name not in known:
+            print(
+                f"vipera: unknown protocol {name!r}; valid protocols: "
+                f"{', '.join(protocol_names())}",
+                file=sys.stderr,
+            )
+    cfg["protocols"] = ",".join(known) or DEFAULT_CONFIG["protocols"]
     return cfg
 
 
@@ -106,9 +154,17 @@ def _coerce_strict(cfg: dict) -> dict:
     if "kv_cache" in cfg and cfg["kv_cache"] not in _KV_CACHE_TYPES:
         valid = ", ".join(sorted(_KV_CACHE_TYPES))
         raise ValueError(f"kv_cache: must be one of {valid}")
-    if "backend" in cfg and cfg["backend"] not in _BACKENDS:
-        valid = ", ".join(sorted(_BACKENDS))
+    if "backend" in cfg and not _is_known_backend(cfg["backend"]):
+        valid = ", ".join(backend_names())
         raise ValueError(f"backend: must be one of {valid}")
+    if "protocols" in cfg:
+        requested = _split_protocols(cfg["protocols"])
+        unknown = [name for name in requested if not _is_known_protocol(name)]
+        if unknown or not requested:
+            valid = ", ".join(protocol_names())
+            found = ", ".join(unknown) or "(empty)"
+            raise ValueError(f"protocols: unknown {found}; must be one of {valid}")
+        cfg["protocols"] = ",".join(requested)
     return cfg
 
 
@@ -137,7 +193,13 @@ def load_config() -> dict:
             quarantine_corrupt(CONFIG_FILE, exc)
         else:
             if isinstance(data, dict):
-                return _coerce({**DEFAULT_CONFIG, **data})
+                merged = {**DEFAULT_CONFIG, **data}
+                # A JSON null for a key with a real default is a typo, not a
+                # value; letting it through crashed plan() with a TypeError.
+                for key, default in DEFAULT_CONFIG.items():
+                    if merged.get(key) is None and default is not None:
+                        merged[key] = default
+                return _coerce(merged)
             quarantine_corrupt(CONFIG_FILE, ValueError("not a JSON object"))
     return dict(DEFAULT_CONFIG)
 

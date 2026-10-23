@@ -1,8 +1,10 @@
 import asyncio
 import contextlib
+import json
 import threading
 import time
 
+import pytest
 from fastapi.testclient import TestClient
 
 from vipera.server import ChatRequest, build_app
@@ -67,6 +69,53 @@ def test_chat_stream():
         body = b"".join(r.iter_bytes()).decode()
         assert "hi" in body
         assert "[DONE]" in body
+
+
+@pytest.mark.parametrize("usage_with_choices", [False, True])
+def test_stream_emits_usage_frame_once(usage_with_choices):
+    """llama-server already sends a trailing choices:[] usage chunk.
+
+    Re-emitting it for include_usage would hand the client two usage frames:
+    the backend's own plus the synthesized one. A backend that attaches usage
+    to a chunk carrying content must not be duplicated either.
+    """
+
+    class UsageChunkEngine:
+        def chat(self, messages, stream=False, **kw):
+            if stream:
+
+                def _gen():
+                    yield {"choices": [{"delta": {"content": "hi"}}]}
+                    usage = {"prompt_tokens": 3, "completion_tokens": 1}
+                    if usage_with_choices:
+                        yield {"choices": [{"delta": {}}], "usage": usage}
+                    else:
+                        # Exactly the shape llama-server ends a stream with.
+                        yield {"choices": [], "usage": usage}
+
+                return _gen()
+            raise AssertionError("stream=True expected")
+
+    client = TestClient(build_app(UsageChunkEngine(), "test-model"))
+    with client.stream(
+        "POST",
+        "/v1/chat/completions",
+        json={
+            "messages": [{"role": "user", "content": "hi"}],
+            "stream": True,
+            "stream_options": {"include_usage": True},
+        },
+    ) as r:
+        body = b"".join(r.iter_bytes()).decode()
+
+    frames = [
+        json.loads(line[len("data: ") :])
+        for line in body.splitlines()
+        if line.startswith("data: ") and line != "data: [DONE]"
+    ]
+    usage_frames = [f for f in frames if f.get("usage")]
+    assert len(usage_frames) == 1
+    assert usage_frames[0]["usage"] == {"prompt_tokens": 3, "completion_tokens": 1}
 
 
 def test_stream_engine_error_becomes_sse_event():
@@ -522,3 +571,95 @@ def test_include_usage_is_not_sent_when_not_requested():
         b"".join(r.iter_bytes())
 
     assert "stream_options" not in engine.calls[-1]
+
+
+class _NamedEngine:
+    """Echo the model it was built for, so routing mistakes are visible."""
+
+    def __init__(self, name):
+        self.name = name
+        self.calls = []
+
+    def chat(self, messages, stream=False, **kw):
+        self.calls.append({"messages": messages, "stream": stream, **kw})
+        if stream:
+
+            def _gen():
+                yield {"choices": [{"delta": {"content": self.name}}]}
+
+            return _gen()
+        return {
+            "choices": [{"message": {"role": "assistant", "content": self.name}}],
+            "usage": {"prompt_tokens": 1, "completion_tokens": 1},
+        }
+
+
+def _pool_app():
+    from vipera.pool import ModelPool
+
+    engines = {alias: _NamedEngine(alias) for alias in ("alpha", "beta")}
+    pool = ModelPool(
+        {alias: f"/tmp/{alias}.gguf" for alias in engines},
+        lambda alias, path: engines[alias],
+    )
+    return build_app(pool=pool), pool, engines
+
+
+def test_pool_lists_every_model():
+    app, pool, _ = _pool_app()
+    client = TestClient(app)
+    ids = [m["id"] for m in client.get("/v1/models").json()["data"]]
+    assert ids == ["alpha", "beta"]
+    assert pool.loaded_ids() == []  # nothing loaded just from listing
+
+
+def test_pool_routes_to_the_requested_model():
+    app, _pool, engines = _pool_app()
+    client = TestClient(app)
+    r = client.post(
+        "/v1/chat/completions",
+        json={"model": "beta", "messages": [{"role": "user", "content": "hi"}]},
+    )
+    assert r.status_code == 200
+    assert r.json()["choices"][0]["message"]["content"] == "beta"
+    assert engines["alpha"].calls == []
+
+
+def test_pool_defaults_to_the_first_model():
+    app, _, _ = _pool_app()
+    client = TestClient(app)
+    r = client.post(
+        "/v1/chat/completions",
+        json={"messages": [{"role": "user", "content": "hi"}]},
+    )
+    assert r.status_code == 200
+    assert r.json()["choices"][0]["message"]["content"] == "alpha"
+
+
+def test_pool_rejects_an_unknown_model_and_lists_alternatives():
+    app, _, _ = _pool_app()
+    client = TestClient(app)
+    r = client.post(
+        "/v1/chat/completions",
+        json={"model": "gamma", "messages": [{"role": "user", "content": "hi"}]},
+    )
+    assert r.status_code == 404
+    assert "gamma" in r.json()["detail"]
+    assert "alpha" in r.json()["detail"]
+
+
+def test_pool_health_reports_loaded_models():
+    app, _pool, _ = _pool_app()
+    client = TestClient(app)
+    assert client.get("/health").json()["loaded"] == []
+
+    client.post("/v1/chat/completions", json={"messages": [{"role": "user", "content": "hi"}]})
+
+    body = client.get("/health").json()
+    assert body["model"] == "alpha"
+    assert body["loaded"] == ["alpha"]
+
+
+def test_build_app_requires_an_engine_or_a_pool():
+    with pytest.raises(ValueError):
+        build_app()

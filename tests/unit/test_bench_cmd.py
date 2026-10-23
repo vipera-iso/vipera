@@ -1,4 +1,5 @@
 import types
+from pathlib import Path
 
 import pytest
 import typer
@@ -6,6 +7,11 @@ import typer
 from vipera.commands import bench_cmd
 from vipera.config import DEFAULT_CONFIG
 from vipera.planner import Plan
+from vipera.registry import ModelSpec
+
+
+def _spec(name, meta=None):
+    return ModelSpec(alias=name, path=Path("/tmp/m.gguf"), meta=meta or {"n_layers": 4})
 
 
 def _plan(**overrides):
@@ -94,11 +100,7 @@ def test_run_rejects_malformed_ctx(monkeypatch):
     monkeypatch.setattr(
         bench_cmd,
         "get_model",
-        lambda name: {
-            "name": name,
-            "path": "/tmp/m.gguf",
-            "meta": {"n_layers": 4},
-        },
+        _spec,
     )
 
     with pytest.raises(typer.Exit) as exc:
@@ -112,11 +114,7 @@ def test_run_rejects_non_positive_ctx(monkeypatch):
     monkeypatch.setattr(
         bench_cmd,
         "get_model",
-        lambda name: {
-            "name": name,
-            "path": "/tmp/m.gguf",
-            "meta": {"n_layers": 4},
-        },
+        _spec,
     )
 
     with pytest.raises(typer.Exit) as exc:
@@ -137,11 +135,7 @@ def test_run_benchmarks_each_context_and_closes_engines(monkeypatch):
     monkeypatch.setattr(
         bench_cmd,
         "get_model",
-        lambda name: {
-            "name": name,
-            "path": "/tmp/m.gguf",
-            "meta": {"n_layers": 4, "quant": "Q4_K_M"},
-        },
+        lambda name: _spec(name, {"n_layers": 4, "quant": "Q4_K_M"}),
     )
     monkeypatch.setattr(
         bench_cmd,

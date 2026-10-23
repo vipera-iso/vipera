@@ -91,7 +91,21 @@ ignore = ["E501", "B008"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-q --strict-markers"
-markers = ["slow: tests that load a real model file"]
+markers = [
+    "slow: tests that load a real model file",
+    "integration: touches real files/processes; no network or model required",
+    "e2e: drives the CLI in a subprocess",
+]
+
+[tool.coverage.run]
+source = ["vipera"]
+# A four-line entry-point shim; its only job is to call app().
+omit = ["*/vipera/__main__.py"]
+
+[tool.coverage.report]
+# Measured floor at 1.2.0. Raise this as tests land; never lower it to make a
+# PR green. The biggest gaps are model_cmd (interactive) and ui (Rich output).
+fail_under = 70
 
 [tool.mypy]
 python_version = "3.11"

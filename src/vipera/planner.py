@@ -1,5 +1,6 @@
 from dataclasses import dataclass
 
+from vipera.errors import PlannerError
 from vipera.hardware import HardwareInfo
 
 
@@ -184,9 +185,7 @@ def _moe_cpu_layers(
     non_expert_gb = max(0.0, (size_bytes - expert_bytes) / 1024**3)
     kv_gb = _estimate_kv_cache_gb(meta, ctx, kv_cache)
     overhead_gb = _MOE_OVERHEAD_BASE_GB + _MOE_OVERHEAD_PER_UB_GB * n_ubatch
-    budget_gb = (
-        hw.vram_free_gb - _MOE_VRAM_RESERVE_GB - non_expert_gb - kv_gb - overhead_gb
-    )
+    budget_gb = hw.vram_free_gb - _MOE_VRAM_RESERVE_GB - non_expert_gb - kv_gb - overhead_gb
     if budget_gb <= 0:
         return None
 
@@ -217,7 +216,7 @@ def plan(
     n_ubatch: int = 0,
 ) -> Plan:
     if profile not in _VALID_PROFILES:
-        raise ValueError(f"unknown profile '{profile}' (valid: {', '.join(_VALID_PROFILES)})")
+        raise PlannerError(f"unknown profile '{profile}' (valid: {', '.join(_VALID_PROFILES)})")
 
     n_layers = int(meta.get("n_layers") or 32)
     kv_layers = _kv_layer_count(meta) or n_layers

@@ -2,7 +2,7 @@ import json
 
 import pytest
 
-from vipera import server_backend as sb
+from vipera.backends import server as sb
 from vipera.optimizer import OptimizerError
 from vipera.planner import Plan
 

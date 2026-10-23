@@ -1,7 +1,8 @@
 import typer
 
+from vipera.backends.protocol import ChatEngine
+from vipera.backends.registry import create_engine
 from vipera.config import load_config
-from vipera.engine import ChatEngine, create_engine
 from vipera.hardware import detect
 from vipera.planner import plan
 from vipera.registry import get_model
@@ -34,7 +35,7 @@ def _build(model: str) -> ChatEngine:
     cfg = load_config()
     hw = detect()
     p = plan(
-        m["meta"],
+        m.meta,
         hw,
         ctx=cfg.get("ctx", 8192),
         kv_cache=cfg.get("kv_cache", "q8_0"),
@@ -42,7 +43,7 @@ def _build(model: str) -> ChatEngine:
         n_ubatch=cfg.get("n_ubatch", 0),
     )
     with console.status(f"[{C_ACCENT}] Loading {model}…"):
-        return create_engine(p, m["path"], cfg.get("backend", "inprocess"))
+        return create_engine(p, m.path, cfg.get("backend", "inprocess"))
 
 
 def repl_loop(engine: ChatEngine, typewriter: bool = False, chat_kwargs: dict | None = None):

@@ -38,14 +38,12 @@ def test_type_coercion(isolated_home):
             {
                 "port": "9999",
                 "temperature": "0.3",
-                "flash_attn": "false",
             }
         )
     )
     cfg = cfg_mod.load_config()
     assert cfg["port"] == 9999
     assert cfg["temperature"] == pytest.approx(0.3)
-    assert cfg["flash_attn"] is False
 
 
 def test_corrupt_config_falls_back(isolated_home):
@@ -84,11 +82,11 @@ def test_coerce_strict_rejects_unknown_kv_cache():
 
 
 @pytest.mark.parametrize("value", ["maybe", "truthy", "2", "nope"])
-def test_coerce_strict_rejects_garbage_booleans(value):
+def test_parse_bool_rejects_garbage(value):
     # Lenient loading treats anything unknown as False; a command writing the
     # config back must not silently flip a flag the user mistyped.
-    with pytest.raises(ValueError, match="flash_attn"):
-        cfg_mod._coerce_strict({"flash_attn": value})
+    with pytest.raises(ValueError, match="boolean"):
+        cfg_mod._parse_bool(value)
 
 
 @pytest.mark.parametrize(
@@ -107,8 +105,31 @@ def test_coerce_strict_rejects_garbage_booleans(value):
     ],
     ids=repr,
 )
-def test_coerce_strict_parses_booleans(value, expected):
-    assert cfg_mod._coerce_strict({"flash_attn": value})["flash_attn"] is expected
+def test_parse_bool_parses_booleans(value, expected):
+    assert cfg_mod._parse_bool(value) is expected
+
+
+def test_null_typed_value_falls_back_to_default(isolated_home):
+    # A hand-edited `"ctx": null` survived the merge and crashed the planner
+    # with a TypeError long after startup.
+    (isolated_home / "config.json").write_text(json.dumps({"ctx": None, "port": None}))
+    cfg = cfg_mod.load_config()
+    assert cfg["ctx"] == 8192
+    assert cfg["port"] == 8686
+
+
+def test_invalid_typed_value_warns_and_falls_back(isolated_home, capsys):
+    (isolated_home / "config.json").write_text(json.dumps({"ctx": "abc"}))
+    cfg = cfg_mod.load_config()
+    assert cfg["ctx"] == 8192
+    assert "ctx" in capsys.readouterr().err
+
+
+def test_flash_attn_is_not_a_config_key():
+    # The planner derives flash attention from kv_cache; a config key that
+    # nothing reads only makes the user think it takes effect.
+    assert "flash_attn" not in cfg_mod.DEFAULT_CONFIG
+    assert "flash_attn" not in cfg_mod._TYPE_MAP
 
 
 def test_save_config_is_atomic(isolated_home):
@@ -160,7 +181,7 @@ def test_coerce_resets_unknown_backend():
     assert cfg_mod._coerce({"backend": "torch"})["backend"] == "inprocess"
 
 
-@pytest.mark.parametrize("backend", sorted(cfg_mod._BACKENDS))
+@pytest.mark.parametrize("backend", cfg_mod.backend_names())
 def test_every_declared_backend_is_accepted(backend):
     assert cfg_mod._coerce_strict({"backend": backend})["backend"] == backend
 

@@ -4,8 +4,9 @@ import typer
 from rich import box
 from rich.table import Table
 
+from vipera.backends.protocol import ChatEngine
+from vipera.backends.registry import create_engine
 from vipera.config import load_config
-from vipera.engine import ChatEngine, create_engine
 from vipera.hardware import detect
 from vipera.planner import plan
 from vipera.registry import get_model
@@ -159,7 +160,7 @@ def run(
 
     for c in ctx_list:
         p = plan(
-            m["meta"],
+            m.meta,
             hw,
             ctx=c,
             kv_cache=cfg.get("kv_cache", "q8_0"),
@@ -174,7 +175,7 @@ def run(
                 f"[{C_ACCENT}] Loading model with ctx={c} (GPU: {display_layers} layers)…"
             ):
                 try:
-                    engine = create_engine(p, m["path"], backend)
+                    engine = create_engine(p, m.path, backend)
                 except Exception as e:
                     note(f"ctx {c} did not load: {e}", tone="error")
                     continue
@@ -189,7 +190,7 @@ def run(
             # Report the plan the engine actually loaded: a GPU load can fail
             # and fall back to CPU, which would otherwise still print the
             # optimistic planned layer count.
-            layers_total = int(m["meta"].get("n_layers") or 0) or max(engine.plan.gpu_layers, 1)
+            layers_total = int(m.meta.get("n_layers") or 0) or max(engine.plan.gpu_layers, 1)
 
             gen_tok_str = str(result["gen_tok"])
             if not result.get("token_count_is_exact"):

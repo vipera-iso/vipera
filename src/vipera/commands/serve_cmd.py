@@ -6,11 +6,13 @@ from pathlib import Path
 import psutil
 import typer
 
+from vipera.backends.protocol import ChatEngine
+from vipera.backends.registry import create_engine, resolve_backend
 from vipera.config import VIPERA_HOME, load_config
-from vipera.engine import ChatEngine, create_engine, resolve_backend
 from vipera.hardware import detect
 from vipera.planner import plan
-from vipera.registry import get_model
+from vipera.pool import ModelPool
+from vipera.registry import ModelSpec, get_model, list_models
 from vipera.ui import (
     C_ACCENT,
     C_DIM,
@@ -35,6 +37,41 @@ def _resolve_option(val, default):
 
 def _pid_file(port: int) -> Path:
     return VIPERA_HOME / f"serve-{port}.pid"
+
+
+def _model_aliases(option, cfg: dict) -> list[str]:
+    """Aliases to serve together: --models, else cfg["models"], else none."""
+    if isinstance(option, typer.models.OptionInfo):
+        option = None
+    raw = option or cfg.get("models")
+    if isinstance(raw, str):
+        raw = raw.split(",")
+    return [alias.strip() for alias in (raw or []) if alias and alias.strip()]
+
+
+def _announce_plan(label: str, info: ModelSpec, p, backend: str) -> None:
+    n_layers_total = int(info.meta.get("n_layers") or 0) or max(p.gpu_layers, 1)
+    offload_layers = p.n_layers if p.requires_server else p.gpu_layers
+
+    section("plan")
+    rows = [
+        ("model", label),
+        ("quant", info.meta.get("quant") or "?"),
+        ("backend", backend),
+        ("layers", f"{offload_layers}/{n_layers_total}"),
+        ("kv cache", f"{p.kv_cache}  {p.kv_cache_gb:.2f} GB" if p.kv_cache_gb > 0 else p.kv_cache),
+        ("flash attn", "on" if p.flash_attn else "off"),
+    ]
+    if p.requires_server:
+        gpu_experts = p.n_layers - p.moe_cpu_layers
+        ubatch = f"  ubatch {p.n_ubatch}" if p.n_ubatch else ""
+        rows.insert(4, ("moe experts", f"{gpu_experts}/{p.n_layers} layers{ubatch}"))
+    if p.kv_layers and p.kv_layers < n_layers_total:
+        rows.append(("hybrid attn", f"{p.kv_layers}/{n_layers_total} layers keep KV"))
+    ledger(rows)
+    console.print()
+    gauge("on the gpu", offload_layers, n_layers_total, unit="layers", fmt="{:.0f}")
+    console.print()
 
 
 _LOOPBACK_HOSTS = {"localhost", "::1"}
@@ -94,12 +131,18 @@ def start(
     model: str | None = typer.Option(None, "--model", "-m"),
     host: str = typer.Option(None, "--host"),
     port: int = typer.Option(None, "--port", "-p"),
-    profile: str = typer.Option("auto", "--profile"),
+    profile: str | None = typer.Option(None, "--profile"),
     ctx: int = typer.Option(None, "--ctx"),
     bench: bool = typer.Option(
         False,
         "--bench",
         help="Run a 20-token speed check before serving (delays readiness)",
+    ),
+    models: str = typer.Option(
+        None, "--models", help="Comma-separated aliases to serve together (lazy-loaded)"
+    ),
+    max_loaded: int = typer.Option(
+        None, "--max-loaded", help="How many of --models stay in memory (default 2)"
     ),
 ):
     """Start the HTTP Gateway."""
@@ -107,18 +150,33 @@ def start(
     model = _resolve_option(model, None) or cfg.get("default_model")
     host = _resolve_option(host, cfg["host"])
     port = _resolve_option(port, cfg["port"])
-    profile = _resolve_option(profile, "auto")
+    profile = _resolve_option(profile, cfg.get("profile", "auto")) or "auto"
     ctx = _resolve_option(ctx, cfg["ctx"])
     bench = _resolve_option(bench, False)
     backend = cfg.get("backend", "inprocess")
+    max_loaded = int(_resolve_option(max_loaded, cfg.get("max_loaded", 2)))
 
-    if not model:
+    aliases = _model_aliases(models, cfg)
+    if model and model not in aliases:
+        aliases.insert(0, model)
+    if not aliases:
         console.print(f"[{C_RED}] ✗ No model specified. Use --model <name>[/]")
         raise typer.Exit(1)
-    m = get_model(model)
-    if not m:
-        console.print(f"[{C_RED}] ✗ Model not found: {model}[/]")
-        raise typer.Exit(1)
+
+    # Resolve every alias up front so a typo fails at startup, not on the first
+    # request hours later.
+    metas: dict[str, ModelSpec] = {}
+    for alias in aliases:
+        info = get_model(alias)
+        if not info:
+            installed = ", ".join(m.alias for m in list_models()) or "none installed"
+            console.print(
+                f"[{C_RED}] ✗ Model not found: {alias}[/]\n[{C_DIM}]  installed: {installed}[/]"
+            )
+            raise typer.Exit(1)
+        metas[alias] = info
+    model = aliases[0]
+    m = metas[model]
 
     if not _is_loopback(host):
         console.print(
@@ -132,61 +190,64 @@ def start(
             raise typer.Exit(1) from None
 
     hw = detect()
-    try:
-        p = plan(
-            m["meta"],
-            hw,
-            profile=profile,
-            ctx=ctx,
-            kv_cache=cfg.get("kv_cache", "q8_0"),
-            n_batch=cfg.get("n_batch", 512),
-            n_ubatch=cfg.get("n_ubatch", 0),
+
+    def _mount(info: ModelSpec, label: str, *, announce: bool):
+        """Plan and load one model; shared by single-model and lazy pool paths."""
+        try:
+            p = plan(
+                info.meta,
+                hw,
+                profile=profile,
+                ctx=ctx,
+                kv_cache=cfg.get("kv_cache", "q8_0"),
+                n_batch=cfg.get("n_batch", 512),
+                n_ubatch=cfg.get("n_ubatch", 0),
+            )
+        except ValueError as e:
+            console.print(f"[{C_RED}] ✗ {e}[/]")
+            raise typer.Exit(1) from e
+
+        # Decide before the banner: an MoE plan either upgrades to llama-server
+        # or falls back to the classic split, and the panel must show the truth.
+        backend_used, p = resolve_backend(p, backend)
+        if announce:
+            _announce_plan(label, info, p, backend_used)
+
+        try:
+            with console.status(f"[{C_ACCENT}] Loading {label} into memory…"):
+                return p, create_engine(p, info.path, backend_used), backend_used
+        except RuntimeError as e:
+            console.print(f"[{C_RED}] ✗ {e}[/]")
+            raise typer.Exit(1) from e
+
+    pool = None
+    engine = None
+    if len(metas) > 1:
+        # Lazy: a model is planned and mounted on its first request, so a
+        # three-model gateway does not pay for three models up front.
+        pool = ModelPool(
+            {alias: info.path for alias, info in metas.items()},
+            lambda alias, _path: _mount(metas[alias], alias, announce=False)[1],
+            max_loaded=max_loaded,
         )
-    except ValueError as e:
-        console.print(f"[{C_RED}] ✗ {e}[/]")
-        raise typer.Exit(1) from e
-
-    # Decide before the banner: an MoE plan either upgrades to llama-server or
-    # falls back to the classic split, and the panel must show the truth.
-    backend, p = resolve_backend(p, backend)
-
-    n_layers_total = int(m["meta"].get("n_layers") or 0) or max(p.gpu_layers, 1)
-    quant = m["meta"].get("quant") or "?"
-
-    offload_layers = p.n_layers if p.requires_server else p.gpu_layers
-
-    section("plan")
-    rows = [
-        ("model", model),
-        ("quant", quant),
-        ("backend", backend),
-        ("layers", f"{offload_layers}/{n_layers_total}"),
-        ("kv cache", f"{p.kv_cache}  {p.kv_cache_gb:.2f} GB" if p.kv_cache_gb > 0 else p.kv_cache),
-        ("flash attn", "on" if p.flash_attn else "off"),
-    ]
-    if p.requires_server:
-        gpu_experts = p.n_layers - p.moe_cpu_layers
-        ubatch = f"  ubatch {p.n_ubatch}" if p.n_ubatch else ""
-        rows.insert(4, ("moe experts", f"{gpu_experts}/{p.n_layers} layers{ubatch}"))
-    if p.kv_layers and p.kv_layers < n_layers_total:
-        rows.append(("hybrid attn", f"{p.kv_layers}/{n_layers_total} layers keep KV"))
-    ledger(rows)
-    console.print()
-    gauge("on the gpu", offload_layers, n_layers_total, unit="layers", fmt="{:.0f}")
-    console.print()
-
-    try:
-        with console.status(f"[{C_ACCENT}] Loading model into memory…"):
-            engine = create_engine(p, m["path"], backend)
-    except RuntimeError as e:
-        console.print(f"[{C_RED}] ✗ {e}[/]")
-        raise typer.Exit(1) from e
+        section("models")
+        ledger(
+            [
+                ("serving", ", ".join(metas)),
+                ("max loaded", str(max_loaded)),
+                ("backend", backend),
+            ]
+        )
+        note("each model is planned and loaded on its first request.", tone="ok")
+        console.print()
+    else:
+        _, engine, backend = _mount(m, model, announce=True)
 
     # The gateway is ready as soon as uvicorn binds. The old unconditional
     # 20-token speed check ran here and cost minutes on slow hardware (a 0.2
     # tok/s model needed ~100s before the first request could be served), and
     # the loading bar added a fixed 1.2s sleep. The check is now opt-in.
-    if bench:
+    if bench and engine is not None:
         _quick_bench(engine)
 
     try:
@@ -194,14 +255,14 @@ def start(
 
         from vipera.server import build_app
 
-        fastapi_app = build_app(engine, model)
+        fastapi_app = build_app(engine, model, pool=pool)
 
         section("ready")
         ledger([("openai", f"http://{host}:{port}/v1")])
         catalog(
             [
                 ("POST /v1/chat/completions", "chat, streaming or not"),
-                ("GET  /v1/models", "the loaded alias"),
+                ("GET  /v1/models", "every served alias" if pool else "the loaded alias"),
                 ("GET  /health", "liveness"),
             ]
         )
@@ -214,10 +275,19 @@ def start(
         console.print(f"[{C_YELLOW}] ⚠ FastAPI is not installed. Falling back to Chat REPL.[/]\n")
         from vipera.commands.chat_cmd import _chat_kwargs, repl_loop
 
-        repl_loop(engine, chat_kwargs=_chat_kwargs(cfg))
+        active = engine
+        if active is None:
+            # Pool mode: the REPL has no request to name a model, so load the
+            # first one. `pool` is set whenever `engine` is None here.
+            assert pool is not None
+            active, _ = pool.get(None)
+        repl_loop(active, chat_kwargs=_chat_kwargs(cfg))
     finally:
         _pid_file(port).unlink(missing_ok=True)
-        engine.close()
+        if pool is not None:
+            pool.close()
+        if engine is not None:
+            engine.close()
 
 
 @app.command("status")

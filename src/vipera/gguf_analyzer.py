@@ -186,7 +186,7 @@ def _attention_profile(tensor_names: list[str], n_layers: int | None) -> dict[st
     Detection is name-based because GGUF metadata does not describe per-layer
     attention type: KDA/Mamba layers carry `ssm_*` / `linear_attn` / `conv1d`
     tensors, attention layers carry `attn_k`/`attn_v`/`attn_qkv`. A layer that
-    matches both counts as recurrent, since over-reserving KV is the safe side
+    matches both counts as KV-bearing, since over-reserving KV is the safe side
     of a memory budget.
     """
     kv_layers: set[int] = set()

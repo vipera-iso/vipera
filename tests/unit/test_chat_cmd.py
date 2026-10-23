@@ -1,5 +1,6 @@
 import builtins
 import types
+from pathlib import Path
 
 import pytest
 import typer
@@ -7,6 +8,11 @@ import typer
 from vipera.commands import chat_cmd
 from vipera.config import DEFAULT_CONFIG
 from vipera.planner import Plan
+from vipera.registry import ModelSpec
+
+
+def _spec(name, meta=None):
+    return ModelSpec(alias=name, path=Path("/tmp/m.gguf"), meta=meta or {"n_layers": 4})
 
 
 def _plan():
@@ -79,11 +85,7 @@ def test_build_wires_planner_and_engine(monkeypatch):
     monkeypatch.setattr(
         chat_cmd,
         "get_model",
-        lambda name: {
-            "name": name,
-            "path": "/tmp/m.gguf",
-            "meta": {"n_layers": 4},
-        },
+        _spec,
     )
     monkeypatch.setattr(chat_cmd, "load_config", lambda: dict(DEFAULT_CONFIG))
     monkeypatch.setattr(chat_cmd, "detect", lambda: types.SimpleNamespace())
@@ -97,7 +99,7 @@ def test_build_wires_planner_and_engine(monkeypatch):
     engine = chat_cmd._build("m")
 
     assert isinstance(engine, StubEngine)
-    assert seen["path"] == "/tmp/m.gguf"
+    assert str(seen["path"]) == "/tmp/m.gguf"
     assert seen["plan"].context == 1024
 
 

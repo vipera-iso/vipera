@@ -18,8 +18,11 @@ jobs:
         with:
           python-version: "3.12"
           cache: pip
-      - run: pip install ruff
+      - run: pip install -e ".[dev]"
       - run: ruff check .
+      - run: ruff format --check .
+      # Config lives in pyproject.toml ([tool.mypy] files = ["src/vipera"]).
+      - run: mypy
 
   test:
     runs-on: ${{ matrix.os }}
@@ -35,7 +38,8 @@ jobs:
           python-version: ${{ matrix.python }}
           cache: pip
       - run: pip install -e ".[dev]"
-      - run: pytest -q
+      # The coverage floor lives in pyproject.toml ([tool.coverage.report]).
+      - run: pytest -q --cov=vipera --cov-report=term-missing
       - name: Smoke-test CLI
         env:
           # Windows runners default to cp1252; the CLI prints Unicode box

@@ -3,7 +3,8 @@ import pytest
 from vipera import config as cfg_mod
 from vipera import gguf_analyzer
 from vipera import registry as reg_mod
-from vipera.commands.model_cmd import _read_meta, rm_cmd
+from vipera.commands import model_cmd
+from vipera.commands.model_cmd import _read_meta, recommend_quantization, rm_cmd
 from vipera.planner import _estimate_kv_cache_gb
 
 
@@ -17,6 +18,22 @@ def isolated_home(tmp_path, monkeypatch):
     monkeypatch.setattr(cfg_mod, "CONFIG_FILE", tmp_path / "config.json")
     monkeypatch.setattr(reg_mod, "REGISTRY_FILE", tmp_path / "registry.json")
     return tmp_path
+
+
+def test_recommend_command_works_on_an_already_quantized_model(monkeypatch, capsys):
+    # The suggested command targets the model's current quant, which is by
+    # definition already quantized: llama-quantize refuses without this flag.
+    monkeypatch.setattr(
+        model_cmd,
+        "analyze_gguf",
+        lambda path: {"metadata": {"quant": "Q2_K"}, "warnings": ["blk.0.ffn_down"]},
+    )
+
+    recommend_quantization("m.gguf")
+
+    out = capsys.readouterr().out
+    assert "vipera model quantize" in out
+    assert "--allow-requantize" in out
 
 
 def test_read_meta_reads_quant_from_original_filename(tmp_path):

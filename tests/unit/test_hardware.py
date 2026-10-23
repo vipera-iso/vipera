@@ -9,7 +9,7 @@ from vipera import hardware
 
 
 def test_nvidia_extra_declared():
-    root = Path(__file__).resolve().parents[1]
+    root = Path(__file__).resolve().parents[2]
     data = tomllib.loads((root / "pyproject.toml").read_text())
     requirements = data["project"]["optional-dependencies"]["nvidia"]
 

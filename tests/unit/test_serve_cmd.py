@@ -1,6 +1,7 @@
 import sys
 import time
 import types
+from pathlib import Path
 
 import psutil
 import pytest
@@ -9,6 +10,7 @@ import typer
 from vipera import config
 from vipera.commands import serve_cmd
 from vipera.planner import Plan
+from vipera.registry import ModelSpec
 
 
 def _plan(**overrides):
@@ -36,7 +38,7 @@ def _cfg(**overrides):
 
 
 def _model():
-    return {"name": "m", "path": "/tmp/m.gguf", "meta": {"n_layers": 8, "quant": "Q4_K_M"}}
+    return ModelSpec(alias="m", path=Path("/tmp/m.gguf"), meta={"n_layers": 8, "quant": "Q4_K_M"})
 
 
 class FakeEngine:
@@ -104,7 +106,8 @@ def test_start_serves_without_running_the_benchmark(monkeypatch, isolated_home):
         types.SimpleNamespace(run=lambda app, **kw: calls.setdefault("uvicorn", kw)),
     )
     monkeypatch.setattr(
-        "vipera.server.build_app", lambda engine, model: calls.setdefault("app", (engine, model))
+        "vipera.server.build_app",
+        lambda engine, model, **kw: calls.setdefault("app", (engine, model)),
     )
 
     serve_cmd.start(model="m", host="127.0.0.1", port=8686, profile="auto", ctx=1024, bench=False)
@@ -134,7 +137,7 @@ def test_start_runs_bench_only_when_requested(monkeypatch, isolated_home):
         serve_cmd, "_quick_bench", lambda engine: calls.setdefault("bench_calls", 0)
     )
     monkeypatch.setitem(sys.modules, "uvicorn", types.SimpleNamespace(run=lambda app, **kw: None))
-    monkeypatch.setattr("vipera.server.build_app", lambda engine, model: object())
+    monkeypatch.setattr("vipera.server.build_app", lambda engine, model, **kw: object())
 
     serve_cmd.start(model="m", host="127.0.0.1", port=8686, profile="auto", ctx=1024, bench=True)
 
@@ -335,7 +338,7 @@ def test_start_warns_for_non_loopback_host_and_still_serves(monkeypatch, isolate
         "uvicorn",
         types.SimpleNamespace(run=lambda app, **kw: calls.setdefault("uvicorn", kw)),
     )
-    monkeypatch.setattr("vipera.server.build_app", lambda engine, model: object())
+    monkeypatch.setattr("vipera.server.build_app", lambda engine, model, **kw: object())
 
     serve_cmd.start(model="m", host="0.0.0.0", port=8686, profile="auto", ctx=1024, bench=False)
 
@@ -379,8 +382,110 @@ def test_start_passes_the_configured_backend_to_the_engine(monkeypatch, isolated
         )[1],
     )
     monkeypatch.setitem(sys.modules, "uvicorn", types.SimpleNamespace(run=lambda app, **kw: None))
-    monkeypatch.setattr("vipera.server.build_app", lambda engine, model: object())
+    monkeypatch.setattr("vipera.server.build_app", lambda engine, model, **kw: object())
 
     serve_cmd.start(model="m", host="127.0.0.1", port=8686, profile="auto", ctx=1024, bench=False)
 
     assert seen["backend"] == "server"
+
+
+def test_start_uses_the_configured_profile(monkeypatch, isolated_home):
+    """`profile` in config used to be dead: serve always passed "auto"."""
+    seen = {}
+
+    monkeypatch.setattr(serve_cmd, "load_config", lambda: _cfg(profile="cpu"))
+    monkeypatch.setattr(serve_cmd, "get_model", lambda name: _model())
+    monkeypatch.setattr(serve_cmd, "detect", lambda: types.SimpleNamespace())
+
+    def _fake_plan(*args, **kwargs):
+        seen["profile"] = kwargs.get("profile")
+        return _plan()
+
+    monkeypatch.setattr(serve_cmd, "plan", _fake_plan)
+    monkeypatch.setattr(
+        serve_cmd,
+        "create_engine",
+        lambda plan, path, backend="inprocess": FakeEngine(plan, path),
+    )
+    monkeypatch.setitem(sys.modules, "uvicorn", types.SimpleNamespace(run=lambda app, **kw: None))
+    monkeypatch.setattr("vipera.server.build_app", lambda engine, model, **kw: object())
+
+    serve_cmd.start(model="m", host="127.0.0.1", port=8686, profile=None, ctx=1024, bench=False)
+
+    assert seen["profile"] == "cpu"
+
+
+def test_start_with_models_builds_a_lazy_pool(monkeypatch, isolated_home):
+    seen = {}
+    created = []
+
+    monkeypatch.setattr(
+        serve_cmd, "load_config", lambda: _cfg(models=["m1", "m2"], default_model="m1")
+    )
+    monkeypatch.setattr(
+        serve_cmd,
+        "get_model",
+        lambda name: ModelSpec(
+            alias=name, path=Path(f"/tmp/{name}.gguf"), meta={"n_layers": 8, "quant": "Q4_K_M"}
+        ),
+    )
+    monkeypatch.setattr(serve_cmd, "detect", lambda: types.SimpleNamespace())
+    monkeypatch.setattr(serve_cmd, "plan", lambda *a, **kw: _plan())
+    monkeypatch.setattr(
+        serve_cmd,
+        "create_engine",
+        lambda plan, path, backend="inprocess": (
+            created.append(path),
+            FakeEngine(plan, path),
+        )[1],
+    )
+    monkeypatch.setitem(sys.modules, "uvicorn", types.SimpleNamespace(run=lambda app, **kw: None))
+
+    def _build_app(engine, model, *, pool=None):
+        seen["engine"] = engine
+        seen["pool"] = pool
+        return object()
+
+    monkeypatch.setattr("vipera.server.build_app", _build_app)
+
+    serve_cmd.start(
+        model=None,
+        host="127.0.0.1",
+        port=8686,
+        profile="auto",
+        ctx=1024,
+        bench=False,
+        models="m1,m2",
+        max_loaded=2,
+    )
+
+    assert seen["engine"] is None
+    assert seen["pool"] is not None
+    assert seen["pool"].ids() == ["m1", "m2"]
+    assert created == [], "models must load on first request, not at startup"
+
+
+def test_start_rejects_an_unknown_alias_in_models(monkeypatch, isolated_home):
+    monkeypatch.setattr(serve_cmd, "load_config", lambda: _cfg(models=["m1", "ghost"]))
+    monkeypatch.setattr(
+        serve_cmd,
+        "get_model",
+        lambda name: None if name == "ghost" else ModelSpec(alias=name, path=Path("/tmp/m.gguf")),
+    )
+    monkeypatch.setattr(
+        serve_cmd, "list_models", lambda: [ModelSpec(alias="m1", path=Path("/tmp/m.gguf"))]
+    )
+
+    with pytest.raises(typer.Exit) as exc:
+        serve_cmd.start(
+            model=None,
+            host="127.0.0.1",
+            port=8686,
+            profile="auto",
+            ctx=1024,
+            bench=False,
+            models=None,
+            max_loaded=2,
+        )
+
+    assert exc.value.exit_code == 1

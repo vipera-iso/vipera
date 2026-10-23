@@ -80,6 +80,10 @@ def _quant_bpw(quant: str) -> float:
         return 3.3
     if key.startswith("IQ4"):
         return 4.3
+    # Q8_K is not in the block table (only Q8_0 is), but it is still 8-bit;
+    # without this it fell through to the Q4 fallback and halved the estimate.
+    if key.startswith("Q8"):
+        return 8.5
     if key.startswith("Q6"):
         return 6.14
     if key.startswith("Q5"):
