@@ -667,7 +667,7 @@ def list_cmd():
     t.add_column("ctx", style=C_DIM, justify="right")
 
     for i, m in enumerate(models):
-        meta = m.get("meta", {})
+        meta = m.meta
         size_str = f"{meta.get('size_bytes', 0) / 1e9:>5.1f} G"
         ctx_val = meta.get("context_length") or 0
         ctx_str = f"{ctx_val:,}" if ctx_val else "?"

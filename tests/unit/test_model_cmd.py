@@ -20,6 +20,36 @@ def isolated_home(tmp_path, monkeypatch):
     return tmp_path
 
 
+def test_list_cmd_renders_model_specs(monkeypatch, capsys):
+    from pathlib import Path
+
+    from vipera.registry import ModelSpec
+
+    monkeypatch.setattr(
+        model_cmd,
+        "list_models",
+        lambda: [
+            ModelSpec(
+                alias="m",
+                path=Path("/tmp/m.gguf"),
+                meta={
+                    "size_bytes": 1_500_000_000,
+                    "quant": "Q4_K_M",
+                    "n_layers": 4,
+                    "context_length": 8192,
+                },
+            )
+        ],
+    )
+
+    model_cmd.list_cmd()
+
+    out = capsys.readouterr().out
+    assert "m" in out
+    assert "Q4_K_M" in out
+    assert "8,192" in out
+
+
 def test_recommend_command_works_on_an_already_quantized_model(monkeypatch, capsys):
     # The suggested command targets the model's current quant, which is by
     # definition already quantized: llama-quantize refuses without this flag.
