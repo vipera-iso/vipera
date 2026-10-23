@@ -59,12 +59,16 @@ def _run_bench(engine: ChatEngine, prompt: str, max_tokens: int) -> dict:
             if usage:
                 final_usage = usage
             try:
-                delta = (
-                    chunk["choices"][0]["delta"].get("content", "") if chunk.get("choices") else ""
-                )
+                delta = chunk["choices"][0]["delta"] if chunk.get("choices") else {}
             except (KeyError, IndexError, TypeError):
-                delta = ""
-            if delta:
+                delta = {}
+            # A reasoning model streams its chain of thought in
+            # `reasoning_content` before (or instead of) `content`. Both are
+            # output tokens: the first one is the real ttft, and chunk counting
+            # has to include them or a reasoning-only reply reports 0 tokens.
+            content = delta.get("content") or ""
+            thought = delta.get("reasoning_content") or ""
+            if content or thought:
                 chunk_count += 1
                 if first_token_at is None:
                     first_token_at = time.perf_counter()
@@ -74,16 +78,22 @@ def _run_bench(engine: ChatEngine, prompt: str, max_tokens: int) -> dict:
     dt = time.perf_counter() - t0
     ttft = (first_token_at - t0) if first_token_at else dt
     gen_time = dt - ttft
-    prompt_tps = prompt_tok / ttft if ttft > 0 and prompt_tok > 0 else 0.0
 
-    # Prefer the model's own token count when the backend reports it; llama.cpp
-    # only does so when asked via stream_options, which this build may not
-    # support, so the streamed-chunk count remains the fallback.
+    # Prefer the model's own token counts when the backend reports them;
+    # llama.cpp only does so when asked via stream_options, which this build
+    # may not support, so tokenize() and the streamed-chunk count remain the
+    # fallbacks. The server's prompt count is exact: counting the raw prompt
+    # text under-reports by the chat template's tokens.
     gen_tok = chunk_count
     token_count_is_exact = False
-    if final_usage and final_usage.get("completion_tokens"):
-        gen_tok = int(final_usage["completion_tokens"])
-        token_count_is_exact = True
+    if final_usage:
+        if final_usage.get("prompt_tokens"):
+            prompt_tok = int(final_usage["prompt_tokens"])
+        if final_usage.get("completion_tokens"):
+            gen_tok = int(final_usage["completion_tokens"])
+            token_count_is_exact = True
+
+    prompt_tps = prompt_tok / ttft if ttft > 0 and prompt_tok > 0 else 0.0
 
     if gen_time > 0 and gen_tok > 1:
         gen_tps = (gen_tok - 1) / gen_time

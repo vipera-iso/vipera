@@ -68,6 +68,46 @@ class RaisingEngine(FakeEngine):
         raise RuntimeError("bench exploded")
 
 
+class StreamEngine(FakeEngine):
+    """Yields an explicit chunk list, so a stream shape can be asserted."""
+
+    def __init__(self, plan, path, chunks):
+        super().__init__(plan, path)
+        self.chunks = chunks
+
+    def chat(self, messages, stream=False, **kw):
+        self.chat_calls.append({"messages": messages, "stream": stream, **kw})
+        return iter(self.chunks)
+
+
+class Clock:
+    """Deterministic perf_counter: one value per call, then the last one."""
+
+    def __init__(self, times):
+        self.times = list(times)
+        self.calls = 0
+
+    def __call__(self):
+        value = self.times[min(self.calls, len(self.times) - 1)]
+        self.calls += 1
+        return value
+
+
+def _reasoning(text):
+    return {"choices": [{"delta": {"reasoning_content": text}}]}
+
+
+def _content(text):
+    return {"choices": [{"delta": {"content": text}}]}
+
+
+def _usage(prompt_tokens, completion_tokens=None):
+    usage = {"prompt_tokens": prompt_tokens}
+    if completion_tokens is not None:
+        usage["completion_tokens"] = completion_tokens
+    return {"choices": [], "usage": usage}
+
+
 def test_run_bench_reports_ttft_and_throughput():
     result = bench_cmd._run_bench(FakeEngine(_plan(), "/tmp/m.gguf"), "prompt", 2)
 
@@ -83,6 +123,61 @@ def test_run_bench_turns_engine_errors_into_a_result():
 
     assert "bench exploded" in result["error"]
     assert result["prompt_tok"] == 10
+
+
+def test_run_bench_measures_ttft_from_the_first_reasoning_chunk(monkeypatch):
+    # A reasoning model emits reasoning_content before any content; that is the
+    # first token, and ignoring it made ttft equal the whole generation.
+    engine = StreamEngine(
+        _plan(),
+        "/tmp/m.gguf",
+        [
+            _reasoning("think"),
+            _reasoning("ing"),
+            _content("answer"),
+            _usage(55, 41),
+        ],
+    )
+    monkeypatch.setattr(bench_cmd.time, "perf_counter", Clock([0.0, 0.5, 2.0]))
+
+    result = bench_cmd._run_bench(engine, "prompt", 64)
+
+    assert result["ttft_ms"] == pytest.approx(500.0)
+    assert result["prompt_tok"] == 55
+    assert result["prompt_tps"] == pytest.approx(110.0)
+    assert result["gen_tok"] == 41
+    assert result["token_count_is_exact"] is True
+    assert result["gen_tps"] == pytest.approx(40 / 1.5)
+
+
+def test_run_bench_handles_a_reasoning_only_stream(monkeypatch):
+    engine = StreamEngine(
+        _plan(),
+        "/tmp/m.gguf",
+        [_reasoning("hmm"), _reasoning("more"), _usage(55, 30)],
+    )
+    monkeypatch.setattr(bench_cmd.time, "perf_counter", Clock([0.0, 0.4, 1.4]))
+
+    result = bench_cmd._run_bench(engine, "prompt", 64)
+
+    assert result["ttft_ms"] == pytest.approx(400.0)
+    assert result["total_s"] == pytest.approx(1.4)
+    assert result["gen_tps"] == pytest.approx(29 / 1.0)
+
+
+def test_run_bench_counts_reasoning_chunks_when_usage_is_missing(monkeypatch):
+    engine = StreamEngine(
+        _plan(),
+        "/tmp/m.gguf",
+        [_reasoning("a"), _reasoning("b"), _content("c")],
+    )
+    monkeypatch.setattr(bench_cmd.time, "perf_counter", Clock([0.0, 0.5, 2.0]))
+
+    result = bench_cmd._run_bench(engine, "prompt", 64)
+
+    assert result["token_count_is_exact"] is False
+    assert result["gen_tok"] == 3
+    assert result["prompt_tok"] == 10  # tokenize fallback, no server usage
 
 
 def test_run_rejects_unknown_model(monkeypatch):

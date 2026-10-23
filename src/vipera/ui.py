@@ -296,8 +296,14 @@ def _wrap_block(text: str, width: int = _WRAP_WIDTH) -> str:
     return "\n".join(out)
 
 
-def _reply(text: str, cursor: bool = False) -> Text:
-    block = _guttered(_wrap_block(text), C_TEXT)
+def _reply(text: str, cursor: bool = False, reasoning: str = "") -> Text:
+    block = Text()
+    if reasoning:
+        block.append_text(_guttered(_wrap_block(reasoning), C_DIM))
+    if text:
+        if reasoning:
+            block.append("\n")
+        block.append_text(_guttered(_wrap_block(text), C_TEXT))
     if cursor:
         block.append("█" if int(time.time() * 3) % 2 == 0 else " ", style=C_ACCENT)
     return block
@@ -316,7 +322,8 @@ def _stats(tokens: int, seconds: float) -> Text:
 
 
 def _stream(stream_generator, title_text: str, refresh: int) -> str:
-    collected: list[str] = []
+    answer: list[str] = []
+    reasoning: list[str] = []
     chunk_count = 0
     last_paint = 0.0
     started = time.time()
@@ -324,25 +331,33 @@ def _stream(stream_generator, title_text: str, refresh: int) -> str:
     with Live(console=console, refresh_per_second=refresh, transient=True) as live:
         for chunk in stream_generator:
             try:
-                delta = chunk["choices"][0]["delta"].get("content", "")
+                delta = chunk["choices"][0].get("delta") or {}
             except (KeyError, IndexError, TypeError):
                 continue
-            if not delta:
+            # Reasoning models stream `reasoning_content` before `content`.
+            # Paint both: dropping the reasoning left the screen blank (and the
+            # token count at 0) until the answer started.
+            content = delta.get("content") or ""
+            thought = delta.get("reasoning_content") or ""
+            if not content and not thought:
                 continue
             chunk_count += 1
-            collected.append(delta)
+            if content:
+                answer.append(content)
+            if thought:
+                reasoning.append(thought)
 
             # Painting is throttled; the model is not. The old code slept up to
             # 18 ms per character, which capped a fast model at ~120 tok/s.
             now = time.time()
             if now - last_paint >= _PAINT_INTERVAL:
-                live.update(_reply("".join(collected), cursor=True))
+                live.update(_reply("".join(answer), cursor=True, reasoning="".join(reasoning)))
                 last_paint = now
 
-    text = "".join(collected)
+    text = "".join(answer)
     if title_text:
         console.print(f"{INDENT}{title_text}", style=C_DIM)
-    console.print(_reply(text))
+    console.print(_reply(text, reasoning="".join(reasoning)))
     console.print(_stats(chunk_count, time.time() - started))
     console.print()
     return text
