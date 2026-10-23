@@ -7,6 +7,7 @@ later, replaced by a plugin lookup without changing this file.
 
 from __future__ import annotations
 
+import os
 from dataclasses import replace
 from pathlib import Path
 
@@ -24,9 +25,11 @@ def resolve_backend(plan: Plan, backend: str) -> tuple[str, Plan]:
 
     llama-cpp-python has no ``n_cpu_moe`` argument, so a MoE plan is silently
     ignored by the in-process engine (and its classic ``gpu_layers`` split is
-    the only safe fallback). If a llama-server with ``-ncmoe`` is available,
-    switch to it; otherwise clear the MoE fields so the banner and bench report
-    what is really running.
+    the only safe fallback). A llama-server with ``-ncmoe`` can run the plan,
+    but only if its CUDA backend can actually see a device. A CPU-only build
+    (or a CUDA build with an incomplete LD_LIBRARY_PATH) parses every flag and
+    then ignores ``--gpu-layers``, which made the "upgrade" slower than the
+    in-process split on the reference box. Probe devices before switching.
     """
     # The MoE upgrade below only makes sense for llama.cpp's two backends.
     if backend != "inprocess" or not plan.requires_server:
@@ -35,11 +38,13 @@ def resolve_backend(plan: Plan, backend: str) -> tuple[str, Plan]:
     try:
         binary = find_llama_tool("server")
         supported = server_backend.supports_n_cpu_moe(binary)
+        devices = server_backend.probe_devices(binary) if supported else None
     except (OptimizerError, OSError):
         binary = None
         supported = False
+        devices = None
 
-    if supported:
+    if supported and server_backend.has_cuda_device(devices):
         gpu_experts = plan.n_layers - plan.moe_cpu_layers
         print(
             "[i] MoE plan: using llama-server for expert placement "
@@ -47,6 +52,24 @@ def resolve_backend(plan: Plan, backend: str) -> tuple[str, Plan]:
             f"ubatch {plan.n_ubatch})."
         )
         return "server", plan
+
+    if supported:
+        probe = devices if devices is not None else "(probe failed)"
+        probe_lines = "\n".join(f"      {line}" for line in probe.splitlines())
+        ld_path = os.environ.get("LD_LIBRARY_PATH") or "(unset)"
+        bin_env = os.environ.get("VIPERA_LLAMA_BIN") or "(unset)"
+        print(
+            "[!] Warning: llama-server parsed -ncmoe but does not see a CUDA0 "
+            "device; refusing the MoE server plan and falling back to the "
+            "classic layer split.\n"
+            f"    binary: {binary}\n"
+            f"    --list-devices:\n{probe_lines}\n"
+            f"    VIPERA_LLAMA_BIN={bin_env}\n"
+            f"    LD_LIBRARY_PATH={ld_path}\n"
+            "    If this is a CUDA build, point LD_LIBRARY_PATH at its CUDA "
+            "runtime libraries (libcudart/libcublas) and re-run."
+        )
+        return "inprocess", replace(plan, moe_cpu_layers=-1, n_ubatch=0)
 
     where = f"{binary} has no -ncmoe" if binary else "llama-server was not found"
     print(

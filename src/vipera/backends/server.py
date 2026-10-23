@@ -86,6 +86,35 @@ def supports_n_cpu_moe(binary: str) -> bool:
     return "-ncmoe" in help_text or "--n-cpu-moe" in help_text
 
 
+def probe_devices(binary: str) -> str | None:
+    """Return `<binary> --list-devices`, or None when the probe cannot run.
+
+    Flag probes (`--help`) only prove what a build can parse. They do not prove
+    that its CUDA backend can see the card: a binary built without CUDA, or one
+    whose runtime libraries are missing from LD_LIBRARY_PATH, starts normally
+    and silently ignores --gpu-layers. This is the check that catches that.
+    """
+    try:
+        probe = subprocess.run(
+            [binary, "--list-devices"],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    output = f"{probe.stdout}{probe.stderr}".strip()
+    return output or None
+
+
+def has_cuda_device(devices: str | None) -> bool:
+    """Whether a `--list-devices` output contains the first CUDA device."""
+    if not devices:
+        return False
+    return any(line.strip().startswith("CUDA0") for line in devices.splitlines())
+
+
 def supports_spec_type(binary: str) -> bool:
     """Whether this llama-server knows `--spec-type` (the n-gram drafters).
 

@@ -182,6 +182,55 @@ def test_server_command_disables_auto_fit_when_supported():
     assert "-fit" not in command
 
 
+def test_probe_devices_detects_cuda0(monkeypatch):
+    class _Result:
+        def __init__(self, text):
+            self.stdout = text
+            self.stderr = ""
+
+    calls = []
+
+    def fake_run(cmd, **kwargs):
+        calls.append(cmd)
+        return _Result(
+            "Available devices:\n  CUDA0: NVIDIA GeForce GTX 1650 (3730 MiB, 3674 MiB free)\n"
+        )
+
+    monkeypatch.setattr(sb.subprocess, "run", fake_run)
+
+    output = sb.probe_devices("/bin/llama-server")
+
+    assert calls == [["/bin/llama-server", "--list-devices"]]
+    assert "CUDA0" in output
+    assert sb.has_cuda_device(output) is True
+
+
+def test_probe_devices_reports_cpu_only_and_probe_failure(monkeypatch):
+    class _Result:
+        def __init__(self, text):
+            self.stdout = text
+            self.stderr = ""
+
+    monkeypatch.setattr(
+        sb.subprocess,
+        "run",
+        lambda *a, **kw: _Result("Available devices:\n  (none)\n"),
+    )
+
+    output = sb.probe_devices("/bin/llama-server")
+
+    assert "none" in output
+    assert sb.has_cuda_device(output) is False
+
+    def _boom(*a, **kw):
+        raise OSError("no such file")
+
+    monkeypatch.setattr(sb.subprocess, "run", _boom)
+
+    assert sb.probe_devices("/bin/llama-server") is None
+    assert sb.has_cuda_device(None) is False
+
+
 def test_supports_n_cpu_moe_reads_the_binary_help(monkeypatch):
     class _Result:
         def __init__(self, text):

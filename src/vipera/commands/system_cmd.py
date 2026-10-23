@@ -1,11 +1,17 @@
+import contextlib
+import os
 import platform
+import subprocess
 import sys
+from pathlib import Path
 
 import typer
 from rich.text import Text
 
+from vipera.backends.server import has_cuda_device, probe_devices
 from vipera.config import CONFIG_FILE, DEFAULT_CONFIG, _coerce_strict, load_config, save_config
 from vipera.hardware import detect
+from vipera.optimizer import OptimizerError, find_llama_tool
 from vipera.ui import (
     C_DIM,
     C_GREEN,
@@ -19,6 +25,43 @@ from vipera.ui import (
 )
 
 app = typer.Typer()
+
+
+def _short_path(path: str) -> str:
+    home = str(Path.home())
+    if path.startswith(home + os.sep):
+        return "~" + path[len(home) :]
+    return path
+
+
+def _cuda_venv_hint() -> str | None:
+    """Point at ~/.venvs/vipera when this interpreter is a CPU-only build.
+
+    The repository .venv and the user's CUDA venv can disagree, and the
+    binding's own probe is the only reliable way to tell them apart. This is
+    deliberately a best-effort diagnostic: a missing or broken alternate venv
+    must not make `system doctor` fail.
+    """
+    root = Path.home() / ".venvs" / "vipera"
+    python = root / "bin" / "python"
+    if not python.is_file():
+        python = root / "Scripts" / "python.exe"
+    if not python.is_file():
+        return None
+    if Path(sys.prefix).resolve() == root.resolve():
+        return None
+    code = "import llama_cpp; raise SystemExit(0 if llama_cpp.llama_supports_gpu_offload() else 1)"
+    try:
+        probe = subprocess.run(
+            [str(python), "-c", code],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return str(root) if probe.returncode == 0 else None
 
 
 @app.command("doctor")
@@ -90,6 +133,47 @@ def doctor():
         row("gpu", "None (CPU Only)", "warn", C_YELLOW)
         row("ram available", f"{hw.ram_free_gb:.1f} GB free / {hw.ram_total_gb:.1f} GB total")
 
+    section("llama.cpp")
+    server_bin: str | None = None
+    server_cuda = False
+    with contextlib.suppress(OptimizerError):
+        server_bin = find_llama_tool("server")
+
+    if server_bin:
+        row("server binary", _short_path(server_bin))
+        devices = probe_devices(server_bin)
+        server_cuda = has_cuda_device(devices)
+        if server_cuda:
+            cuda_line = next(
+                (
+                    line.strip()
+                    for line in (devices or "").splitlines()
+                    if line.strip().startswith("CUDA0")
+                ),
+                "CUDA0",
+            )
+            row("server devices", cuda_line)
+        elif devices is None:
+            row("server devices", "probe failed", "warn", C_YELLOW)
+        else:
+            row("server devices", "none (CPU-only)", "warn", C_YELLOW)
+    else:
+        row("server binary", "not found", "warn", C_YELLOW)
+
+    row("VIPERA_LLAMA_BIN", os.environ.get("VIPERA_LLAMA_BIN") or "(unset)")
+    ld_path = os.environ.get("LD_LIBRARY_PATH") or "(unset)"
+    row("LD_LIBRARY_PATH", ld_path)
+
+    planner_gpu = hw.gpu_name != "None" and getattr(hw, "vram_total_gb", 0) > 0
+    if planner_gpu and server_cuda:
+        row("planner offload", "GPU (CUDA0 matches planner)")
+    elif planner_gpu and server_bin:
+        row("planner offload", "GPU (server sees no CUDA0)", "warn", C_YELLOW)
+    elif planner_gpu:
+        row("planner offload", "GPU (no server binary)", "warn", C_YELLOW)
+    else:
+        row("planner offload", "CPU only")
+
     total = sum(counters.values())
     summary = Text("   ")
     summary.append(f"{total} checks", style=C_DIM)
@@ -116,6 +200,25 @@ def doctor():
             "Reinstall with the matching extra:\n"
             "CMAKE_ARGS='-DGGML_CUDA=on' pip install --force-reinstall llama-cpp-python\n"
             "then re-run this command.",
+            tone="warn",
+        )
+        alternate = _cuda_venv_hint()
+        if alternate:
+            note(
+                f"This Python environment is CPU-only, but {alternate} is CUDA-enabled.\n"
+                f"Use {alternate}/bin/vipera (or activate that venv) to run on the GPU.",
+                tone="warn",
+            )
+
+    if planner_gpu and server_bin and not server_cuda:
+        note(
+            "The planner can offload layers, but the selected llama-server reports "
+            "no CUDA0.\n"
+            f"binary: {_short_path(server_bin)}\n"
+            f"LD_LIBRARY_PATH={ld_path}\n"
+            "This server will ignore --gpu-layers and serve CPU-only. Use a CUDA "
+            "build, or point LD_LIBRARY_PATH at its libcudart/libcublas "
+            "directory, then re-run this command.",
             tone="warn",
         )
 

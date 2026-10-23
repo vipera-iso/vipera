@@ -258,6 +258,10 @@ def test_create_engine_selects_the_server_backend(monkeypatch):
 def test_resolve_backend_upgrades_an_moe_plan(monkeypatch, capsys):
     monkeypatch.setattr("vipera.optimizer.find_llama_tool", lambda *a, **kw: "/bin/llama-server")
     monkeypatch.setattr("vipera.backends.server.supports_n_cpu_moe", lambda binary: True)
+    monkeypatch.setattr(
+        "vipera.backends.server.probe_devices",
+        lambda binary: "Available devices:\n  CUDA0: NVIDIA GeForce GTX 1650\n",
+    )
 
     backend, plan = resolve_backend(
         _plan(moe_cpu_layers=12, n_layers=24, n_ubatch=896), "inprocess"
@@ -267,6 +271,46 @@ def test_resolve_backend_upgrades_an_moe_plan(monkeypatch, capsys):
     assert plan.requires_server is True
     assert plan.moe_cpu_layers == 12
     assert "expert placement" in capsys.readouterr().out
+
+
+def test_resolve_backend_refuses_a_cpu_only_server(monkeypatch, capsys):
+    # A build can know -ncmoe and still be CPU-only (or miss its CUDA runtime
+    # libraries). It must not displace a faster in-process GPU split.
+    monkeypatch.setattr("vipera.optimizer.find_llama_tool", lambda *a, **kw: "/bin/llama-server")
+    monkeypatch.setattr("vipera.backends.server.supports_n_cpu_moe", lambda binary: True)
+    monkeypatch.setattr(
+        "vipera.backends.server.probe_devices",
+        lambda binary: "Available devices:\n  (none)\n",
+    )
+
+    backend, plan = resolve_backend(
+        _plan(gpu_layers=14, moe_cpu_layers=12, n_layers=24, n_ubatch=896), "inprocess"
+    )
+
+    out = capsys.readouterr().out
+    assert backend == "inprocess"
+    assert plan.requires_server is False
+    assert plan.moe_cpu_layers == -1
+    assert plan.n_ubatch == 0
+    assert plan.gpu_layers == 14
+    assert "CUDA0" in out
+    assert "falling back" in out
+    assert "LD_LIBRARY_PATH" in out
+
+
+def test_resolve_backend_treats_a_failed_probe_as_no_cuda(monkeypatch, capsys):
+    monkeypatch.setattr("vipera.optimizer.find_llama_tool", lambda *a, **kw: "/bin/llama-server")
+    monkeypatch.setattr("vipera.backends.server.supports_n_cpu_moe", lambda binary: True)
+    monkeypatch.setattr("vipera.backends.server.probe_devices", lambda binary: None)
+
+    backend, plan = resolve_backend(
+        _plan(gpu_layers=14, moe_cpu_layers=12, n_layers=24, n_ubatch=896), "inprocess"
+    )
+
+    out = capsys.readouterr().out
+    assert backend == "inprocess"
+    assert plan.moe_cpu_layers == -1
+    assert "probe failed" in out
 
 
 def test_resolve_backend_falls_back_when_ncmoe_is_missing(monkeypatch, capsys):

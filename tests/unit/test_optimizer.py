@@ -121,6 +121,14 @@ def test_find_llama_tool_uses_bin_dir(tmp_path):
     assert find_llama_tool("quantize", str(tmp_path)) == str(tool)
 
 
+def test_find_llama_tool_maps_cli_to_llama_cli(tmp_path):
+    tool = tmp_path / "llama-cli"
+    tool.write_text("#!/bin/sh\n")
+    tool.chmod(tool.stat().st_mode | 0o111)
+
+    assert find_llama_tool("cli", str(tmp_path)) == str(tool)
+
+
 def test_find_llama_tool_reports_missing(tmp_path, monkeypatch):
     monkeypatch.delenv("VIPERA_LLAMA_BIN", raising=False)
     monkeypatch.setattr("vipera.optimizer._COMMON_BIN_DIRS", ())

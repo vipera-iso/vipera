@@ -17,6 +17,7 @@ _TOOL_NAMES = {
     "imatrix": "llama-imatrix",
     "quantize": "llama-quantize",
     "server": "llama-server",
+    "cli": "llama-cli",
 }
 
 _QUALITY_ORDER = ("Q8_0", "Q6_K", "Q5_K_M", "Q4_K_M", "Q3_K_M", "Q2_K")

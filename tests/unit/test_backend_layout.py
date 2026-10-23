@@ -21,10 +21,10 @@ def test_legacy_engine_import_path_still_works():
 
 
 def test_legacy_server_backend_import_path_still_works():
-    from vipera.server_backend import ServerEngine, server_command
+    from vipera.server_backend import ServerEngine, probe_devices
 
     assert ServerEngine is not None
-    assert callable(server_command)
+    assert callable(probe_devices)
 
 
 def test_server_backend_does_not_import_the_engine_shim():
