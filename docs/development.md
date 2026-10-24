@@ -140,8 +140,13 @@ Maintainers:
 5. Push the branch and the tag.
 
 `.github/workflows/release.yml` builds the sdist/wheel with `python -m build` on
-the tag and publishes through PyPI trusted publishing (`pypi` environment,
-`id-token: write`). No API token is stored in the repository.
+the tag and publishes with the `PYPI_API_TOKEN` repository secret when it is
+set, falling back to PyPI trusted publishing (`pypi` environment,
+`id-token: write`) when the secret is empty. The secret is the durable path:
+it keeps working even when the OIDC publisher is missing or misconfigured, and
+it is never written to the repository. Rotate it on PyPI (Account settings →
+API tokens → revoke, then add a new project-scoped token) and update the
+secret with `gh secret set PYPI_API_TOKEN`.
 
 The distribution name is **`vipera-ai`**; the import package and CLI remain
 `vipera`. The name `vipera` on PyPI belongs to an unrelated project, so it must

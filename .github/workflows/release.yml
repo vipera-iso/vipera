@@ -40,3 +40,7 @@ jobs:
           name: dist
           path: dist/
       - uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          # A project-scoped API token beats a half-configured trusted
+          # publisher; an empty secret falls back to OIDC.
+          password: ${{ secrets.PYPI_API_TOKEN }}
