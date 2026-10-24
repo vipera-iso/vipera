@@ -486,7 +486,11 @@ def test_streaming_passes_raw_sse_through_when_the_engine_speaks_it():
     with client.stream(
         "POST",
         "/v1/chat/completions",
-        json={"model": "test-model", "messages": [{"role": "user", "content": "hi"}], "stream": True},
+        json={
+            "model": "test-model",
+            "messages": [{"role": "user", "content": "hi"}],
+            "stream": True,
+        },
     ) as r:
         body = b"".join(r.iter_bytes()).decode()
 
@@ -504,7 +508,11 @@ def test_streaming_falls_back_to_re_encoding_for_other_engines():
     with client.stream(
         "POST",
         "/v1/chat/completions",
-        json={"model": "test-model", "messages": [{"role": "user", "content": "hi"}], "stream": True},
+        json={
+            "model": "test-model",
+            "messages": [{"role": "user", "content": "hi"}],
+            "stream": True,
+        },
     ) as r:
         body = b"".join(r.iter_bytes()).decode()
 

@@ -757,7 +757,12 @@ def test_relay_yields_every_item_and_releases_the_slot():
     async def _run():
         lock = asyncio.Lock()
         items = [b"a", b"b", b"c"]
-        got = [item async for item in relay_chunks(lock, lambda: iter(items), on_close=lambda: closed.append(1))]
+        got = [
+            item
+            async for item in relay_chunks(
+                lock, lambda: iter(items), on_close=lambda: closed.append(1)
+            )
+        ]
         return got, lock.locked()
 
     got, locked = asyncio.run(_run())

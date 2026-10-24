@@ -161,7 +161,10 @@ Schemas, SSE framing, and Python/JavaScript examples:
 Config lives at `~/.vipera/config.json`. Change it with `vipera system config`
 or edit the JSON. The keys that change behavior most: `profile` (`auto`, `cpu`,
 `gpu`, `lowmem`, honored by serve, chat, and bench), `ctx`, `kv_cache` (`f16`,
-`q8_0`, `q4_0`), `spec_type` (draft-free n-gram speculation, on by default),
+`q8_0`, `q4_0`), `spec_type` (draft-free n-gram speculation, off by default:
++37% when the answer rewrites the prompt, −2% on fresh prose), `parallel`
+(llama-server slots; 4 of them measured 2× aggregate throughput on concurrent
+requests),
 `default_model`. Invalid values are repaired on load; `vipera system config`
 refuses to write them.
 

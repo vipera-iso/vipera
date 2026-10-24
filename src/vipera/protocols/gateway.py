@@ -19,10 +19,16 @@ def _noop_release(engine: Any) -> None:
     """Single-model gateways never evict, so releasing is a no-op."""
 
 
+#: One permit per concurrent request. A Lock is a Semaphore with one slot; the
+#: server backend hands out `parallel` permits so llama.cpp slots can batch.
+Permit = asyncio.Lock | asyncio.Semaphore
+
+
 @dataclass(frozen=True)
 class Gateway:
-    #: One llama.cpp context, one request at a time.
-    lock: asyncio.Lock
+    #: One permit per concurrent request (one llama.cpp context, unless the
+    #: backend runs several slots).
+    lock: Permit
     #: Resolve the `model` field of a request; raises UnknownModelError. In pool
     #: mode this loads in a worker thread, so it is always awaited.
     engine_for: Callable[[str | None], Awaitable[Any]]

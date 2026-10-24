@@ -20,6 +20,8 @@ import threading
 from collections.abc import AsyncIterator, Callable, Iterator
 from typing import Any
 
+from vipera.protocols.gateway import Permit
+
 _SENTINEL = object()
 
 
@@ -96,7 +98,7 @@ def _close_iterator(iterator: Iterator[Any]) -> None:
 
 
 async def run_locked(
-    lock: asyncio.Lock,
+    lock: Permit,
     fn: Callable[..., Any],
     *args: Any,
     on_start: Callable[[], None] | None = None,
@@ -123,7 +125,7 @@ async def run_locked(
 
 
 async def iter_chunks(
-    lock: asyncio.Lock,
+    lock: Permit,
     factory: Callable[[], Iterator[Any]],
     *,
     on_start: Callable[[], None] | None = None,
@@ -167,7 +169,7 @@ async def iter_chunks(
 
 
 async def run_leased(
-    lock: asyncio.Lock,
+    lock: Permit,
     lease: Lease,
     fn: Callable[..., Any],
     *args: Any,
@@ -181,6 +183,7 @@ async def run_leased(
         lease.release_if_unstarted()
         raise
 
+
 _RELAY_DONE = object()
 
 
@@ -191,14 +194,12 @@ def _post(loop: asyncio.AbstractEventLoop, queue: asyncio.Queue, item: Any) -> N
     time the reader unblocks; losing an item into a closed loop is expected, an
     unhandled exception in the worker thread is not.
     """
-    try:
+    with contextlib.suppress(RuntimeError):
         loop.call_soon_threadsafe(queue.put_nowait, item)
-    except RuntimeError:
-        pass
 
 
 async def relay_chunks(
-    lock: asyncio.Lock,
+    lock: Permit,
     factory: Callable[[], Iterator[Any]],
     *,
     on_start: Callable[[], None] | None = None,
@@ -230,7 +231,8 @@ async def relay_chunks(
                 if stop.is_set():
                     break
                 _post(loop, queue, item)
-        except BaseException as exc:  # noqa: BLE001 - handed to the consumer
+        except BaseException as exc:
+            # Handed to the consumer; the relay re-raises it there.
             _post(loop, queue, exc)
         finally:
             _post(loop, queue, _RELAY_DONE)

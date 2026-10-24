@@ -86,7 +86,8 @@ class OptimizeLayer:
         text = "\n".join(str(m.get("content") or "") for m in messages)
         try:
             return len(tokenize(text))
-        except Exception:  # noqa: BLE001 - a tokenizer hiccup must not fail the request
+        except Exception:
+            # A tokenizer hiccup must not fail the request; the estimate stands.
             return 0
 
     def note(

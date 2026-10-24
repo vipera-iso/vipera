@@ -155,9 +155,11 @@ def mount(app: FastAPI, gateway: Gateway) -> None:
             # A backend that already speaks this wire format (llama-server does)
             # can have its bytes forwarded unchanged: re-encoding every frame in
             # Python is pure overhead on the token path.
-            raw_stream = req.stream and bool(
-                getattr(active, "passthrough_sse", False)
-            ) and hasattr(active, "chat_sse")
+            raw_stream = (
+                req.stream
+                and bool(getattr(active, "passthrough_sse", False))
+                and hasattr(active, "chat_sse")
+            )
 
             if req.stream:
 
