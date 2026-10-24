@@ -77,6 +77,7 @@ Test layout:
 | `tests/test_server.py` | `/health`, `/v1/models`, non-streaming and SSE completion against a fake engine. |
 | `tests/test_config.py` | Defaults, save/reload, type coercion, corrupt-file fallback. |
 | `tests/test_registry.py` | Add/get/list/remove. |
+| `tests/integration/test_ollama_sdk.py` | The `/api/*` layer over a real socket, driven by the official `ollama` client (installed by `.[dev]`). Starts uvicorn on a loopback port with the stub engine; no model and no Ollama daemon. |
 
 Rules:
 
@@ -87,7 +88,8 @@ Rules:
   import is not enough.
 - Server tests use `fastapi.testclient.TestClient` with a stub engine exposing
   `chat(messages, stream=False, **kwargs)`; keep the stub contract in sync with
-  `Engine.chat`.
+  `Engine.chat`. The Ollama SDK test reuses that stub but over a real HTTP
+  connection, so a framing or error-shape change breaks it too.
 - `--strict-markers` is enabled, so a marker that is not registered is an
   error.
 

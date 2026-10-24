@@ -8,6 +8,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Ollama SDK integration test** — `tests/integration/test_ollama_sdk.py`
+  starts the gateway on a loopback port and drives it with the official
+  `ollama` client: `/api/tags`, `/api/chat` (streaming and not), `/api/generate`,
+  `/api/embed`, `/api/ps` and the 404 error body. Compatibility is checked
+  against the real client parser instead of hand-written JSON, and the test
+  needs no model or Ollama daemon (`ollama` is now a dev dependency).
+- **Protocol layers** — the gateway's HTTP surface is now composed of layers
+  selected by `protocols` (or `vipera serve start --protocol`). `openai` keeps
+  `/v1/*`; the new `ollama` layer serves `/api/tags`, `/api/ps`, `/api/chat`,
+  `/api/generate`, `/api/embed`, `/api/embeddings` and `/api/version`, so
+  Ollama clients and Open WebUI can point at Vipera unchanged. Both layers use
+  the same engine and lock; layers can also be installed as plugins through
+  the `vipera.protocols` entry-point group.
+- **`/v1/embeddings`** — OpenAI-shaped embeddings from either backend, plus
+  Ollama's `/api/embed`. Off by default: enable it with
+  `vipera system config embeddings true`, because llama.cpp builds the
+  embedding context at load time (the server backend passes `--embeddings
+  --pooling mean`, the in-process engine uses mean pooling). A model loaded
+  without it answers 501 and explains how to turn it on.
+- **Ollama models without a second download** — `vipera model add
+  ollama:qwen2.5:7b` (or `model import`) reads the manifest in
+  `~/.ollama/models` — both the current `manifests-v2/ollama.com` layout and
+  the older `manifests/registry.ollama.ai` one, honouring `OLLAMA_MODELS` —
+  takes the GGUF's original filename (so the quant is preserved), and
+  hardlinks the blob into `models/`. Nothing is downloaded and no second copy
+  is stored; a copy happens only when the two stores are on different
+  filesystems. Removing the Vipera entry leaves Ollama's blob untouched, and a
+  model that was never pulled reports `ollama pull …`. `vipera model add` is
+  now an alias for `model import`, and `ollama list`-style model names are
+  listed by the source's local search.
+- **Model sources** — `vipera/model_cmd.py` no longer talks to Hugging Face
+  directly. `vipera.sources` defines the `ModelSource` contract and ships
+  `hf`, `local`, `ollama` and `url`; `vipera model import` accepts `hf:repo`,
+  `local:path`, `ollama:name:tag` and `https://…/model.gguf` references, and
+  `huggingface_hub` is imported on first use instead of at module import, so
+  `vipera --version` and the commands that never download no longer pay for it.
 - **Multi-model serving** — `vipera serve --models a,b --max-loaded N` (or
   `models`/`max_loaded` in the config) serves several aliases from one gateway.
   A model is planned and mounted on its first request, and the least recently
@@ -43,6 +79,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   nominal bit width.
 
 ### Changed
+- **Registry schema v2** — `registry.json` is written as
+  `{"_schema": 2, "models": {...}}` and each entry records `source`,
+  `source_ref` and `format` next to the path and GGUF metadata. 1.x files
+  (a flat alias → entry map with no version) are read as-is and upgraded on
+  the next write, so no migration step is needed. `list_models()` and
+  `get_model()` now return a frozen `ModelSpec` instead of a dict; internal
+  callers were updated, and `vipera.registry` had no public API before v2.
+- **Backends can be installed as plugins** — `vipera.backends.names` lists the
+  built-ins plus anything registered under `[project.entry-points."vipera.backends"]`,
+  and `create_engine` loads an unknown-but-registered name from that group
+  instead of failing. The config validates a backend name against the same
+  list. The factory contract is `factory(plan, model_path) -> ChatEngine`;
+  planning stays with the built-in planner until a second real backend shows
+  what a backend-specific plan needs.
 - **Backends split into `vipera/backends/`** — `protocol` (the `ChatEngine`
   contract and the accepted chat parameters), `loading` (offload ladder and
   retry rungs), `registry` (backend selection), `inprocess` (llama-cpp-python)
@@ -85,6 +135,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `GGUFAnalysisError: failed to read ...` instead of a traceback.
 
 ### Fixed
+- **`vipera serve stop` now stops the `llama-server` child** — uvicorn exits
+  on SIGTERM without unwinding, so neither `serve start`'s `finally` nor the
+  engines' `atexit` hooks ran and a `backend: server` child was left holding
+  the model (reparented to init, invisible to `serve status`). `serve start`
+  installs a SIGTERM handler that raises `SystemExit`, so the normal unwind
+  releases the engine, the child and the pid file. `stop --force` (SIGKILL)
+  still cannot clean up from inside the gateway.
 - **Streaming no longer emits two usage frames** — with
   `stream_options.include_usage`, the gateway forwarded llama-server's trailing
   `choices: []` frame and then synthesized another one. Usage is now captured

@@ -66,6 +66,117 @@ def test_recommend_command_works_on_an_already_quantized_model(monkeypatch, caps
     assert "--allow-requantize" in out
 
 
+def test_import_downloads_a_url_reference(isolated_home, monkeypatch):
+    from vipera.sources import url as url_source
+
+    models = isolated_home / "models"
+    ref = "https://example.com/tiny.gguf"
+    seen = {}
+
+    def fake_resolve(value):
+        seen["resolve"] = value
+        return [url_source.FileInfo(path="tiny.gguf", size_bytes=4)]
+
+    def fake_download(value, file, dest):
+        seen["download"] = (value, file.path, dest)
+        dest.mkdir(parents=True, exist_ok=True)
+        path = dest / file.path
+        path.write_bytes(b"gguf")
+        return path
+
+    monkeypatch.setattr(url_source, "resolve", fake_resolve)
+    monkeypatch.setattr(url_source, "download", fake_download)
+    monkeypatch.setattr(model_cmd, "MODELS_DIR", models)
+    monkeypatch.setattr(
+        model_cmd, "_read_meta", lambda path, name=None: {"size_bytes": 4, "quant": "Q4_K_M"}
+    )
+    monkeypatch.setattr(model_cmd, "animated_loading_bar", lambda *a, **k: None)
+
+    model_cmd.import_model(ref)
+
+    assert seen["resolve"] == ref
+    assert seen["download"] == (ref, "tiny.gguf", models)
+    spec = reg_mod.get_model("tiny")
+    assert spec is not None
+    assert spec.source == "url"
+    assert spec.source_ref == ref
+    assert spec.format == "gguf"
+
+
+def test_add_is_an_alias_for_import(monkeypatch):
+    seen = {}
+    monkeypatch.setattr(
+        model_cmd, "import_model", lambda src, name=None: seen.update(src=src, name=name)
+    )
+
+    model_cmd.add_model_cmd("ollama:qwen2.5:7b", name="qwen")
+
+    assert seen == {"src": "ollama:qwen2.5:7b", "name": "qwen"}
+
+
+def test_import_from_the_ollama_store_makes_no_copy(isolated_home, monkeypatch, tmp_path):
+    import hashlib
+    import json
+
+    store = tmp_path / "ollama-models"
+    monkeypatch.setenv("OLLAMA_MODELS", str(store))
+    payload = b"GGUF-payload"
+    digest = hashlib.sha256(payload).hexdigest()
+    (store / "blobs").mkdir(parents=True)
+    blob = store / "blobs" / f"sha256-{digest}"
+    blob.write_bytes(payload)
+    manifest = store / "manifests-v2/ollama.com/library/qwen05/latest"
+    manifest.parent.mkdir(parents=True)
+    manifest.write_text(
+        json.dumps(
+            {
+                "layers": [
+                    {
+                        "mediaType": "application/vnd.ollama.image.model",
+                        "digest": f"sha256:{digest}",
+                        "size": len(payload),
+                        "from": "qwen2.5-0.5b-instruct-q4_k_m.gguf",
+                    }
+                ]
+            }
+        )
+    )
+
+    monkeypatch.setattr(model_cmd, "MODELS_DIR", isolated_home / "models")
+    monkeypatch.setattr(
+        model_cmd,
+        "_read_meta",
+        lambda path, name=None: {"size_bytes": len(payload), "quant": "Q4_K_M"},
+    )
+    monkeypatch.setattr(model_cmd, "animated_loading_bar", lambda *a, **k: None)
+
+    model_cmd.import_model("ollama:qwen05")
+
+    spec = reg_mod.get_model("qwen2.5-0.5b-instruct-q4_k_m")
+    assert spec.source == "ollama"
+    assert spec.source_ref == "qwen05"  # the ref the source understands
+    assert spec.path.read_bytes() == payload
+    # Linked to Ollama's blob: no second copy of the model on this disk.
+    assert spec.path.stat().st_ino == blob.stat().st_ino
+
+
+def test_import_accepts_a_local_prefix(isolated_home, monkeypatch):
+    models = isolated_home / "models"
+    src = isolated_home / "source.gguf"
+    src.write_bytes(b"x")
+    monkeypatch.setattr(model_cmd, "MODELS_DIR", models)
+    monkeypatch.setattr(
+        model_cmd, "_read_meta", lambda path, name=None: {"size_bytes": 1, "quant": "?"}
+    )
+    monkeypatch.setattr(model_cmd, "animated_loading_bar", lambda *a, **k: None)
+
+    model_cmd.import_model(f"local:{src}")
+
+    assert (models / "source.gguf").read_bytes() == b"x"
+    spec = reg_mod.get_model("source")
+    assert spec.source == "local"
+
+
 def test_read_meta_reads_quant_from_original_filename(tmp_path):
     model = tmp_path / "tmp-model.gguf"
     model.write_bytes(b"")

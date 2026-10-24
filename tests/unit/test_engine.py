@@ -30,6 +30,8 @@ class FakeLlama:
     calls: ClassVar[list[dict]] = []
     chat_calls: ClassVar[list[dict]] = []
     tokenize_calls: ClassVar[list[bytes]] = []
+    embed_calls: ClassVar[list[list[str]]] = []
+    per_token: ClassVar[bool] = False
     fail_if = staticmethod(lambda kwargs: False)
 
     def __init__(self, **kwargs):
@@ -45,14 +47,24 @@ class FakeLlama:
         type(self).tokenize_calls.append(data)
         return [1, 2, 3]
 
+    def create_embedding(self, texts):
+        type(self).embed_calls.append(list(texts))
+        if type(self).per_token:
+            # What a build that ignores pooling_type returns: one vector per
+            # token.
+            return {"data": [{"embedding": [[1.0, 2.0], [3.0, 5.0]]} for _ in texts]}
+        return {"data": [{"embedding": [float(len(t))]} for t in texts]}
+
 
 @pytest.fixture(autouse=True)
 def fake_llama(monkeypatch):
     FakeLlama.calls = []
     FakeLlama.chat_calls = []
     FakeLlama.tokenize_calls = []
+    FakeLlama.embed_calls = []
+    FakeLlama.per_token = False
     FakeLlama.fail_if = staticmethod(lambda kwargs: False)
-    module = types.SimpleNamespace(Llama=FakeLlama)
+    module = types.SimpleNamespace(Llama=FakeLlama, LLAMA_POOLING_TYPE_MEAN=1)
     monkeypatch.setitem(sys.modules, "llama_cpp", module)
     return FakeLlama
 
@@ -328,6 +340,43 @@ def test_resolve_backend_falls_back_when_ncmoe_is_missing(monkeypatch, capsys):
     assert plan.n_ubatch == 0
     assert plan.gpu_layers == 14
     assert "falling back" in capsys.readouterr().out
+
+
+def test_embeddings_are_off_unless_the_config_enables_them(fake_llama, monkeypatch):
+    from vipera.backends import inprocess as inprocess_mod
+    from vipera.errors import BackendError
+
+    monkeypatch.setattr(inprocess_mod.config, "load_config", lambda: {"embeddings": False})
+    engine = Engine(_plan(), "/tmp/m.gguf")
+
+    assert engine.supports_embeddings is False
+    assert fake_llama.calls[-1]["embedding"] is False
+    with pytest.raises(BackendError):
+        engine.embed(["hi"])
+
+
+def test_embeddings_load_with_mean_pooling(fake_llama, monkeypatch):
+    from vipera.backends import inprocess as inprocess_mod
+
+    monkeypatch.setattr(inprocess_mod.config, "load_config", lambda: {"embeddings": True})
+    engine = Engine(_plan(), "/tmp/m.gguf")
+
+    kwargs = fake_llama.calls[-1]
+    assert kwargs["embedding"] is True
+    # Without a pooling type llama.cpp returns one vector per token; the
+    # fixture's LLAMA_POOLING_TYPE_MEAN is 1.
+    assert kwargs["pooling_type"] == 1
+    assert engine.embed(["hi", "there"]) == [[2.0], [5.0]]
+
+
+def test_per_token_vectors_are_mean_pooled(fake_llama, monkeypatch):
+    from vipera.backends import inprocess as inprocess_mod
+
+    monkeypatch.setattr(inprocess_mod.config, "load_config", lambda: {"embeddings": True})
+    fake_llama.per_token = True
+    engine = Engine(_plan(), "/tmp/m.gguf")
+
+    assert engine.embed(["hi"]) == [[2.0, 3.5]]
 
 
 def test_moe_load_attempts_step_experts_down_then_go_cpu():

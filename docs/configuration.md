@@ -63,10 +63,11 @@ to the defaults. Corrupt JSON does not produce an error.
 | `port` | `int` | `8686` | `serve start`, `serve status` | Gateway port. |
 | `default_model` | `str \| null` | `null` | root command, `serve start`, `chat`, `bench` | Alias used when `--model` is absent. |
 | `backend` | `str` | `inprocess` | `serve start`, `chat`, `bench` | Where inference runs: `inprocess` (llama-cpp-python) or `server` (a `llama-server` child). See [backends](#backends). |
+| `protocols` | `str` | `openai` | `serve start` | HTTP layers to mount: `openai` (`/v1/*`), `ollama` (`/api/*`), comma-separated. See [protocols](#protocols). |
+| `embeddings` | `bool` | `false` | `serve start`, `chat`, `bench` | Load the model with embedding support, so `/v1/embeddings` and `/api/embed` can answer. Off by default because llama.cpp builds the embedding context up front. |
 | `profile` | `str` | `auto` | nothing currently | Planner profile. `serve start --profile` defaults to `auto` independently. |
 | `ctx` | `int` | `8192` | `serve start`, `chat` | Context size for the planner. `bench run` uses its own `--ctx` list. |
 | `kv_cache` | `str` | `q8_0` | `serve start`, `chat`, `bench` | KV cache type: `f32`, `bf16`, `f16`, `q8_0`, `q5_1`, `q5_0`, `q4_1`, `q4_0`, `iq4_nl`. Honored on CPU-only plans too; flash attention is enabled only for the quantized types, which require it. |
-| `flash_attn` | `bool` | `true` | nothing currently | Planner decides flash attention from VRAM instead. |
 | `n_batch` | `int` | `512` | `serve start`, `chat`, `bench` | Prompt batch size; capped by the plan. |
 | `spec_type` | `str` | `ngram-map-k` | `serve start`, `chat`, `bench` with `backend: server` | llama-server's `--spec-type`, i.e. draft-free n-gram speculation. `none` turns it off; `ngram-simple`, `ngram-map-k`, `ngram-map-k4v`, `ngram-mod`, `ngram-cache` are the draft-free values. Measured +37% decode when the answer rewrites text from the prompt, -1% on fresh prose; ignored by `inprocess` (no equivalent exists: the Python binding's prompt lookup measured -29%). Background in [techniques](../OPTIMIZE-techniques.md). |
 | `temperature` | `float` | `0.7` | nothing currently | Per-request default comes from `server.ChatRequest`. |
@@ -99,24 +100,45 @@ vipera serve start                 # child llama-server, same :8686 API
 vipera system config backend inprocess
 ```
 
+### Protocols
+
+`protocols` selects which HTTP layers the gateway mounts. `--protocol`
+overrides the config for one run.
+
+| Layer | Routes | Client compatibility |
+|---|---|---|
+| `openai` | `/v1/models`, `/v1/chat/completions`, `/v1/embeddings` | OpenAI SDKs, LangChain, LlamaIndex |
+| `ollama` | `/api/tags`, `/api/ps`, `/api/chat`, `/api/generate`, `/api/embed`, `/api/embeddings`, `/api/version` | Ollama SDKs, Open WebUI |
+
+```bash
+vipera system config protocols openai,ollama
+vipera serve start --model <alias>          # both /v1/* and /api/*
+vipera serve start --model <alias> --protocol ollama   # /api/* only
+```
+
+Unknown names are dropped on load (with a warning) and rejected by
+`vipera system config`. Additional layers can be installed as plugins through
+the `vipera.protocols` entry-point group.
+
 ### Type coercion
 
 When loading, known keys are coerced:
 
 - `port`, `ctx`, `n_batch`, `max_tokens`, `n_ubatch` → `int`
 - `temperature`, `top_p` → `float`
-- `flash_attn` → `bool`
+- `embeddings` → `bool`
 - While loading, strings `"1"`, `"true"`, `"yes"`, `"on"` (case-insensitive)
   become `True`; every other string becomes `False`.
-- `backend` and `kv_cache` are checked against their allowed sets: an unknown
-  value falls back to the default on load, and `vipera system config` rejects
-  it with the list of valid values.
+- `backend`, `protocols` and `kv_cache` are checked against their allowed
+  sets: an unknown value falls back to the default on load (a protocol is
+  dropped from the list), and `vipera system config` rejects it with the list
+  of valid values.
 - `vipera system config` uses strict coercion: an unrecognized boolean raises
   an error instead of silently becoming `False`.
 
 ```bash
 vipera system config port 9000        # stored as 9000, not "9000"
-vipera system config flash_attn false # stored as false
+vipera system config embeddings true  # stored as true
 ```
 
 Coercion failures during load (for example `port = "abc"`) are ignored, leaving

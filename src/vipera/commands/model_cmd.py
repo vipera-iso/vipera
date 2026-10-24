@@ -24,10 +24,12 @@ from vipera.optimizer import (
     unique_output_path,
 )
 from vipera.registry import add_model, get_model, list_models, remove_model
+from vipera.sources import for_ref
 from vipera.sources import hf as hf_source
 from vipera.ui import (
     C_ACCENT,
     C_DIM,
+    C_RED,
     C_TEXT,
     C_YELLOW,
     animated_loading_bar,
@@ -121,28 +123,107 @@ def _read_meta(path: Path, name: str | None = None) -> dict:
     return meta
 
 
-def _unique_alias(base: str) -> str:
+def _unique_alias(base: str, *, ignore: Path | None = None) -> str:
+    """Return an alias whose registry entry and file are both free.
+
+    `ignore` is the file the caller is registering right now: a source may
+    have downloaded it straight to its final name, and that must not count as
+    a collision with itself.
+    """
     alias = base
     n = 2
-    while get_model(alias) or (MODELS_DIR / f"{alias}.gguf").exists():
+    while True:
+        candidate = MODELS_DIR / f"{alias}.gguf"
+        taken = get_model(alias) is not None or (candidate != ignore and candidate.exists())
+        if not taken:
+            return alias
         alias = f"{base}-{n}"
         n += 1
-    return alias
+
+
+def _import_from_source(source, ref: str, name: str | None) -> None:
+    """Resolve, download and register one file from a non-local source."""
+    ensure_dirs()
+    with console.status(f"[{C_ACCENT}] Resolving {ref}…"):
+        try:
+            files = source.resolve(ref)
+        except Exception as exc:
+            console.print(f"could not resolve {ref}: {exc}")
+            raise typer.Exit(1) from exc
+
+    if not files:
+        console.print(f"[{C_RED}] ✗ No model files at {ref}[/]")
+        raise typer.Exit(1)
+
+    selected = files[0]
+    if len(files) > 1:
+        t = Table(
+            box=box.SIMPLE_HEAD,
+            title=f"files in {ref}",
+            title_style=C_DIM,
+            title_justify="left",
+        )
+        t.add_column("id", style=C_DIM, justify="center")
+        t.add_column("file name", style=C_TEXT)
+        t.add_column("size", style=C_DIM, justify="right")
+        for i, f in enumerate(files):
+            t.add_row(f"[{i + 1}]", f.path, _format_bytes(f.size_bytes) if f.size_bytes else "?")
+        console.print(t)
+        choice = IntPrompt.ask(f"\n[{C_ACCENT}] ▸ Select a file ID to download[/]", default=1)
+        if choice < 1 or choice > len(files):
+            raise typer.Exit(1)
+        selected = files[choice - 1]
+
+    with console.status(f"[{C_ACCENT}] Fetching {selected.path}…"):
+        try:
+            path = Path(source.download(ref, selected, MODELS_DIR))
+        except KeyboardInterrupt:
+            console.print(f"\n[{C_YELLOW}] ⚠ Download cancelled.[/]")
+            raise typer.Exit(1) from None
+        except Exception as exc:
+            console.print(f"download failed: {exc}")
+            raise typer.Exit(1) from exc
+
+    animated_loading_bar("importing gguf", 1.0)
+    base_alias = (name or Path(path).stem).removesuffix(".gguf")
+    alias = _unique_alias(base_alias, ignore=Path(path))
+    meta = _read_meta(Path(path))
+    add_model(alias, path, meta, source=source.NAME, source_ref=ref)
+
+    cfg = load_config()
+    cfg["default_model"] = alias
+    save_config(cfg)
+
+    param_str = f"{meta.get('n_params', 0) / 1e9:.2f}B · " if meta.get("n_params") else ""
+    console.print(f"imported {alias} from {source.NAME} and set it as default")
+    console.print(
+        f"    [{C_DIM}]└─ {param_str}{meta['size_bytes'] / 1e9:.2f} GB  ·  {meta['quant']}[/]\n"
+    )
 
 
 @app.command("import")
 def import_model(
-    src: str = typer.Argument(..., help="Path to .gguf file"),
+    src: str = typer.Argument(..., help="A .gguf path, a URL, or an hf:/local: reference"),
     name: str = typer.Option(None, "--name", "-n", help="Alias for the model"),
 ):
-    """Import a local .gguf file."""
+    """Import a .gguf from a path, or download one from a source."""
+    # Direct callers pass the OptionInfo default, not a string.
+    alias_name = name if isinstance(name, str) and name else None
+    source, ref = for_ref(src)
+    if source is not None:
+        if source.NAME == "local":
+            src = ref
+        else:
+            _import_from_source(source, ref, alias_name)
+            return
+
     ensure_dirs()
     src_path = Path(src).expanduser().resolve()
     if not src_path.exists():
         console.print(f"file not found: {src_path}")
         raise typer.Exit(1)
 
-    base_alias = (name or src_path.stem).removesuffix(".gguf")
+    base_alias = (alias_name or src_path.stem).removesuffix(".gguf")
     alias = _unique_alias(base_alias)
     dst = MODELS_DIR / f"{alias}.gguf"
 
@@ -263,6 +344,15 @@ def search_model():
         console.print(f"\n[{C_YELLOW}] ⚠ Download cancelled.[/]")
     except Exception as e:
         console.print(f"download failed: {e}")
+
+
+@app.command("add")
+def add_model_cmd(
+    ref: str = typer.Argument(..., help="A source reference, e.g. ollama:qwen2.5:7b"),
+    name: str = typer.Option(None, "--name", "-n", help="Alias for the model"),
+):
+    """Add a model by reference; same as `vipera model import`."""
+    import_model(ref, name)
 
 
 def _format_bytes(value: int) -> str:

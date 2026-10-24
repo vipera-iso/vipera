@@ -1,3 +1,4 @@
+import signal
 import sys
 import time
 import types
@@ -72,6 +73,66 @@ def test_resolve_option_unwraps_typer_optioninfo():
     assert serve_cmd._resolve_option("explicit", "fallback") == "explicit"
 
 
+def test_run_server_unwinds_on_sigterm_and_restores_the_handler():
+    # Without this, SIGTERM kills the process before the `finally` in start()
+    # runs and a `backend: server` child keeps the model loaded.
+    seen = {}
+
+    class FakeUvicorn:
+        @staticmethod
+        def run(app, **kw):
+            seen["handler"] = signal.getsignal(signal.SIGTERM)
+            try:
+                seen["handler"](signal.SIGTERM, None)
+            except SystemExit as exc:
+                seen["code"] = exc.code
+                raise
+
+    before = signal.getsignal(signal.SIGTERM)
+    with pytest.raises(SystemExit):
+        serve_cmd._run_server(FakeUvicorn, object(), "127.0.0.1", 8686)
+
+    assert seen["code"] == 0
+    assert seen["handler"] is not before
+    assert signal.getsignal(signal.SIGTERM) is before
+
+
+def test_start_closes_the_engine_when_the_server_is_terminated(monkeypatch, isolated_home):
+    engines = []
+
+    monkeypatch.setattr(serve_cmd, "load_config", lambda: _cfg())
+    monkeypatch.setattr(serve_cmd, "get_model", lambda name: _model())
+    monkeypatch.setattr(serve_cmd, "detect", lambda: types.SimpleNamespace())
+    monkeypatch.setattr(serve_cmd, "plan", lambda *a, **kw: _plan())
+
+    def _create(plan, path, backend="inprocess"):
+        engine = FakeEngine(plan, path)
+        engines.append(engine)
+        return engine
+
+    monkeypatch.setattr(serve_cmd, "create_engine", _create)
+    monkeypatch.setattr("vipera.server.build_app", lambda engine, model, **kw: object())
+
+    def _terminated(app, **kw):
+        # What the SIGTERM handler does inside uvicorn.run().
+        raise SystemExit(0)
+
+    monkeypatch.setitem(sys.modules, "uvicorn", types.SimpleNamespace(run=_terminated))
+
+    with pytest.raises(SystemExit):
+        serve_cmd.start(
+            model="m",
+            host="127.0.0.1",
+            port=8686,
+            profile="auto",
+            ctx=1024,
+            bench=False,
+        )
+
+    assert engines and engines[0].closed is True, "the model must be released"
+    assert not (isolated_home / "serve-8686.pid").exists()
+
+
 def test_quick_bench_reports_speed(capsys):
     engine = FakeEngine(_plan(), "/tmp/m.gguf")
     serve_cmd._quick_bench(engine)
@@ -119,6 +180,67 @@ def test_start_serves_without_running_the_benchmark(monkeypatch, isolated_home):
     engine = calls["app"][0]
     assert engine.closed is True
     assert not (isolated_home / "serve-8686.pid").exists()
+
+
+def _start(monkeypatch, *, cfg=None, **kwargs):
+    """Run serve start with everything below the HTTP layer stubbed out."""
+    seen = {}
+    monkeypatch.setattr(serve_cmd, "load_config", lambda: cfg or _cfg())
+    monkeypatch.setattr(serve_cmd, "get_model", lambda name: _model())
+    monkeypatch.setattr(serve_cmd, "detect", lambda: types.SimpleNamespace())
+    monkeypatch.setattr(serve_cmd, "plan", lambda *a, **kw: _plan())
+    monkeypatch.setattr(
+        serve_cmd,
+        "create_engine",
+        lambda plan, path, backend="inprocess": FakeEngine(plan, path),
+    )
+    monkeypatch.setitem(sys.modules, "uvicorn", types.SimpleNamespace(run=lambda app, **kw: None))
+
+    def _build_app(engine, model, *, pool=None, protocols=None):
+        seen["protocols"] = protocols
+        return object()
+
+    monkeypatch.setattr("vipera.server.build_app", _build_app)
+    options = dict(model="m", host="127.0.0.1", port=8686, profile="auto", ctx=1024, bench=False)
+    options.update(kwargs)
+    serve_cmd.start(**options)
+    return seen
+
+
+def test_start_mounts_only_openai_by_default(monkeypatch, isolated_home):
+    assert _start(monkeypatch)["protocols"] == ["openai"]
+
+
+def test_start_mounts_the_protocols_from_the_config(monkeypatch, isolated_home):
+    seen = _start(monkeypatch, cfg=_cfg(protocols="openai,ollama"))
+    assert seen["protocols"] == ["openai", "ollama"]
+
+
+def test_start_protocol_option_overrides_the_config(monkeypatch, isolated_home):
+    seen = _start(monkeypatch, cfg=_cfg(protocols="openai"), protocol="ollama")
+    assert seen["protocols"] == ["ollama"]
+
+
+def test_start_rejects_an_unknown_protocol_before_loading(monkeypatch, isolated_home):
+    loaded = []
+    monkeypatch.setattr(serve_cmd, "load_config", lambda: _cfg())
+    monkeypatch.setattr(
+        serve_cmd, "create_engine", lambda plan, path, backend="inprocess": loaded.append(path)
+    )
+
+    with pytest.raises(typer.Exit) as exc:
+        serve_cmd.start(
+            model="m",
+            host="127.0.0.1",
+            port=8686,
+            profile="auto",
+            ctx=1024,
+            bench=False,
+            protocol="anthropic",
+        )
+
+    assert exc.value.exit_code == 1
+    assert loaded == [], "validation must happen before the model is loaded"
 
 
 def test_start_runs_bench_only_when_requested(monkeypatch, isolated_home):
@@ -441,9 +563,10 @@ def test_start_with_models_builds_a_lazy_pool(monkeypatch, isolated_home):
     )
     monkeypatch.setitem(sys.modules, "uvicorn", types.SimpleNamespace(run=lambda app, **kw: None))
 
-    def _build_app(engine, model, *, pool=None):
+    def _build_app(engine, model, *, pool=None, protocols=None):
         seen["engine"] = engine
         seen["pool"] = pool
+        seen["protocols"] = protocols
         return object()
 
     monkeypatch.setattr("vipera.server.build_app", _build_app)

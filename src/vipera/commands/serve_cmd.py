@@ -1,4 +1,5 @@
 import os
+import signal
 import socket
 import time
 from pathlib import Path
@@ -12,6 +13,8 @@ from vipera.config import VIPERA_HOME, load_config
 from vipera.hardware import detect
 from vipera.planner import plan
 from vipera.pool import ModelPool
+from vipera.protocols.names import is_known as _is_known_protocol
+from vipera.protocols.names import names as _protocol_names
 from vipera.registry import ModelSpec, get_model, list_models
 from vipera.ui import (
     C_ACCENT,
@@ -33,6 +36,40 @@ def _resolve_option(val, default):
     if isinstance(val, typer.models.OptionInfo):
         return default
     return val if val is not None else default
+
+
+def _protocols(option: str | None, cfg: dict) -> list[str]:
+    """Mount order for the HTTP layers: the option, else the config value."""
+    # Direct callers (tests) pass the OptionInfo default, as with every other
+    # option in this command.
+    raw = _resolve_option(option, None) or cfg.get("protocols", "openai")
+    parts = raw.split(",") if isinstance(raw, str) else list(raw)
+    return [name.strip().lower() for name in parts if name.strip()]
+
+
+def _run_server(uvicorn, app, host: str, port: int) -> None:
+    """Run uvicorn so SIGTERM unwinds instead of killing the process.
+
+    This uvicorn exits on SIGTERM by default, which skips both the `finally`
+    below and the engines' atexit hooks: with `backend: server` the
+    llama-server child then keeps the model resident after `serve stop`. A
+    handler that raises SystemExit gives the process a normal stack unwind,
+    so the child, the pid file and the in-process model are all released.
+    """
+
+    def _terminate(_signum, _frame):
+        raise SystemExit(0)
+
+    try:
+        previous = signal.signal(signal.SIGTERM, _terminate)
+    except ValueError:
+        # Not the main thread (embedded use): nothing to install.
+        previous = None
+    try:
+        uvicorn.run(app, host=host, port=port, log_level="warning")
+    finally:
+        if previous is not None:
+            signal.signal(signal.SIGTERM, previous)
 
 
 def _pid_file(port: int) -> Path:
@@ -144,6 +181,9 @@ def start(
     max_loaded: int = typer.Option(
         None, "--max-loaded", help="How many of --models stay in memory (default 2)"
     ),
+    protocol: str = typer.Option(
+        None, "--protocol", help="HTTP layers to mount: openai, ollama, or openai,ollama"
+    ),
 ):
     """Start the HTTP Gateway."""
     cfg = load_config()
@@ -155,6 +195,18 @@ def start(
     bench = _resolve_option(bench, False)
     backend = cfg.get("backend", "inprocess")
     max_loaded = int(_resolve_option(max_loaded, cfg.get("max_loaded", 2)))
+
+    # Validate before loading a model: an unknown layer would otherwise fail
+    # only after the (possibly minute-long) load finished.
+    protocols = _protocols(protocol, cfg)
+    unknown = [name for name in protocols if not _is_known_protocol(name)]
+    if unknown or not protocols:
+        found = ", ".join(unknown) or "(empty)"
+        console.print(
+            f"[{C_RED}] ✗ Unknown protocol: {found}[/]\n"
+            f"[{C_DIM}]  available: {', '.join(_protocol_names())}[/]"
+        )
+        raise typer.Exit(1)
 
     aliases = _model_aliases(models, cfg)
     if model and model not in aliases:
@@ -255,21 +307,35 @@ def start(
 
         from vipera.server import build_app
 
-        fastapi_app = build_app(engine, model, pool=pool)
+        fastapi_app = build_app(engine, model, pool=pool, protocols=protocols)
 
         section("ready")
-        ledger([("openai", f"http://{host}:{port}/v1")])
-        catalog(
+        ledger(
             [
-                ("POST /v1/chat/completions", "chat, streaming or not"),
-                ("GET  /v1/models", "every served alias" if pool else "the loaded alias"),
-                ("GET  /health", "liveness"),
+                (name, f"http://{host}:{port}/{prefix}")
+                for name, prefix in (("openai", "v1"), ("ollama", "api"))
+                if name in protocols
             ]
         )
+        routes = []
+        if "openai" in protocols:
+            routes += [
+                ("POST /v1/chat/completions", "chat, streaming or not"),
+                ("POST /v1/embeddings", "vectors (needs embeddings enabled)"),
+                ("GET  /v1/models", "every served alias" if pool else "the loaded alias"),
+            ]
+        if "ollama" in protocols:
+            routes += [
+                ("POST /api/chat", "Ollama clients, streaming or not"),
+                ("POST /api/embed", "vectors (needs embeddings enabled)"),
+                ("GET  /api/tags", "every served alias"),
+            ]
+        routes.append(("GET  /health", "liveness"))
+        catalog(routes)
         note("ctrl-c stops the server.", tone="ok")
 
         _pid_file(port).write_text(str(os.getpid()))
-        uvicorn.run(fastapi_app, host=host, port=port, log_level="warning")
+        _run_server(uvicorn, fastapi_app, host, port)
 
     except ImportError:
         console.print(f"[{C_YELLOW}] ⚠ FastAPI is not installed. Falling back to Chat REPL.[/]\n")

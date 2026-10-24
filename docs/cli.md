@@ -45,23 +45,51 @@ sets it as `default_model`.
 
 ### `vipera model import SRC [--name ALIAS]`
 
-Copy a local `.gguf` into `$VIPERA_HOME/models/`, read its metadata, register
-it, and make it the default.
+Import a `.gguf` into `$VIPERA_HOME/models/`, read its metadata, register it,
+and make it the default.
 
 | Argument/Option | Description |
 |---|---|
-| `SRC` | Path to a `.gguf` file. `~` is expanded; the path must exist. |
+| `SRC` | A `.gguf` path, a source reference (see below), or an `http(s)://` URL. |
 | `-n`, `--name` | Alias. Defaults to the file stem (with a trailing `.gguf` removed). |
+
+Source references select where the file comes from:
+
+| Reference | Source | Behaviour |
+|---|---|---|
+| `local:~/Downloads/m.gguf` | `local` | Same as passing the path. |
+| `hf:owner/repo` | `hf` | Lists the repo's GGUFs and asks which one to fetch. |
+| `ollama:name:tag` | `ollama` | Imports a model Ollama already pulled. |
+| `https://…/m.gguf` | `url` | Downloads the file. |
+
+`ollama:` reads the manifest in `~/.ollama/models` (both the current
+`manifests-v2/ollama.com` layout and the older
+`manifests/registry.ollama.ai` one; `OLLAMA_MODELS` is honoured), names the file
+from the GGUF's original name, and **hardlinks** the blob into `models/`. No
+download and no second copy: `vipera model add ollama:qwen2.5:7b` costs only the
+metadata read. A copy is made only when `$VIPERA_HOME` and the Ollama store are
+on different filesystems. Removing the Vipera entry leaves Ollama's blob
+untouched. If the model is not in the store, the error says to run
+`ollama pull …` first.
 
 If the alias is already taken by a registry entry or an existing
 `models/<alias>.gguf`, a numeric suffix is appended: `alias-2`, `alias-3`, ...
 
-The destination is `models/<alias>.gguf`. If the source already is that path,
-the copy is skipped. Metadata extraction uses the optional `gguf` package when
-installed; otherwise size and quantization (parsed from the filename) are still
-recorded. Output reports parameter count, size, layer count, and quantization.
+Metadata extraction uses the optional `gguf` package when installed; otherwise
+size and quantization (parsed from the filename) are still recorded. Output
+reports parameter count, size, layer count, and quantization.
 
-Exit status is 1 if the file does not exist.
+Exit status is 1 if the file does not exist or the reference cannot be
+resolved.
+
+### `vipera model add REF [--name ALIAS]`
+
+Alias for `vipera model import`, for the common case where the argument is a
+reference rather than a path:
+
+```bash
+vipera model add ollama:qwen2.5:7b
+```
 
 ### `vipera model search`
 

@@ -130,6 +130,7 @@ Concurrency model, fallback ladder, and known gaps:
 | `vipera` | Start the gateway with the default model. |
 | `vipera serve start` | Serve a model over the OpenAI API. |
 | `vipera model search` | Search Hugging Face and download a GGUF. |
+| `vipera model add ollama:qwen2.5:7b` | Import a model Ollama already pulled, without copying it. |
 | `vipera chat repl` | Chat against a local model in the terminal. |
 | `vipera bench run` | Measure prompt and generation throughput. |
 | `vipera system doctor` | Runtime, library, and hardware check. |
@@ -143,6 +144,8 @@ Every command, flag, and default: [docs/cli.md](docs/cli.md).
 | `GET` | `/health` | `{"status": "ok", "model": "<alias>"}` |
 | `GET` | `/v1/models` | OpenAI-shaped model list |
 | `POST` | `/v1/chat/completions` | Chat completion, streaming or not |
+| `POST` | `/v1/embeddings` | Embeddings, with `embeddings: true` in the config |
+| `POST` | `/api/chat` | Same chat through the Ollama layer (`--protocol openai,ollama`) |
 
 ```bash
 curl http://127.0.0.1:8686/v1/chat/completions \

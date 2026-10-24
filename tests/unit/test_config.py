@@ -189,3 +189,34 @@ def test_every_declared_backend_is_accepted(backend):
 def test_coerce_strict_rejects_unknown_backend():
     with pytest.raises(ValueError, match="backend"):
         cfg_mod._coerce_strict({"backend": "torch"})
+
+
+def test_only_the_openai_layer_is_mounted_by_default():
+    assert cfg_mod.DEFAULT_CONFIG["protocols"] == "openai"
+
+
+def test_protocols_accept_a_comma_string(isolated_home):
+    (isolated_home / "config.json").write_text(json.dumps({"protocols": "openai,ollama"}))
+    assert cfg_mod.load_config()["protocols"] == "openai,ollama"
+
+
+def test_protocols_accept_a_list_and_normalise_it(isolated_home):
+    (isolated_home / "config.json").write_text(json.dumps({"protocols": ["Ollama", " ollama "]}))
+    assert cfg_mod.load_config()["protocols"] == "ollama"
+
+
+def test_unknown_protocol_warns_and_falls_back(isolated_home, capsys):
+    (isolated_home / "config.json").write_text(json.dumps({"protocols": "mcp"}))
+
+    assert cfg_mod.load_config()["protocols"] == "openai"
+    assert "mcp" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("protocol", cfg_mod.protocol_names())
+def test_every_declared_protocol_is_accepted(protocol):
+    assert cfg_mod._coerce_strict({"protocols": protocol})["protocols"] == protocol
+
+
+def test_coerce_strict_rejects_unknown_protocol():
+    with pytest.raises(ValueError, match="protocols"):
+        cfg_mod._coerce_strict({"protocols": "mcp"})

@@ -11,6 +11,20 @@ from vipera.backends.protocol import CHAT_PARAMS, DEFAULT_SAMPLING
 from vipera.errors import BackendError
 from vipera.planner import Plan
 
+
+def _pooled(embedding: list) -> list[float]:
+    """One vector for one input, whatever the binding returned.
+
+    With a pooling type set this is already a flat vector; an older build
+    ignores it and hands back one vector per token, which is averaged here so
+    callers never see a nested list.
+    """
+    if embedding and isinstance(embedding[0], (list, tuple)):
+        rows = len(embedding)
+        return [sum(column) / rows for column in zip(*embedding, strict=True)]
+    return list(embedding)
+
+
 # ggml type ids accepted by llama.cpp for KV caches.
 _KV_TYPES = {
     "f32": 0,
@@ -28,7 +42,7 @@ _KV_TYPES = {
 class Engine:
     def __init__(self, plan: Plan, model_path: str):
         try:
-            from llama_cpp import Llama
+            from llama_cpp import LLAMA_POOLING_TYPE_MEAN, Llama
         except ImportError:
             raise BackendError(
                 "llama-cpp-python is not installed. Install it with: pip install llama-cpp-python"
@@ -37,6 +51,7 @@ class Engine:
         self.plan = plan
         self._model_path = model_path
         self._Llama = Llama
+        self._mean_pooling = LLAMA_POOLING_TYPE_MEAN
         self._closed = False
         # llama.cpp has to build the context for embeddings up front; there is
         # no cheap way to enable it later, so it is opt-in through the config.
@@ -80,6 +95,9 @@ class Engine:
                 n_batch=p.n_batch,
                 n_ubatch=min(p.n_batch, 512),
                 embedding=self.supports_embeddings,
+                # Without a pooling type llama.cpp returns one vector per
+                # token, but /v1/embeddings promises one per input.
+                pooling_type=self._mean_pooling if self.supports_embeddings else -1,
                 flash_attn=p.flash_attn,
                 offload_kqv=p.offload_kqv,
                 type_k=kv,
@@ -104,7 +122,7 @@ class Engine:
                 "set `embeddings true` in the config and restart"
             )
         result = self.llm.create_embedding(texts)
-        return [list(item["embedding"]) for item in result["data"]]
+        return [_pooled(item["embedding"]) for item in result["data"]]
 
     def chat(self, messages: list[dict], stream: bool = False, **kw: Any):
         """Run a chat completion, forwarding every supported OpenAI parameter.
