@@ -128,6 +128,18 @@ def mount(app: FastAPI, gateway: Gateway) -> None:
         if req.stream and req.stream_options and req.stream_options.include_usage:
             kwargs["stream_options"] = {"include_usage": True}
 
+        # Fit the request into the context the model was loaded with. A request
+        # that already fits is passed through untouched.
+        shaping = None
+        if gateway.optimizer is not None:
+            shaping = gateway.optimizer.prepare(
+                active,
+                messages,
+                max_tokens=int(kwargs.get("max_tokens") or 0),
+                tools=kwargs.get("tools"),
+            )
+            messages = shaping.messages
+
         if req.stream:
 
             async def _stream():
@@ -156,6 +168,13 @@ def mount(app: FastAPI, gateway: Gateway) -> None:
                     # the response body mid-stream.
                     err = {"error": {"message": str(exc)}}
                     yield f"data: {json.dumps(err, ensure_ascii=False)}\n\n"
+                if gateway.optimizer is not None:
+                    gateway.optimizer.note(
+                        messages,
+                        tools=kwargs.get("tools"),
+                        payload={"usage": usage} if usage else None,
+                        shaping=shaping,
+                    )
                 # OpenAI emits a trailing choices:[] frame when the client asks
                 # for usage. Only possible when the backend reported any;
                 # llama-cpp-python 0.3.x does not, so it is omitted.
@@ -170,7 +189,12 @@ def mount(app: FastAPI, gateway: Gateway) -> None:
 
             return StreamingResponse(_stream(), media_type="text/event-stream")
 
-        return await run_locked(gateway.lock, active.chat, messages, False, **kwargs)
+        result = await run_locked(gateway.lock, active.chat, messages, False, **kwargs)
+        if gateway.optimizer is not None:
+            gateway.optimizer.note(
+                messages, tools=kwargs.get("tools"), payload=result, shaping=shaping
+            )
+        return result
 
     @app.post("/v1/embeddings")
     async def embeddings(req: EmbeddingRequest):

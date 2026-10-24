@@ -27,3 +27,5 @@ class Gateway:
     default_model: Callable[[], str | None]
     #: Aliases that are loaded right now (pool mode) or the single model.
     loaded_ids: Callable[[], list[str]]
+    #: The optimization layer (shaping + prefix accounting); None disables it.
+    optimizer: Any = None

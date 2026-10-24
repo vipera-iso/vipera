@@ -310,6 +310,13 @@ fixed English prompt and reports:
 A load or generation failure is reported per context size and the command
 continues with the next size. Engines are released between runs.
 
+The fastest run is also written to `$VIPERA_HOME/tuning.json` as the measured
+split for this model and machine, and `serve start`/`chat` use it instead of
+the planner's estimate on the next load (`vipera system config tuning false`
+turns that off, and `bench` then writes nothing). The measurement is the split
+that actually loaded — a GPU attempt that fell back a rung records the
+fallback, not the plan that was requested.
+
 ## `vipera system`
 
 ### `vipera system doctor`

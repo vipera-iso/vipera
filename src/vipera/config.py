@@ -15,6 +15,8 @@ MODELS_DIR = VIPERA_HOME / "models"
 LOGS_DIR = VIPERA_HOME / "logs"
 REGISTRY_FILE = VIPERA_HOME / "registry.json"
 CONFIG_FILE = VIPERA_HOME / "config.json"
+# Measured per-model/per-machine tuning profiles (see vipera.optimize.tuning).
+TUNING_FILE = VIPERA_HOME / "tuning.json"
 
 DEFAULT_CONFIG = {
     "host": "127.0.0.1",
@@ -48,6 +50,12 @@ DEFAULT_CONFIG = {
     # draft measured -29% decode on this box), so the value only applies to the
     # `server` backend. "none" turns it off.
     "spec_type": "ngram-map-k",
+    # The optimization layer (vipera.optimize). `shaping` trims a request that
+    # is larger than the loaded context instead of letting llama.cpp cut the
+    # system prompt itself; `tuning` reuses the split a previous `vipera bench`
+    # measured instead of re-deriving it from the VRAM formula.
+    "shaping": True,
+    "tuning": True,
 }
 
 _KV_CACHE_TYPES = {"f32", "bf16", "f16", "q4_0", "q4_1", "q5_0", "q5_1", "q8_0", "iq4_nl"}
@@ -67,6 +75,8 @@ _TYPE_MAP = {
     "n_ubatch": int,
     "max_loaded": int,
     "max_tokens": int,
+    "shaping": bool,
+    "tuning": bool,
     "temperature": float,
     "top_p": float,
     "repeat_penalty": float,

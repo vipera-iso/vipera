@@ -178,6 +178,26 @@ def _supports_embeddings(engine) -> bool:
     return bool(getattr(engine, "supports_embeddings", False))
 
 
+def _shape(gateway: Gateway, active, messages: list[dict], kwargs: dict):
+    """Fit the request into the loaded context; None when the layer is off."""
+    if gateway.optimizer is None:
+        return None
+    return gateway.optimizer.prepare(
+        active,
+        messages,
+        max_tokens=int(kwargs.get("max_tokens") or 0),
+        tools=kwargs.get("tools"),
+    )
+
+
+def _count(gateway: Gateway, messages: list[dict], kwargs: dict, payload, shaping) -> None:
+    """Record prefix reuse for one finished request."""
+    if gateway.optimizer is not None:
+        gateway.optimizer.note(
+            messages, tools=kwargs.get("tools"), payload=payload, shaping=shaping
+        )
+
+
 def mount(app: FastAPI, gateway: Gateway) -> None:
     @app.get("/api/version")
     def version():
@@ -244,10 +264,14 @@ def mount(app: FastAPI, gateway: Gateway) -> None:
         kwargs = _chat_kwargs(req.options)
         if req.tools:
             kwargs["tools"] = req.tools
+        shaping = _shape(gateway, active, messages, kwargs)
+        if shaping is not None:
+            messages = shaping.messages
 
         started = time.perf_counter()
         if not req.stream:
             result = await run_locked(gateway.lock, active.chat, messages, False, **kwargs)
+            _count(gateway, messages, kwargs, result, shaping)
             elapsed = time.perf_counter() - started
             choice = (result.get("choices") or [{}])[0]
             message = _with_tool_calls(dict(choice.get("message") or {}))
@@ -269,7 +293,7 @@ def mount(app: FastAPI, gateway: Gateway) -> None:
             }
 
         return StreamingResponse(
-            _stream_chat(gateway, active, req.model, messages, kwargs, started),
+            _stream_chat(gateway, active, req.model, messages, kwargs, started, shaping),
             media_type="application/x-ndjson",
         )
 
@@ -280,10 +304,14 @@ def mount(app: FastAPI, gateway: Gateway) -> None:
             return problem
         messages = _messages([OllamaMessage(role="user", content=req.prompt)], req.system)
         kwargs = _chat_kwargs(req.options)
+        shaping = _shape(gateway, active, messages, kwargs)
+        if shaping is not None:
+            messages = shaping.messages
 
         started = time.perf_counter()
         if not req.stream:
             result = await run_locked(gateway.lock, active.chat, messages, False, **kwargs)
+            _count(gateway, messages, kwargs, result, shaping)
             elapsed = time.perf_counter() - started
             choice = (result.get("choices") or [{}])[0]
             content = (choice.get("message") or {}).get("content") or ""
@@ -303,7 +331,7 @@ def mount(app: FastAPI, gateway: Gateway) -> None:
             }
 
         return StreamingResponse(
-            _stream_generate(gateway, active, req.model, messages, kwargs, started),
+            _stream_generate(gateway, active, req.model, messages, kwargs, started, shaping),
             media_type="application/x-ndjson",
         )
 
@@ -359,7 +387,7 @@ def _parameter_size(n_params) -> str:
     return f"{value / 1e9:.1f}B"
 
 
-async def _stream_chat(gateway, active, model, messages, kwargs, started):
+async def _stream_chat(gateway, active, model, messages, kwargs, started, shaping=None):
     text = ""
     usage = None
     finish_reason = None
@@ -401,6 +429,7 @@ async def _stream_chat(gateway, active, model, messages, kwargs, started):
                 "done": False,
             }
         )
+    _count(gateway, messages, kwargs, {"usage": usage} if usage else None, shaping)
     elapsed = time.perf_counter() - started
     yield _line(
         _final_body(
@@ -416,7 +445,7 @@ async def _stream_chat(gateway, active, model, messages, kwargs, started):
     )
 
 
-async def _stream_generate(gateway, active, model, messages, kwargs, started):
+async def _stream_generate(gateway, active, model, messages, kwargs, started, shaping=None):
     text = ""
     usage = None
     finish_reason = None
@@ -444,6 +473,7 @@ async def _stream_generate(gateway, active, model, messages, kwargs, started):
         yield _line({"error": str(exc)})
         return
 
+    _count(gateway, messages, kwargs, {"usage": usage} if usage else None, shaping)
     elapsed = time.perf_counter() - started
     yield _line(
         _final_body(

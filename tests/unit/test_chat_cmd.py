@@ -197,3 +197,48 @@ def test_repl_command_closes_engine(monkeypatch):
     chat_cmd.repl(model="m", typewriter=False)
 
     assert engine.closed is True
+
+
+def _wire_build(monkeypatch, cfg, on_engine):
+    monkeypatch.setattr(chat_cmd, "get_model", _spec)
+    monkeypatch.setattr(chat_cmd, "load_config", lambda: dict(cfg))
+    monkeypatch.setattr(chat_cmd, "detect", lambda: types.SimpleNamespace())
+    monkeypatch.setattr(chat_cmd, "plan", lambda *a, **kw: _plan())
+
+    def fake_create(p, path, backend="inprocess"):
+        on_engine(p, path)
+        return object()
+
+    monkeypatch.setattr(chat_cmd, "create_engine", fake_create)
+
+
+def test_build_applies_a_measured_tuning_profile(monkeypatch):
+    seen = {}
+    called = []
+
+    def fake_tuning(p, alias, hw):
+        called.append(alias)
+        return p.__class__(**{**p.__dict__, "gpu_layers": 3})
+
+    monkeypatch.setattr(chat_cmd, "apply_tuning", fake_tuning)
+    _wire_build(monkeypatch, DEFAULT_CONFIG, lambda p, path: seen.update(plan=p))
+
+    chat_cmd._build("m")
+
+    assert called == ["m"]
+    assert seen["plan"].gpu_layers == 3
+
+
+def test_build_skips_tuning_when_the_config_turns_it_off(monkeypatch):
+    called = []
+
+    def fake_tuning(p, alias, hw):
+        called.append(alias)
+        return p
+
+    monkeypatch.setattr(chat_cmd, "apply_tuning", fake_tuning)
+    _wire_build(monkeypatch, {**DEFAULT_CONFIG, "tuning": False}, lambda p, path: None)
+
+    chat_cmd._build("m")
+
+    assert called == []

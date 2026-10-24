@@ -4,6 +4,7 @@ from vipera.backends.protocol import ChatEngine
 from vipera.backends.registry import create_engine
 from vipera.config import load_config
 from vipera.hardware import detect
+from vipera.optimize.tuning import apply_tuning
 from vipera.planner import plan
 from vipera.registry import get_model
 from vipera.ui import (
@@ -42,6 +43,8 @@ def _build(model: str) -> ChatEngine:
         n_batch=cfg.get("n_batch", 512),
         n_ubatch=cfg.get("n_ubatch", 0),
     )
+    if cfg.get("tuning", True):
+        p = apply_tuning(p, model, hw)
     with console.status(f"[{C_ACCENT}] Loading {model}…"):
         return create_engine(p, m.path, cfg.get("backend", "inprocess"))
 

@@ -253,3 +253,47 @@ def test_run_benchmarks_each_context_and_closes_engines(monkeypatch):
 
     assert len(engines) == 2
     assert all(e.closed for e in engines)
+
+
+def test_bench_records_the_split_that_ran(monkeypatch, tmp_path):
+    from vipera.optimize.tuning import TuningStore
+
+    store = TuningStore(tmp_path / "tuning.json")
+    hw = types.SimpleNamespace(
+        cpu_cores=4, ram_free_gb=8.0, gpu_name="GTX 1650", ram_total_gb=32.0, vram_total_gb=4.0
+    )
+    monkeypatch.setattr(bench_cmd, "TuningStore", lambda: store)
+    monkeypatch.setattr(bench_cmd, "load_config", lambda: dict(DEFAULT_CONFIG))
+    monkeypatch.setattr(bench_cmd, "get_model", _spec)
+    monkeypatch.setattr(bench_cmd, "detect", lambda: hw)
+    monkeypatch.setattr(bench_cmd, "plan", lambda *a, **kw: _plan())
+    monkeypatch.setattr(bench_cmd, "create_engine", lambda p, path, backend: FakeEngine(p, path))
+    monkeypatch.setattr(bench_cmd, "animated_loading_bar", lambda *a, **kw: None)
+
+    bench_cmd.run(model="m", ctx="512", max_tokens=2)
+
+    profile = store.get("m", hw)
+    assert profile is not None
+    assert profile.gpu_layers == 2
+    assert profile.ctx == 512
+    assert profile.gen_tps > 0
+
+
+def test_bench_stores_nothing_when_tuning_is_off(monkeypatch, tmp_path):
+    from vipera.optimize.tuning import TuningStore
+
+    store = TuningStore(tmp_path / "tuning.json")
+    hw = types.SimpleNamespace(
+        cpu_cores=4, ram_free_gb=8.0, gpu_name="GTX 1650", ram_total_gb=32.0, vram_total_gb=4.0
+    )
+    monkeypatch.setattr(bench_cmd, "TuningStore", lambda: store)
+    monkeypatch.setattr(bench_cmd, "load_config", lambda: {**DEFAULT_CONFIG, "tuning": False})
+    monkeypatch.setattr(bench_cmd, "get_model", _spec)
+    monkeypatch.setattr(bench_cmd, "detect", lambda: hw)
+    monkeypatch.setattr(bench_cmd, "plan", lambda *a, **kw: _plan())
+    monkeypatch.setattr(bench_cmd, "create_engine", lambda p, path, backend: FakeEngine(p, path))
+    monkeypatch.setattr(bench_cmd, "animated_loading_bar", lambda *a, **kw: None)
+
+    bench_cmd.run(model="m", ctx="512", max_tokens=2)
+
+    assert not (tmp_path / "tuning.json").exists()

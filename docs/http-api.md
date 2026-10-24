@@ -62,11 +62,35 @@ FastAPI's `{"detail": ...}` format, not OpenAI's `{"error": {...}}` envelope.
 ### `GET /health`
 
 ```json
-{ "status": "ok", "model": "deepseek-v2-lite" }
+{
+  "status": "ok",
+  "model": "deepseek-v2-lite",
+  "optimize": {
+    "requests": 42,
+    "prefix_hits": 31,
+    "prefix_hit_rate": 0.738,
+    "prompt_tokens": 91044,
+    "cached_tokens": 61200,
+    "cache_rate": 0.672,
+    "messages_dropped": 0,
+    "messages_truncated": 2
+  }
+}
 ```
 
 The `model` value is the registry alias used at startup. The endpoint does not
 check that the engine is still healthy beyond the process being alive.
+
+`optimize` is the [optimization layer](architecture.md#optimization-layer):
+`prefix_hits` counts requests whose reusable prefix (system prompt, tool schema,
+history before the current turn) was seen before, and `cached_tokens` is what
+the backend reported serving from its KV cache — 0 on `inprocess`, whose
+binding does not report it. `messages_dropped`/`messages_truncated` say how
+much shaping had to give up. The block is present whenever the app was built
+with a layer (the normal case); `shaping: false` only stops the trimming, not
+the accounting.
+
+In pool mode the body also carries `loaded`, the aliases resident right now.
 
 ### `GET /v1/models`
 

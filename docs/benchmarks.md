@@ -141,6 +141,32 @@ KV sizes themselves are **planned, not measured**: the planner's formula
 Hermes-4 at 32K with f16 KV and 2.50 GB with q8_0. The formula is covered by
 `tests/test_planner.py`; the tables above are what was actually run.
 
+### Optimization layer: shaping at the context edge
+
+qwen2.5-0.5B Q4_K_M, `ctx 2048`, one request carrying 38 messages / 25.2 KB of
+history (4,727 tokens by llama.cpp's own count) and 16 generated tokens:
+
+| Arm | Result | TTFT |
+|---|---|---:|
+| `shaping: false` | `Requested tokens (4727) exceed context window of 2048` | — |
+| `shaping: true`, first request | 200; 29 messages dropped, 9 left | 3.53 s |
+| `shaping: true`, same request again | 200; `/health` `prefix_hits: 1` | 0.024 s |
+| Fits without trimming (`ctx 16384`) | 200; full prompt reaches llama.cpp | 43.6 s |
+
+The trimmed request cost 3.5 s to first token; the same history at a context
+large enough to hold it cost 43.6 s. The layer's own prompt count is the
+conservative 3-chars/token estimate (1,882 tokens for the trimmed request), so
+treat it as a budget, not a tokenizer. The repeat request shows the other half:
+the prefix was stable, so the backend reused its KV cache and only paid for the
+new turn.
+
+Tuning is the load-time half. `vipera bench run hermes-4-14b-q3km-imatrix
+--ctx 8192 --max-tokens 32` measured 18/40 layers at 4.90 t/s and wrote the
+profile to `tuning.json`; the planner's formula said 17 at the same 3.64 GB of
+free VRAM. With 1.5 GB less free, the formula said 9 and `apply_tuning` kept 9:
+a split measured with more room is not replayed onto a card that no longer has
+it, because a failed load costs more than the extra layer.
+
 ## Method
 
 ```bash

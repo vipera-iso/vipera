@@ -163,6 +163,12 @@ or edit the JSON. The keys that change behavior most: `ctx`, `kv_cache`
 (`f16`, `q8_0`, `q4_0`), `spec_type` (draft-free n-gram speculation, on by
 default), `default_model`.
 
+The optimization layer (`shaping`, `tuning`, both on) trims a request that is
+larger than the loaded context instead of letting llama.cpp cut the system
+prompt, and reuses the layer split a previous `vipera bench` measured on this
+machine. `/health` reports prefix-cache reuse. Details:
+[docs/architecture.md](docs/architecture.md#optimization-layer).
+
 Full table: [docs/configuration.md](docs/configuration.md).
 
 ## What the numbers look like

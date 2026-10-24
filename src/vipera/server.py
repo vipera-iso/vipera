@@ -12,6 +12,7 @@ import asyncio
 from fastapi import FastAPI
 
 from vipera import __version__
+from vipera.optimize.layer import OptimizeLayer
 from vipera.pool import UnknownModelError
 from vipera.protocols import mount
 from vipera.protocols.gateway import Gateway
@@ -66,19 +67,27 @@ def build_app(engine=None, model_name: str | None = None, *, pool=None, protocol
         def loaded_ids() -> list[str]:
             return [single]
 
+    optimizer = OptimizeLayer.from_config()
     gateway = Gateway(
         lock=lock,
         engine_for=engine_for,
         ids=ids,
         default_model=default_model,
         loaded_ids=loaded_ids,
+        optimizer=optimizer,
     )
 
     @app.get("/health")
     def health():
         if pool is not None:
-            return {"status": "ok", "model": pool.default, "loaded": pool.loaded_ids()}
-        return {"status": "ok", "model": model_name}
+            body = {"status": "ok", "model": pool.default, "loaded": pool.loaded_ids()}
+        else:
+            body = {"status": "ok", "model": model_name}
+        # Prefix reuse per served model: a client that keeps its system prompt
+        # stable shows a cache_rate above zero here.
+        if optimizer is not None:
+            body["optimize"] = optimizer.stats.summary()
+        return body
 
     app.state.protocols = mount(app, gateway, protocols)
     app.state.gateway = gateway

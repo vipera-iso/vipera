@@ -33,7 +33,12 @@ def test_health():
     client = TestClient(build_app(FakeEngine(), "test-model"))
     r = client.get("/health")
     assert r.status_code == 200
-    assert r.json() == {"status": "ok", "model": "test-model"}
+    body = r.json()
+    assert body["status"] == "ok"
+    assert body["model"] == "test-model"
+    # The optimization layer reports prefix reuse here; a fresh gateway has none.
+    assert body["optimize"]["requests"] == 0
+    assert body["optimize"]["prefix_hits"] == 0
 
 
 def test_models():

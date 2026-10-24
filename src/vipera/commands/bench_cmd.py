@@ -8,6 +8,7 @@ from vipera.backends.protocol import ChatEngine
 from vipera.backends.registry import create_engine
 from vipera.config import load_config
 from vipera.hardware import detect
+from vipera.optimize.tuning import TuningStore
 from vipera.planner import plan
 from vipera.registry import get_model
 from vipera.ui import (
@@ -168,6 +169,11 @@ def run(
     t.add_column("gen t/s", style=C_GREEN, justify="right")
     t.add_column("total", style=C_TEXT, justify="right")
 
+    # Remember the fastest split this run loads at, so the next `serve`/`chat`
+    # starts from a measurement instead of the VRAM formula.
+    tuning = TuningStore() if cfg.get("tuning", True) else None
+    stored = False
+
     for c in ctx_list:
         p = plan(
             m.meta,
@@ -196,6 +202,17 @@ def run(
             if "error" in result:
                 note(f"ctx {c} failed during the run: {result['error']}", tone="error")
                 continue
+
+            if tuning is not None:
+                # engine.plan, not the requested plan: a failed GPU load falls
+                # back a rung, and that fallback is the split that ran.
+                stored |= tuning.record(
+                    model,
+                    hw,
+                    gpu_layers=engine.plan.gpu_layers,
+                    ctx=engine.plan.context,
+                    gen_tps=result["gen_tps"],
+                )
 
             # Report the plan the engine actually loaded: a GPU load can fail
             # and fall back to CPU, which would otherwise still print the
@@ -226,3 +243,5 @@ def run(
         "gen t/s is measured after the first token. a `~` on gen means the backend\n"
         "reported no usage and the count is a streamed-chunk approximation."
     )
+    if stored and tuning is not None:
+        note(f"saved the fastest split to {tuning.path}; serve/chat will use it.", tone="ok")

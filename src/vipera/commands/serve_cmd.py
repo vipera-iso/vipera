@@ -11,6 +11,7 @@ from vipera.backends.protocol import ChatEngine
 from vipera.backends.registry import create_engine, resolve_backend
 from vipera.config import VIPERA_HOME, load_config
 from vipera.hardware import detect
+from vipera.optimize.tuning import apply_tuning
 from vipera.planner import plan
 from vipera.pool import ModelPool
 from vipera.protocols.names import is_known as _is_known_protocol
@@ -258,6 +259,15 @@ def start(
         except ValueError as e:
             console.print(f"[{C_RED}] ✗ {e}[/]")
             raise typer.Exit(1) from e
+
+        # A split this machine already measured beats the VRAM formula. Losing
+        # the profile (or never having one) changes nothing.
+        if cfg.get("tuning", True):
+            tuned = apply_tuning(p, info.alias, hw)
+            if tuned is not p:
+                p = tuned
+                if announce:
+                    note(f"layers from the measured {info.alias} profile: {p.gpu_layers}")
 
         # Decide before the banner: an MoE plan either upgrades to llama-server
         # or falls back to the classic split, and the panel must show the truth.

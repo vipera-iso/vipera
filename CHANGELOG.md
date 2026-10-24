@@ -8,6 +8,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Optimization layer** (`vipera.optimize`) — a layer between the protocol
+  routes and the engine, in three pieces. *Shaping* fits an oversized request
+  into the context the model was loaded with: it caps a single history message
+  above a quarter of the budget (the usual case is a resent tool result), then
+  drops the oldest history, and only cuts the current turn head-and-tail as a
+  last resort — the system prompt and the final user turn are never dropped. A
+  request that fits is passed through untouched. *Prefix accounting* hashes the
+  reusable part of each request (system prompt, tool schema, history before the
+  current turn) and records whether it was seen before plus the cached-token
+  count the backend reports, so `/health` can say whether an agent loop is
+  actually reusing the KV cache. *Tuning* remembers, in
+  `$VIPERA_HOME/tuning.json` and per model/machine, the layer split with the
+  best measured decode rate: `vipera bench` writes it and `serve`/`chat` use it
+  instead of the planner's VRAM estimate. Switchable with the `shaping` and
+  `tuning` config keys (both on by default).
 - **Ollama SDK integration test** — `tests/integration/test_ollama_sdk.py`
   starts the gateway on a loopback port and drives it with the official
   `ollama` client: `/api/tags`, `/api/chat` (streaming and not), `/api/generate`,

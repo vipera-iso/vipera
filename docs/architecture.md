@@ -31,6 +31,7 @@ All code lives in `src/vipera`.
 | `server.py` | Build the FastAPI app around an engine: `/health`, `/v1/models`, `/v1/chat/completions`, SSE framing. | `fastapi`, `pydantic` |
 | `registry.py` | JSON model index at `$VIPERA_HOME/registry.json`: add/list/get/remove. | `config` |
 | `config.py` | Paths, default config, load/save with type coercion. | stdlib |
+| `optimize/` | The optimization layer: request shaping (`shaping.py`), prefix accounting (`prefix.py`), measured tuning profiles (`tuning.py`), and the gateway handle that wires them (`layer.py`). | `planner`, `config` |
 | `gguf_analyzer.py` | Read GGUF metadata and tensor index without loading weights: per-layer/category sizes, quantization mix, low-quant warnings. | `gguf` (optional extra) |
 | `optimizer.py` | Pure helpers for quantization: locate `llama-imatrix`/`llama-quantize`, build their command lines, pick a quant for a size target, name outputs. No subprocess execution. | stdlib |
 | `cli.py` | Typer root app, banner, default-model resolution, `help`. | all commands |
@@ -349,6 +350,35 @@ Two consequences for this codebase:
   token prefix and silently disables the reuse.
 - The cache belongs to the loaded engine: `serve stop`/`start`, a model, `ctx`,
   or `kv_cache` change all start from an empty cache.
+
+Both backends behave this way, so Vipera does not reimplement the cache; the
+[optimization layer](#optimization-layer) keeps it *observable* — `/health`
+reports how many prompt tokens the backend served from it — and keeps the
+prefix *stable*, since shaping only ever removes messages from the front.
+
+## Optimization layer
+
+`vipera.optimize` sits between the protocol layers and the engine. It is three
+independent pieces plus the wiring that calls them:
+
+| Piece | When | What it does |
+|---|---|---|
+| `shaping.shape()` | before a chat call | Trims a request that is larger than the loaded context: caps any single history message above a quarter of the budget (a resent tool result), then drops the oldest history, then — only if the current turn alone is too large — cuts it head-and-tail. The leading system prompt and the final user turn are never dropped. A request that fits is passed through untouched. |
+| `prefix.prefix_key()` / `PrefixStats` | after a chat call | Hashes the reusable prefix (system prompt, tool schema, history before the current turn), and records whether that prefix was seen before plus the cached-token count the backend reports (`usage.prompt_tokens_details.cached_tokens` on llama-server, otherwise 0). Surfaced in `/health`. |
+| `tuning.TuningStore` | at load time | `~/.vipera/tuning.json` maps model → machine fingerprint → the layer split with the best measured decode rate. `vipera bench` writes it; `serve`/`chat` read it and replace the planner's VRAM-formula estimate. A model that was never measured behaves exactly as before. |
+
+Two properties keep the layer safe to leave on:
+
+- nothing is applied when it is not needed — shaping returns the input list
+  unchanged when the request fits, and tuning returns the same `Plan` object
+  when there is no profile or the split already agrees;
+- both halves are switchable (`shaping`, `tuning` in the config), and the
+  gateway falls back to the old behavior when no `OptimizeLayer` is passed.
+
+The gains are context-bound, not throughput-bound: prefill and TTFT scale with
+the tokens that reach llama.cpp, so trimming history is felt on agent loops
+that resend the whole conversation, while the tuning profile only changes the
+layer split a model is loaded with.
 
 ## Concurrency model
 
