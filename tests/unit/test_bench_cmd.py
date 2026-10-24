@@ -255,6 +255,29 @@ def test_run_benchmarks_each_context_and_closes_engines(monkeypatch):
     assert all(e.closed for e in engines)
 
 
+def test_bench_uses_the_configured_planner_profile(monkeypatch):
+    """`profile` in config must reach the planner here too, not just in serve."""
+    seen = {}
+    hw = types.SimpleNamespace(
+        cpu_cores=4, ram_free_gb=8.0, gpu_name="none", ram_total_gb=16.0, vram_total_gb=0.0
+    )
+    monkeypatch.setattr(bench_cmd, "load_config", lambda: {**DEFAULT_CONFIG, "profile": "cpu"})
+    monkeypatch.setattr(bench_cmd, "get_model", _spec)
+    monkeypatch.setattr(bench_cmd, "detect", lambda: hw)
+
+    def fake_plan(*args, **kwargs):
+        seen.update(kwargs)
+        return _plan()
+
+    monkeypatch.setattr(bench_cmd, "plan", fake_plan)
+    monkeypatch.setattr(bench_cmd, "create_engine", lambda p, path, backend: FakeEngine(p, path))
+    monkeypatch.setattr(bench_cmd, "animated_loading_bar", lambda *a, **kw: None)
+
+    bench_cmd.run(model="m", ctx="512", max_tokens=2)
+
+    assert seen["profile"] == "cpu"
+
+
 def test_bench_records_the_split_that_ran(monkeypatch, tmp_path):
     from vipera.optimize.tuning import TuningStore
 

@@ -212,6 +212,26 @@ def _wire_build(monkeypatch, cfg, on_engine):
     monkeypatch.setattr(chat_cmd, "create_engine", fake_create)
 
 
+def test_build_uses_the_configured_planner_profile(monkeypatch):
+    """`profile` in config must reach the planner here too, not just in serve."""
+    seen = {}
+    monkeypatch.setattr(chat_cmd, "get_model", _spec)
+    monkeypatch.setattr(chat_cmd, "load_config", lambda: {**DEFAULT_CONFIG, "profile": "cpu"})
+    monkeypatch.setattr(chat_cmd, "detect", lambda: types.SimpleNamespace())
+    monkeypatch.setattr(chat_cmd, "apply_tuning", lambda p, alias, hw: p)
+
+    def fake_plan(*args, **kwargs):
+        seen.update(kwargs)
+        return _plan()
+
+    monkeypatch.setattr(chat_cmd, "plan", fake_plan)
+    monkeypatch.setattr(chat_cmd, "create_engine", lambda p, path, backend="inprocess": object())
+
+    chat_cmd._build("m")
+
+    assert seen["profile"] == "cpu"
+
+
 def test_build_applies_a_measured_tuning_profile(monkeypatch):
     seen = {}
     called = []

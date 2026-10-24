@@ -38,6 +38,7 @@ def _build(model: str) -> ChatEngine:
     p = plan(
         m.meta,
         hw,
+        profile=cfg.get("profile", "auto"),
         ctx=cfg.get("ctx", 8192),
         kv_cache=cfg.get("kv_cache", "q8_0"),
         n_batch=cfg.get("n_batch", 512),

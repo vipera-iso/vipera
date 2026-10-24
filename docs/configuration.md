@@ -66,19 +66,22 @@ to the defaults. Corrupt JSON does not produce an error.
 | `backend` | `str` | `inprocess` | `serve start`, `chat`, `bench` | Where inference runs: `inprocess` (llama-cpp-python) or `server` (a `llama-server` child). See [backends](#backends). |
 | `protocols` | `str` | `openai` | `serve start` | HTTP layers to mount: `openai` (`/v1/*`), `ollama` (`/api/*`), comma-separated. See [protocols](#protocols). |
 | `embeddings` | `bool` | `false` | `serve start`, `chat`, `bench` | Load the model with embedding support, so `/v1/embeddings` and `/api/embed` can answer. Off by default because llama.cpp builds the embedding context up front. |
-| `profile` | `str` | `auto` | nothing currently | Planner profile. `serve start --profile` defaults to `auto` independently. |
+| `profile` | `str` | `auto` | `serve start`, `chat`, `bench` | Planner profile: `auto`, `cpu` (never offload), `gpu` (prefer offload), or `lowmem` (no offload, context capped at 2048, batch 64). `serve start --profile` overrides it; `chat` and `bench` use the config value. An unknown value is repaired to `auto` on load and rejected by `vipera system config`. |
 | `ctx` | `int` | `8192` | `serve start`, `chat` | Context size for the planner. `bench run` uses its own `--ctx` list. |
 | `kv_cache` | `str` | `q8_0` | `serve start`, `chat`, `bench` | KV cache type: `f32`, `bf16`, `f16`, `q8_0`, `q5_1`, `q5_0`, `q4_1`, `q4_0`, `iq4_nl`. Honored on CPU-only plans too; flash attention is enabled only for the quantized types, which require it. |
 | `n_batch` | `int` | `512` | `serve start`, `chat`, `bench` | Prompt batch size; capped by the plan. |
 | `spec_type` | `str` | `ngram-map-k` | `serve start`, `chat`, `bench` with `backend: server` | llama-server's `--spec-type`, i.e. draft-free n-gram speculation. `none` turns it off; `ngram-simple`, `ngram-map-k`, `ngram-map-k4v`, `ngram-mod`, `ngram-cache` are the draft-free values. Measured +37% decode when the answer rewrites text from the prompt, -1% on fresh prose; ignored by `inprocess` (no equivalent exists: the Python binding's prompt lookup measured -29%). Background in [techniques](../OPTIMIZE-techniques.md). |
 | `shaping` | `bool` | `true` | `serve start` | Fit an oversized request into the loaded context instead of letting llama.cpp cut the prompt itself. See [optimization layer](architecture.md#optimization-layer). |
 | `tuning` | `bool` | `true` | `serve start`, `chat`, `bench` | Reuse the layer split a previous `vipera bench` measured for this model and machine; also controls whether `bench` writes one. |
-| `temperature` | `float` | `0.7` | nothing currently | Per-request default comes from `server.ChatRequest`. |
-| `max_tokens` | `int` | `2048` | nothing currently | Per-request default comes from `server.ChatRequest`. |
-| `top_p` | `float` | `0.95` | nothing currently | Per-request default comes from `server.ChatRequest`. |
+| `temperature` | `float` | `0.7` | `chat` (REPL and oneshot) | HTTP requests default to `server.ChatRequest` instead. |
+| `max_tokens` | `int` | `2048` | `chat` (REPL and oneshot) | HTTP requests default to `server.ChatRequest` instead. |
+| `top_p` | `float` | `0.95` | `chat` (REPL and oneshot) | HTTP requests default to `server.ChatRequest` instead. |
+| `repeat_penalty` | `float` | `1.1` | `chat` (REPL and oneshot) | Must exist in the defaults or the key never reaches the engine. |
 
-The "read by nothing" rows are accepted and persisted so the schema is stable,
-but changing them does not alter runtime behavior today. See
+Every key is validated on load: a wrong type, an unknown `backend`,
+`kv_cache`, `profile`, or `protocols` value is repaired to its default with a
+warning rather than crashing the next command. `vipera system config` is
+stricter: it refuses to write an invalid value at all. See
 [known gaps](architecture.md#known-gaps).
 
 ### Backends

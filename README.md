@@ -159,9 +159,11 @@ Schemas, SSE framing, and Python/JavaScript examples:
 ## Configuration
 
 Config lives at `~/.vipera/config.json`. Change it with `vipera system config`
-or edit the JSON. The keys that change behavior most: `ctx`, `kv_cache`
-(`f16`, `q8_0`, `q4_0`), `spec_type` (draft-free n-gram speculation, on by
-default), `default_model`.
+or edit the JSON. The keys that change behavior most: `profile` (`auto`, `cpu`,
+`gpu`, `lowmem`, honored by serve, chat, and bench), `ctx`, `kv_cache` (`f16`,
+`q8_0`, `q4_0`), `spec_type` (draft-free n-gram speculation, on by default),
+`default_model`. Invalid values are repaired on load; `vipera system config`
+refuses to write them.
 
 The optimization layer (`shaping`, `tuning`, both on) trims a request that is
 larger than the loaded context instead of letting llama.cpp cut the system

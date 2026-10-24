@@ -7,6 +7,7 @@ from pathlib import Path
 
 from vipera.backends.names import is_known as _is_known_backend
 from vipera.backends.names import names as backend_names
+from vipera.planner import profile_names
 from vipera.protocols.names import is_known as _is_known_protocol
 from vipera.protocols.names import names as protocol_names
 
@@ -125,6 +126,8 @@ def _coerce(cfg: dict) -> dict:
         cfg["kv_cache"] = DEFAULT_CONFIG["kv_cache"]
     if not _is_known_backend(cfg.get("backend")):
         cfg["backend"] = DEFAULT_CONFIG["backend"]
+    if cfg.get("profile") not in profile_names():
+        cfg["profile"] = DEFAULT_CONFIG["profile"]
     requested = _split_protocols(cfg.get("protocols"))
     known = [name for name in requested if _is_known_protocol(name)]
     for name in requested:
@@ -167,6 +170,9 @@ def _coerce_strict(cfg: dict) -> dict:
     if "backend" in cfg and not _is_known_backend(cfg["backend"]):
         valid = ", ".join(backend_names())
         raise ValueError(f"backend: must be one of {valid}")
+    if "profile" in cfg and cfg["profile"] not in profile_names():
+        valid = ", ".join(profile_names())
+        raise ValueError(f"profile: must be one of {valid}")
     if "protocols" in cfg:
         requested = _split_protocols(cfg["protocols"])
         unknown = [name for name in requested if not _is_known_protocol(name)]

@@ -178,6 +178,8 @@ def run(
         p = plan(
             m.meta,
             hw,
+            # Same config-driven profile as serve/chat; bench still varies ctx.
+            profile=cfg.get("profile", "auto"),
             ctx=c,
             kv_cache=cfg.get("kv_cache", "q8_0"),
             n_batch=cfg.get("n_batch", 512),

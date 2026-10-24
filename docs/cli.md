@@ -217,7 +217,7 @@ Load a model and run the OpenAI-compatible HTTP server.
 | `-m`, `--model` | `default_model` | Registry alias to serve. Required if no default is set. |
 | `--host` | `config.host` (`127.0.0.1`) | Bind address. |
 | `--port`, `-p` | `config.port` (`8686`) | Bind port. |
-| `--profile` | `auto` | Planner profile (`auto`, `cpu`, `gpu`, `lowmem`). Note this is **not** read from config. |
+| `--profile` | `auto` | Planner profile (`auto`, `cpu`, `gpu`, `lowmem`). Defaults to the `profile` config key; chat and bench read that key too. |
 | `--ctx` | `config.ctx` (`8192`) | Context size passed to the planner. |
 | `--bench` | off | Run the 20-token speed check **before** serving. This delays readiness, so it is opt-in. |
 

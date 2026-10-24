@@ -172,6 +172,21 @@ def test_config_that_is_not_an_object_is_backed_up(isolated_home):
     assert (isolated_home / "config.json.corrupt").read_text() == "[1, 2, 3]"
 
 
+def test_coerce_resets_unknown_profile(isolated_home):
+    (isolated_home / "config.json").write_text(json.dumps({"profile": "turbo"}))
+    assert cfg_mod.load_config()["profile"] == "auto"
+
+
+@pytest.mark.parametrize("profile", cfg_mod.profile_names())
+def test_every_declared_profile_is_accepted(profile):
+    assert cfg_mod._coerce_strict({"profile": profile})["profile"] == profile
+
+
+def test_coerce_strict_rejects_unknown_profile():
+    with pytest.raises(ValueError, match="profile"):
+        cfg_mod._coerce_strict({"profile": "turbo"})
+
+
 def test_default_backend_is_inprocess():
     # The server backend is opt-in until it has been validated on hardware.
     assert cfg_mod.DEFAULT_CONFIG["backend"] == "inprocess"

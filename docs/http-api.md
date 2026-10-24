@@ -55,6 +55,20 @@ The Ollama routes translate onto the same engine and lock as the OpenAI ones,
 accept `model:latest`, and report failures as `{"error": "..."}` with a 404
 status instead of FastAPI's `{"detail": ...}`.
 
+Ollama-specific request behavior:
+
+- `format: "json"` asks the backend for a JSON object; a JSON-schema object is
+  forwarded as the schema. Any other value is rejected with `400` before a
+  model is loaded, rather than being silently ignored.
+- `images` is not supported: this gateway serves text-only models, so a chat
+  message carrying images is rejected with `400` instead of being answered as
+  if the image were invisible. `messages` must contain at least one message.
+- On non-streaming replies, `prompt_eval_count` and `eval_count` are always
+  populated: the backend's `usage` when it reports one, otherwise a tokenizer
+  count from the engine. Streaming replies report the backend's counts when it
+  sends usage, and `eval_count` is a tokenizer count of the streamed text
+  otherwise.
+
 `/health`, `/docs`, and `/openapi.json` are Vipera/FastAPI conveniences;
 `/v1/*` and `/api/*` are the compatibility surfaces. Errors on `/v1/*` follow
 FastAPI's `{"detail": ...}` format, not OpenAI's `{"error": {...}}` envelope.
@@ -377,8 +391,21 @@ rejected with `400`.
 | `stop`, `seed`, penalties, `logit_bias`, `logprobs` | Supported, forwarded to `llama.cpp` |
 | `response_format` (JSON mode) | Supported |
 | `stream_options.include_usage` | Emitted when the backend reports usage |
-| Multimodal content parts | Not supported |
+| Multimodal content parts | Not supported (the Ollama `images` field is rejected, not dropped) |
 | `POST /v1/completions` | Not implemented |
 | OpenAI-style error envelope | Not implemented |
 | API key auth | Not implemented |
 | CORS | Not implemented |
+
+### Ollama layer
+
+| Ollama feature | Status |
+|---|---|
+| `/api/chat`, `/api/generate`, `/api/embed`, `/api/embeddings` | Supported |
+| NDJSON streaming with `done: true` | Supported |
+| `model:tag` (`:latest` suffix) | Resolved to the alias |
+| `format: "json"` and JSON-schema `format` | Supported |
+| `tools` / `tool_calls` | Supported, arguments returned as objects |
+| `options` (`temperature`, `num_predict`, `stop`, …) | Mapped onto the engine |
+| `images` | Rejected with `400` (text-only gateway) |
+| `prompt_eval_count` / `eval_count` on non-streaming replies | Always populated |

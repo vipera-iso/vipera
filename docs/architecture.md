@@ -51,7 +51,10 @@ engine plus the model alias.
    interactive picker. `vipera -s` forces the picker. It then calls the same
    function as `vipera serve start --model <alias>`.
 2. `serve start` resolves `--model`, `--host`, `--port`, `--profile`, `--ctx`
-   against the config and looks the model up in the registry.
+   against the config and looks the model up in the registry. `chat` and
+   `bench` run the same planner with the config's `profile`, `ctx`,
+   `kv_cache`, and batch sizes, so a profile applies on every path, not just
+   the gateway.
 3. `hardware.detect()` builds a `HardwareInfo`; `planner.plan()` produces a
    `Plan` from the model's stored metadata and the hardware profile.
 4. `create_engine(plan, model_path, backend)` loads the model (`inprocess` →
@@ -363,7 +366,7 @@ independent pieces plus the wiring that calls them:
 
 | Piece | When | What it does |
 |---|---|---|
-| `shaping.shape()` | before a chat call | Trims a request that is larger than the loaded context: caps any single history message above a quarter of the budget (a resent tool result), then drops the oldest history, then — only if the current turn alone is too large — cuts it head-and-tail. The leading system prompt and the final user turn are never dropped. A request that fits is passed through untouched. |
+| `shaping.shape()` | before a chat call | Trims a request that is larger than the loaded context: caps any single history message above a quarter of the budget (a resent tool result), then drops the oldest history, then — only if the current turn alone is too large — cuts it head-and-tail. The leading system prompt and the final user turn are never dropped. The request's `tools` schema is charged against the same budget (llama.cpp renders it into the prompt) and is never trimmed, so a large tool set leaves less room for history. A request that fits is passed through untouched. |
 | `prefix.prefix_key()` / `PrefixStats` | after a chat call | Hashes the reusable prefix (system prompt, tool schema, history before the current turn), and records whether that prefix was seen before plus the cached-token count the backend reports (`usage.prompt_tokens_details.cached_tokens` on llama-server, otherwise 0). Surfaced in `/health`. |
 | `tuning.TuningStore` | at load time | `~/.vipera/tuning.json` maps model → machine fingerprint → the layer split with the best measured decode rate. `vipera bench` writes it; `serve`/`chat` read it and replace the planner's VRAM-formula estimate. A model that was never measured behaves exactly as before. |
 
@@ -382,7 +385,8 @@ layer split a model is loaded with.
 
 ## Concurrency model
 
-- One process, one loaded model, one `Engine`.
+- One process, one loaded model, one `Engine` (multi-model mode keeps a pool
+  of them, see below).
 - One `asyncio.Lock` serializes every completion, streaming or not.
 - The sync engine is driven through `asyncio.to_thread`, so the event loop stays
   free between chunks. Streaming and non-streaming requests hold the lock until
@@ -393,6 +397,15 @@ layer split a model is loaded with.
   entering the same llama.cpp context concurrently.
 - There is no request queue limit, timeout, or per-client accounting. A slow
   generation delays other clients.
+
+In multi-model mode (`--models a,b,c`) the pool adds two rules:
+
+- a request holds a lease on its engine until the call returns or the stream is
+  closed; eviction only ever picks an idle engine and a load waits for a slot
+  instead of closing a context mid-generation;
+- `pool.acquire()` plans and loads on the calling (worker) thread, reached
+  through `asyncio.to_thread`, so a multi-minute load does not freeze `/health`
+  or other requests.
 
 This is intentional for a single-user local gateway. If you need parallel
 decoding, you need a different serving stack.
@@ -433,11 +446,10 @@ These are observable in the current code and worth knowing before filing a bug:
 - VRAM detection does not guarantee GPU acceleration. With the `nvidia` extra
   and a CPU-only `llama-cpp-python` build, the planner can report GPU layers
   that the runtime cannot actually use.
-- `temperature`, `max_tokens`, `top_p`, `flash_attn`, and `profile` exist in the
-  config file, but `flash_attn` and `profile` are not read by `serve start`
-  (flash attention is decided by the planner; `--profile` defaults to `auto`
-  rather than the stored value). Per-request sampling parameters default to the
-  values in `server.ChatRequest`, not to config.
+- `flash_attn` is deliberately not a config key: the planner derives it from
+  `kv_cache`. Sampling keys (`temperature`, `max_tokens`, `top_p`,
+  `repeat_penalty`) feed `chat`, while HTTP requests default to the values in
+  `server.ChatRequest`, not to config.
 - The VRAM model assumes the KV cache stays per layer, and its reserve is
   calibrated on one card. Verified for a 14B/Q4 at 8K/`q8_0` (14 layers load,
   15 fail) and 16K/`q8_0` (13 load); the f16 non-FA path is covered by an extra
