@@ -93,7 +93,9 @@ def test_plugin_names_are_added_to_the_known_set(monkeypatch):
 
 
 def test_config_accepts_a_known_plugin_name(monkeypatch):
-    monkeypatch.setattr(cfg_mod, "_is_known_backend", lambda name: name in {"inprocess", "vllm"})
+    monkeypatch.setattr(
+        cfg_mod, "_is_known_backend", lambda name: name in {"auto", "inprocess", "vllm"}
+    )
 
     assert cfg_mod._coerce({"backend": "vllm"})["backend"] == "vllm"
-    assert cfg_mod._coerce({"backend": "typo"})["backend"] == "inprocess"
+    assert cfg_mod._coerce({"backend": "typo"})["backend"] == cfg_mod.DEFAULT_CONFIG["backend"]

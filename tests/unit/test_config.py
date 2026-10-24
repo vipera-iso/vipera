@@ -187,13 +187,21 @@ def test_coerce_strict_rejects_unknown_profile():
         cfg_mod._coerce_strict({"profile": "turbo"})
 
 
-def test_default_backend_is_inprocess():
-    # The server backend is opt-in until it has been validated on hardware.
-    assert cfg_mod.DEFAULT_CONFIG["backend"] == "inprocess"
+def test_default_backend_is_auto():
+    # `auto` picks llama-server when its CUDA build sees the card and the
+    # in-process engine otherwise, so neither is a config decision a user has
+    # to make on hardware they have not measured.
+    assert cfg_mod.DEFAULT_CONFIG["backend"] == "auto"
 
 
 def test_coerce_resets_unknown_backend():
-    assert cfg_mod._coerce({"backend": "torch"})["backend"] == "inprocess"
+    assert cfg_mod._coerce({"backend": "torch"})["backend"] == "auto"
+
+
+def test_parallel_has_to_be_at_least_one():
+    assert cfg_mod._coerce({"parallel": 0})["parallel"] == 1
+    with pytest.raises(ValueError, match="parallel"):
+        cfg_mod._coerce_strict({"parallel": 0})
 
 
 @pytest.mark.parametrize("backend", cfg_mod.backend_names())

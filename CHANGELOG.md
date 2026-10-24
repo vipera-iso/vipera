@@ -7,6 +7,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.3.0] - 2026-10-25
+
+### Added
+- **`backend: auto` is the default.** `auto` probes `llama-server` once per
+  process (`--list-devices`, not `--help`: a CPU-only build parses every flag
+  and then ignores `--gpu-layers`) and uses it when its CUDA backend can see the
+  card, falling back to the in-process engine otherwise. Same plan either way;
+  the C++ engine decoded 21% faster than the Python binding for the same GGUF
+  and the same split on the reference box. `inprocess` and `server` still work
+  as explicit values.
+- **`parallel` config key** (`serve start`, server backend): llama-server slots
+  (`-np`). Above 1 the gateway admits that many concurrent requests through a
+  semaphore instead of one at a time, and the child gets `-c ctx × parallel`
+  because llama.cpp splits the window across slots.
+- **Raw SSE passthrough.** A backend that already speaks the OpenAI wire format
+  now forwards its bytes unchanged (`ServerEngine.chat_sse`) instead of the
+  gateway parsing and re-serialising every frame, and it reads with `read1` so
+  one thread hop carries whatever has arrived rather than a single line.
+  Measured on the reference box: 167.8 → 178.3 t/s at 0.5B, i.e. ~10% gateway
+  overhead where there had been ~18%; on a 6 t/s 14B the overhead is ~0.5%.
+
+### Fixed
+- **`apply_tuning` replayed a profile across context sizes.** The stored profile
+  is a layer split measured at one `ctx`; applying it to a larger window
+  over-allocates the KV cache by the ratio of the two, which is a failed context
+  on a small card. The measured split is now used only when the requested
+  context is at most the measured one; a wider window falls back to the
+  planner's formula.
+
 ## [1.2.1] - 2026-10-24
 
 ### Added

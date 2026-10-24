@@ -492,3 +492,57 @@ def test_placement_is_kept_when_the_child_uses_the_gpu(monkeypatch):
 
     assert plan.gpu_layers == 7
     assert plan.offload_kqv is True
+
+
+def test_server_command_keeps_one_context_per_slot():
+    # -c is the whole window and llama.cpp splits it across slots, so N slots
+    # need N windows to leave each request the context the planner chose.
+    command = sb.server_command("/bin/llama-server", "/m.gguf", _plan(), 1, parallel=4)
+
+    assert command[command.index("-np") + 1] == "4"
+    assert command[command.index("-c") + 1] == str(8192 * 4)
+
+
+def test_server_command_omits_np_for_a_single_slot():
+    command = sb.server_command("/bin/llama-server", "/m.gguf", _plan(), 1, parallel=1)
+
+    assert "-np" not in command
+    assert command[command.index("-c") + 1] == "8192"
+
+
+def test_chat_sse_forwards_the_child_frames_unchanged(monkeypatch):
+    engine = _engine()
+    frames = [
+        b'data: {"choices":[{"delta":{"content":"hi"}}]}\n',
+        b"\n",
+        b'data: {"choices":[],"usage":{"prompt_tokens":3}}\n',
+        b"\n",
+        b"data: [DONE]\n",
+        b"\n",
+        b"data: [DONE]\n",
+    ]
+
+    class _Raw:
+        """What urllib hands back: read1 returns whatever has arrived."""
+
+        closed = False
+
+        def __init__(self, chunks):
+            self.chunks = list(chunks)
+
+        def read1(self, n):
+            return self.chunks.pop(0) if self.chunks else b""
+
+        def close(self):
+            self.closed = True
+
+    raw = _Raw([b"".join(frames[:3]), b"".join(frames[3:])])
+    monkeypatch.setattr(engine, "_post", lambda path, body: raw)
+
+    # Byte-for-byte, up to and including [DONE]; the child's trailing bytes are
+    # never read.
+    assert list(engine.chat_sse([{"role": "user", "content": "hi"}])) == [
+        b"".join(frames[:3]),
+        b"".join(frames[3:]),
+    ]
+    assert raw.closed is True

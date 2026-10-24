@@ -63,7 +63,8 @@ to the defaults. Corrupt JSON does not produce an error.
 | `host` | `str` | `127.0.0.1` | `serve start`, `serve status` | Gateway bind address. |
 | `port` | `int` | `8686` | `serve start`, `serve status` | Gateway port. |
 | `default_model` | `str \| null` | `null` | root command, `serve start`, `chat`, `bench` | Alias used when `--model` is absent. |
-| `backend` | `str` | `inprocess` | `serve start`, `chat`, `bench` | Where inference runs: `inprocess` (llama-cpp-python) or `server` (a `llama-server` child). See [backends](#backends). |
+| `backend` | `str` | `auto` | `serve start`, `chat`, `bench` | Where inference runs: `auto` (llama-server when its CUDA build sees the card, llama-cpp-python otherwise), `inprocess` (llama-cpp-python) or `server` (a `llama-server` child). See [backends](#backends). |
+| `parallel` | `int` | `1` | `serve start`, `chat`, `bench` with `backend: server` | llama-server slots (`-np`). Above 1 the gateway admits that many requests at once and the child gets `-c ctx × parallel`, because llama.cpp splits the window across slots. Costs KV memory per slot; on a 4 GB card leave it at 1. |
 | `protocols` | `str` | `openai` | `serve start` | HTTP layers to mount: `openai` (`/v1/*`), `ollama` (`/api/*`), comma-separated. See [protocols](#protocols). |
 | `embeddings` | `bool` | `false` | `serve start`, `chat`, `bench` | Load the model with embedding support, so `/v1/embeddings` and `/api/embed` can answer. Off by default because llama.cpp builds the embedding context up front. |
 | `profile` | `str` | `auto` | `serve start`, `chat`, `bench` | Planner profile: `auto`, `cpu` (never offload), `gpu` (prefer offload), or `lowmem` (no offload, context capped at 2048, batch 64). `serve start --profile` overrides it; `chat` and `bench` use the config value. An unknown value is repaired to `auto` on load and rejected by `vipera system config`. |
@@ -90,11 +91,17 @@ stricter: it refuses to write an invalid value at all. See
 
 | Value | Runtime | When to use it |
 |---|---|---|
-| `inprocess` | `llama-cpp-python` in the gateway process | Default. No extra binary, one process to stop. |
+| `auto` | `server` when a `llama-server` build can see a CUDA device, `inprocess` otherwise | Default. Same plan either way; you get the faster runtime available on the machine. |
+| `inprocess` | `llama-cpp-python` in the gateway process | No extra binary, one process to stop, or no CUDA llama-server on the box. |
 | `server` | `llama-server` as a child process, spoken to over its OpenAI/SSE API | You have a newer or differently built llama.cpp (CPU kernels, flags) than the Python wheel bundles. |
 
 The gateway API is identical for both; the planner produces the flags in both
-cases. The server backend looks for `llama-server` in `VIPERA_LLAMA_BIN`, then
+cases. On the reference 4 GB card the C++ engine decoded 21% faster than the
+Python binding for the same GGUF and the same plan, which is why `auto` prefers
+it. Streaming responses from the server backend are forwarded as raw SSE
+frames; the in-process engine's chunks are re-encoded, since they are Python
+dicts. `auto` is probed once per process, so a gateway mounting several models
+pays for it once. The server backend looks for `llama-server` in `VIPERA_LLAMA_BIN`, then
 `~/.vipera/bin`, `~/llama.cpp/build/bin`, `/usr/local/bin`, `/opt/homebrew/bin`,
 then `PATH`. It writes the child's output to `logs/llama-server-<port>.log` and
 shuts the child down with the gateway. If the GPU plan fails to start it

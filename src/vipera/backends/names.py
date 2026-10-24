@@ -10,7 +10,9 @@ import importlib.metadata as metadata
 from functools import lru_cache
 
 GROUP = "vipera.backends"
-BUILTIN = ("inprocess", "server")
+# `auto` is not an engine: the registry resolves it to `server` when a CUDA
+# llama-server can see the card, and to `inprocess` otherwise.
+BUILTIN = ("auto", "inprocess", "server")
 
 
 @lru_cache(maxsize=1)

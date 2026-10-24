@@ -31,7 +31,11 @@ def build_app(engine=None, model_name: str | None = None, *, pool=None, protocol
         raise ValueError("build_app needs an engine or a pool")
 
     app = FastAPI(title="Vipera Gateway", version=__version__)
-    lock = asyncio.Lock()
+    # The server backend can run N requests at once (llama.cpp slots), so the
+    # gateway admits N instead of serialising. One shared context still means
+    # one at a time for the in-process engine and for a pool.
+    slots = 1 if pool is not None else int(getattr(engine, "parallel", 1) or 1)
+    lock = asyncio.Semaphore(slots) if slots > 1 else asyncio.Lock()
 
     if pool is not None:
 

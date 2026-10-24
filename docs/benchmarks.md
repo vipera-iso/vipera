@@ -167,6 +167,42 @@ free VRAM. With 1.5 GB less free, the formula said 9 and `apply_tuning` kept 9:
 a split measured with more room is not replayed onto a card that no longer has
 it, because a failed load costs more than the extra layer.
 
+### `auto` backend: the gateway vs its own child vs Ollama
+
+Same GGUF, same `ctx 4096`, same 226-token prompt, 128 max tokens, temperature
+0, streams read over HTTP. The three arms run **interleaved** (one round hits
+all of them) because sequential runs on this box drifted up to 16% with the
+fan. Medians of 5 rounds for the 0.5B and 3 for the 14B, both fully warmed
+(identical prompt, so prefill is cached).
+
+| Arm | qwen2.5-0.5B Q4_K_M (24/24 layers) | Hermes-4-14B Q3_K_M (16/40 layers) |
+|---|---:|---:|
+| Vipera, `backend: auto` → `server` (HTTP) | 178.3 t/s | 5.99 t/s |
+| the same `llama-server` child, called directly | 197.6 t/s | 6.02 t/s |
+| Ollama 0.40.8, defaults | 206.5 t/s | 4.56 t/s |
+
+Reading it:
+
+- **The gateway layer costs ~10% on a 150 t/s model and ~0.5% on the 14B.**
+  Every streamed frame crosses a worker thread and a socket write; at 5.3 ms per
+  token the tiny model feels that, at 167 ms per token the 14B does not. Raw
+  SSE passthrough (the child's bytes are forwarded unchanged instead of parsed
+  and re-serialised) plus `read1` batching moved this arm from 167.8 to 178.3
+  t/s; the remaining 10% is the proxy hop, not JSON.
+- **Ollama's `llama.cpp` build is ~4.5% faster than b11827** on the same card
+  and the same flags (206.5 vs 197.6 t/s). That is a build difference, not a
+  gateway one, and it is the whole of Ollama's lead on a model that fits.
+- **On the hybrid model Vipera is 31% faster** because of placement, not
+  kernels: it planned 16/40 layers at 3.42 GB used against Ollama's 14/40 at
+  2.67 GB, and decoding a 14B from system RAM is bandwidth-bound, so each extra
+  GPU layer pays. Ollama can close the gap with `OLLAMA_FLASH_ATTENTION=1`,
+  `OLLAMA_KV_CACHE_TYPE=q4_0` and `num_gpu=18`: an earlier run on this card
+  measured 6.13 vs 5.95 t/s that way — but that is three settings a user has to
+  know, and none of them is on by default.
+
+Both numbers are for one box. Run the same three arms on yours before
+concluding anything about your hardware.
+
 ## Method
 
 ```bash

@@ -172,6 +172,7 @@ def server_command(
     spec_type_supported: bool | None = None,
     embeddings: bool = False,
     embeddings_supported: bool | None = None,
+    parallel: int = 1,
 ) -> list[str]:
     """Translate a Plan into llama-server flags.
 
@@ -207,7 +208,9 @@ def server_command(
         "--port",
         str(port),
         "-c",
-        str(plan.context),
+        # -c is the whole KV window, shared by all slots, so N slots need N
+        # times the window to give each request the context it planned for.
+        str(plan.context * max(1, parallel)),
         "-ngl",
         str(gpu_layers),
         "-t",
@@ -220,6 +223,8 @@ def server_command(
         "on" if plan.flash_attn else "off",
         "--jinja",
     ]
+    if parallel > 1:
+        command.extend(["-np", str(parallel)])
     if fit_supported is None:
         fit_supported = _supports_fit(binary)
     if fit_supported:
@@ -279,6 +284,9 @@ class ServerEngine:
         # times, and each extra --help run is wasted startup time.
         self._fit_supported = _supports_fit(self._binary)
         cfg = config.load_config()
+        # Slots: >1 lets the gateway run that many requests at once through
+        # llama.cpp's continuous batching (see build_app's semaphore).
+        self.parallel = max(1, int(cfg.get("parallel", 1) or 1))
         self._spec_type = cfg.get("spec_type", "none")
         self._spec_type_supported = supports_spec_type(self._binary)
         self.supports_embeddings = bool(cfg.get("embeddings", False)) and supports_embeddings(
@@ -328,6 +336,7 @@ class ServerEngine:
             spec_type_supported=self._spec_type_supported,
             embeddings=self.supports_embeddings,
             embeddings_supported=self.supports_embeddings,
+            parallel=self.parallel,
         )
         # The handle is handed to Popen and must outlive this function.
         handle = open(log_path, "wb")  # noqa: SIM115
@@ -482,6 +491,41 @@ class ServerEngine:
         # the caller can consume it exactly like llama.cpp's own generator.
         response = self._post("/v1/chat/completions", body)
         return self._iter_sse(response)
+
+    #: The gateway may forward this engine's SSE bytes verbatim instead of
+    #: parsing and re-serialising every chunk in Python (see `chat_sse`).
+    passthrough_sse = True
+
+    def chat_sse(self, messages: list[dict], **kw: Any) -> Iterator[bytes]:
+        """Yield llama-server's SSE frames unchanged, as the client sent them.
+
+        The child already speaks the OpenAI wire format, so a gateway that
+        re-encodes each frame in Python pays for parsing and `json.dumps` on
+        every token for nothing. This path keeps the bytes.
+        """
+        params = {k: v for k, v in kw.items() if k in _SERVER_CHAT_PARAMS and v is not None}
+        for key, default in DEFAULT_SAMPLING.items():
+            params.setdefault(key, default)
+        body: dict[str, Any] = {"messages": messages, "stream": True, **params}
+        if kw.get("stream_options") is not None:
+            body["stream_options"] = kw["stream_options"]
+        response = self._post("/v1/chat/completions", body)
+        try:
+            # read1 returns what has already arrived instead of one SSE line at
+            # a time. Every yielded item costs the gateway a thread hop and a
+            # socket write, and on a 150 t/s model there are two lines per
+            # token; batching them is the difference between ~0.6 ms and ~0.05
+            # ms of overhead per token.
+            while True:
+                raw = response.read1(65536)
+                if not raw:
+                    return
+                yield raw
+                if b"[DONE]" in raw:
+                    return
+        finally:
+            with contextlib.suppress(OSError, AttributeError):
+                response.close()
 
     @staticmethod
     def _iter_sse(response) -> Iterator[dict]:

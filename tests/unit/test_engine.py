@@ -398,3 +398,53 @@ def test_moe_load_attempts_step_experts_down_then_go_cpu():
     assert cpu
     assert all(candidate.moe_cpu_layers == -1 for candidate in cpu)
     assert all(candidate.n_ubatch == 0 for candidate in cpu)
+
+
+def test_auto_uses_llama_server_when_it_sees_the_card(monkeypatch):
+    from vipera.backends import registry
+
+    monkeypatch.setattr(registry, "_AUTO_BACKEND", None)
+    monkeypatch.setattr("vipera.backends.registry.find_llama_tool", lambda *a, **kw: "/bin/ls")
+    monkeypatch.setattr(
+        "vipera.backends.server.probe_devices",
+        lambda binary: "Available devices:\n  CUDA0: NVIDIA GeForce GTX 1650\n",
+    )
+
+    backend, plan = resolve_backend(_plan(gpu_layers=14), "auto")
+
+    assert backend == "server"
+    assert plan.gpu_layers == 14
+
+
+def test_auto_falls_back_to_the_in_process_engine_without_cuda(monkeypatch):
+    from vipera.backends import registry
+
+    monkeypatch.setattr(registry, "_AUTO_BACKEND", None)
+    monkeypatch.setattr("vipera.backends.registry.find_llama_tool", lambda *a, **kw: "/bin/ls")
+    monkeypatch.setattr(
+        "vipera.backends.server.probe_devices", lambda binary: "Available devices:\n  (none)\n"
+    )
+
+    backend, plan = resolve_backend(_plan(gpu_layers=14), "auto")
+
+    assert backend == "inprocess"
+    assert plan.gpu_layers == 14
+
+
+def test_auto_is_probed_once_per_process(monkeypatch):
+    from vipera.backends import registry
+
+    calls = []
+
+    def _probe(binary):
+        calls.append(binary)
+        return "Available devices:\n  CUDA0: NVIDIA GeForce GTX 1650\n"
+
+    monkeypatch.setattr(registry, "_AUTO_BACKEND", None)
+    monkeypatch.setattr("vipera.backends.registry.find_llama_tool", lambda *a, **kw: "/bin/ls")
+    monkeypatch.setattr("vipera.backends.server.probe_devices", _probe)
+
+    resolve_backend(_plan(), "auto")
+    resolve_backend(_plan(), "auto")
+
+    assert len(calls) == 1

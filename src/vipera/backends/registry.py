@@ -19,6 +19,29 @@ from vipera.errors import BackendError
 from vipera.optimizer import OptimizerError, find_llama_tool
 from vipera.planner import Plan
 
+# Resolved `auto` for this process: "server", "inprocess", or None (not probed).
+_AUTO_BACKEND: str | None = None
+
+
+def _cuda_server_available() -> bool:
+    """Whether the llama-server here can actually run a plan on the GPU.
+
+    Probed once per process: two subprocess runs (~1 s on a self-contained
+    CUDA build) per mounted model would be pure startup cost. A build without
+    CUDA parses every flag and then ignores --gpu-layers, so `--list-devices`
+    rather than `--help` is the honest test.
+    """
+    if _AUTO_BACKEND is not None:
+        return _AUTO_BACKEND == "server"
+    try:
+        binary = find_llama_tool("server")
+        devices = server_backend.probe_devices(binary)
+    except (OptimizerError, OSError):
+        devices = None
+    available = server_backend.has_cuda_device(devices)
+    globals()["_AUTO_BACKEND"] = "server" if available else "inprocess"
+    return available
+
 
 def resolve_backend(plan: Plan, backend: str) -> tuple[str, Plan]:
     """Return a backend that can actually execute ``plan``.
@@ -31,6 +54,11 @@ def resolve_backend(plan: Plan, backend: str) -> tuple[str, Plan]:
     then ignores ``--gpu-layers``, which made the "upgrade" slower than the
     in-process split on the reference box. Probe devices before switching.
     """
+    # `auto` is resolved once per process: llama-server when it can see the
+    # card, the Python binding otherwise. Only probed when it is actually asked
+    # for, so an explicit backend never pays the two subprocess runs.
+    if backend == "auto":
+        backend = "server" if _cuda_server_available() else "inprocess"
     # The MoE upgrade below only makes sense for llama.cpp's two backends.
     if backend != "inprocess" or not plan.requires_server:
         return backend, plan

@@ -26,7 +26,14 @@ DEFAULT_CONFIG = {
     # Aliases to serve together (lazy-loaded); None means single-model mode.
     "models": None,
     "max_loaded": 2,
-    "backend": "inprocess",
+    # `auto` uses llama-server when a CUDA build can see the card (its C++
+    # engine is measurably faster than the Python binding), and falls back to
+    # the in-process engine otherwise.
+    "backend": "auto",
+    # Parallel slots on the server backend. 1 keeps one context, which is what
+    # a 4 GB card can hold; raise it for agent workloads with concurrent
+    # requests (each slot gets ctx/parallel of the window).
+    "parallel": 1,
     # HTTP layers to mount: `openai` for /v1/*, `ollama` for /api/*.
     "protocols": "openai",
     # Load the model with embedding support. Off by default: llama.cpp needs
@@ -76,6 +83,7 @@ _TYPE_MAP = {
     "n_ubatch": int,
     "max_loaded": int,
     "max_tokens": int,
+    "parallel": int,
     "shaping": bool,
     "tuning": bool,
     "temperature": float,
@@ -128,6 +136,8 @@ def _coerce(cfg: dict) -> dict:
         cfg["backend"] = DEFAULT_CONFIG["backend"]
     if cfg.get("profile") not in profile_names():
         cfg["profile"] = DEFAULT_CONFIG["profile"]
+    if cfg.get("parallel", 1) < 1:
+        cfg["parallel"] = DEFAULT_CONFIG["parallel"]
     requested = _split_protocols(cfg.get("protocols"))
     known = [name for name in requested if _is_known_protocol(name)]
     for name in requested:
@@ -167,6 +177,8 @@ def _coerce_strict(cfg: dict) -> dict:
     if "kv_cache" in cfg and cfg["kv_cache"] not in _KV_CACHE_TYPES:
         valid = ", ".join(sorted(_KV_CACHE_TYPES))
         raise ValueError(f"kv_cache: must be one of {valid}")
+    if "parallel" in cfg and int(cfg["parallel"]) < 1:
+        raise ValueError("parallel: must be at least 1")
     if "backend" in cfg and not _is_known_backend(cfg["backend"]):
         valid = ", ".join(backend_names())
         raise ValueError(f"backend: must be one of {valid}")

@@ -461,3 +461,53 @@ def test_ollama_tool_call_arguments_become_an_object():
     )
 
     assert calls == [{"function": {"name": "get", "arguments": {"city": "Hue"}}}]
+
+
+def test_streaming_passes_raw_sse_through_when_the_engine_speaks_it():
+    """llama-server already speaks the OpenAI wire format; re-encoding each
+    frame in Python is overhead on the token path."""
+
+    class RawEngine(FakeEngine):
+        passthrough_sse = True
+
+        def chat_sse(self, messages, **kw):
+            self.calls.append({"messages": messages, "raw": True, **kw})
+
+            def _gen():
+                yield b'data: {"choices":[{"delta":{"content":"hi"}}]}\n\n'
+                yield b'data: {"choices":[],"usage":{"prompt_tokens":3}}\n\n'
+                yield b"data: [DONE]\n\n"
+
+            return _gen()
+
+    engine = RawEngine()
+    client = _client(engine)
+
+    with client.stream(
+        "POST",
+        "/v1/chat/completions",
+        json={"model": "test-model", "messages": [{"role": "user", "content": "hi"}], "stream": True},
+    ) as r:
+        body = b"".join(r.iter_bytes()).decode()
+
+    assert body.count("[DONE]") == 1
+    assert '"content":"hi"' in body
+    assert engine.calls[-1]["raw"] is True
+    # The dict path must not have been used.
+    assert all("stream" not in call for call in engine.calls)
+
+
+def test_streaming_falls_back_to_re_encoding_for_other_engines():
+    engine = FakeEngine()
+    client = _client(engine)
+
+    with client.stream(
+        "POST",
+        "/v1/chat/completions",
+        json={"model": "test-model", "messages": [{"role": "user", "content": "hi"}], "stream": True},
+    ) as r:
+        body = b"".join(r.iter_bytes()).decode()
+
+    assert '"content": "hi"' in body
+    assert body.rstrip().endswith("data: [DONE]")
+    assert engine.calls[-1]["stream"] is True

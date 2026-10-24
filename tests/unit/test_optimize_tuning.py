@@ -148,3 +148,22 @@ def test_measured_cpu_only_is_respected(tmp_path, layers):
     store.record("m", _hw(), gpu_layers=layers, gen_tps=2.0)
 
     assert apply_tuning(_plan(), "m", _hw(), store).gpu_layers == layers
+
+
+def test_a_profile_measured_at_a_smaller_context_does_not_apply(tmp_path):
+    # An 8K split replayed into a 64K plan over-allocates the KV cache by 8x,
+    # which is a failed context on a 4 GB card; the formula's split is honest.
+    store = TuningStore(tmp_path / "t.json")
+    store.record("m", _hw(), gpu_layers=18, ctx=8192, gen_tps=6.0)
+
+    assert apply_tuning(_plan(context=65536, gpu_layers=9), "m", _hw(), store).gpu_layers == 9
+    # Same or smaller than the measured window still fits.
+    assert apply_tuning(_plan(context=4096, gpu_layers=9), "m", _hw(), store).gpu_layers == 18
+
+
+def test_a_profile_without_a_recorded_context_still_applies(tmp_path):
+    # Profiles written before ctx was stored have no window to compare against.
+    store = TuningStore(tmp_path / "t.json")
+    store.record("m", _hw(), gpu_layers=17, gen_tps=6.0)
+
+    assert apply_tuning(_plan(context=65536), "m", _hw(), store).gpu_layers == 17

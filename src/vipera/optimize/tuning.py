@@ -180,6 +180,12 @@ def apply_tuning(
         and float(free_now) + _FREE_VRAM_SLACK_GB < profile.free_gb
     ):
         return p
+    # The KV cache scales with the window, and the profile was measured at one
+    # specific context. Replaying an 8K split into a 64K plan over-allocates by
+    # the difference, which is exactly a failed context on a 4 GB card; the
+    # formula's smaller split is the honest answer there.
+    if profile.ctx > 0 and p.context > profile.ctx:
+        return p
     layers = profile.gpu_layers
     if p.n_layers > 0:
         layers = min(layers, p.n_layers)

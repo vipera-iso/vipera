@@ -149,11 +149,34 @@ def mount(app: FastAPI, gateway: Gateway) -> None:
                 )
                 messages = shaping.messages
 
+            # A backend that already speaks this wire format (llama-server does)
+            # can have its bytes forwarded unchanged: re-encoding every frame in
+            # Python is pure overhead on the token path.
+            raw_stream = req.stream and bool(
+                getattr(active, "passthrough_sse", False)
+            ) and hasattr(active, "chat_sse")
+
             if req.stream:
 
                 async def _stream():
                     usage = None
                     try:
+                        if raw_stream:
+                            frames = iter_chunks(
+                                gateway.lock,
+                                leased_iterator(
+                                    lease,
+                                    lambda: active.chat_sse(messages, **kwargs),
+                                ),
+                                on_start=lease.start,
+                            )
+                            async for frame in frames:
+                                yield frame
+                            if gateway.optimizer is not None:
+                                gateway.optimizer.note(
+                                    messages, tools=kwargs.get("tools"), shaping=shaping
+                                )
+                            return
                         chunks = iter_chunks(
                             gateway.lock,
                             leased_iterator(
@@ -181,6 +204,10 @@ def mount(app: FastAPI, gateway: Gateway) -> None:
                         # the response body mid-stream.
                         err = {"error": {"message": str(exc)}}
                         yield f"data: {json.dumps(err, ensure_ascii=False)}\n\n"
+                        # The upstream frames already carried their own DONE (or
+                        # none at all), so this path must not add another.
+                        if raw_stream:
+                            return
                     if gateway.optimizer is not None:
                         gateway.optimizer.note(
                             messages,
