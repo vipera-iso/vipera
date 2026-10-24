@@ -99,7 +99,8 @@ def test_build_wires_planner_and_engine(monkeypatch):
     engine = chat_cmd._build("m")
 
     assert isinstance(engine, StubEngine)
-    assert str(seen["path"]) == "/tmp/m.gguf"
+    # Compare as paths: str() of a Windows path uses backslashes.
+    assert Path(seen["path"]) == Path("/tmp/m.gguf")
     assert seen["plan"].context == 1024
 
 

@@ -75,13 +75,20 @@ def run_one(binary: Path, gguf: Path, eval_file: Path, ctx: int, chunks: int, ng
     # --chunks caps the PPL windows (llama default -1 = every window, which on
     # a 14B model over even a small sample can run for hours on this box).
     cmd = [
-        str(binary), "-m", str(gguf), "-f", str(eval_file),
-        "-c", str(ctx), "--chunks", str(chunks), "-ngl", str(ngl),
+        str(binary),
+        "-m",
+        str(gguf),
+        "-f",
+        str(eval_file),
+        "-c",
+        str(ctx),
+        "--chunks",
+        str(chunks),
+        "-ngl",
+        str(ngl),
     ]
     started = time.monotonic()
-    proc = subprocess.Popen(
-        cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True
-    )
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
     peak_rss = 0
     lines: list[str] = []
     sampler = psutil.Process(proc.pid) if psutil else None
@@ -121,9 +128,7 @@ def run_one(binary: Path, gguf: Path, eval_file: Path, ctx: int, chunks: int, ng
         "n_seq": int(m_chunk.group(4)) if m_chunk else None,
         # The -f path never prints the token count; derive scored tokens from
         # the chunking (each window scores ctx-1 tokens).
-        "scored_tok": (
-            int(m_chunk.group(1)) * (int(m_chunk.group(2)) - 1) if m_chunk else None
-        ),
+        "scored_tok": (int(m_chunk.group(1)) * (int(m_chunk.group(2)) - 1) if m_chunk else None),
         "pass_s": float(m_pass.group(1)) if m_pass else None,
         "ppl": float(m_ppl.group(1)) if m_ppl else None,
         "ppl_stderr": float(m_ppl.group(2)) if m_ppl and m_ppl.group(2) else None,
@@ -148,10 +153,14 @@ def main() -> int:
     ap.add_argument("--bin-dir", default=None, help="Directory with llama-perplexity")
     ap.add_argument("--ctx", type=int, default=512, help="Context for the PPL window")
     ap.add_argument(
-        "--chunks", type=int, default=20,
+        "--chunks",
+        type=int,
+        default=20,
         help="Max PPL windows (llama default -1 processes all; keep fixed to compare runs)",
     )
-    ap.add_argument("--ngl", type=int, default=0, help="GPU layers; 0 = pure CPU (fixed for stable PPL)")
+    ap.add_argument(
+        "--ngl", type=int, default=0, help="GPU layers; 0 = pure CPU (fixed for stable PPL)"
+    )
     ap.add_argument("--json", default=None, help="Also write results as JSON here")
     args = ap.parse_args()
 
@@ -164,7 +173,9 @@ def main() -> int:
     version = (v.stdout + v.stderr).splitlines()
     print(f"binary : {binary}")
     print(f"version: {version[0] if version else 'unknown'}")
-    print(f"eval   : {eval_file} (sha256 {sha256(eval_file)[:12]}, {eval_file.stat().st_size} bytes)")
+    print(
+        f"eval   : {eval_file} (sha256 {sha256(eval_file)[:12]}, {eval_file.stat().st_size} bytes)"
+    )
     print(f"ctx    : {args.ctx}  chunks: {args.chunks}  ngl: {args.ngl}\n")
     if not psutil:
         print("note: psutil missing -> peak RSS will not be reported\n")
@@ -189,7 +200,9 @@ def main() -> int:
     )
     for r in results:
         if r["ppl"] is None:
-            print(f"{r['model']:<44}{'FAILED':>16} rc={r['rc']} tail: {r.get('log_tail', '')[-200:]}")
+            print(
+                f"{r['model']:<44}{'FAILED':>16} rc={r['rc']} tail: {r.get('log_tail', '')[-200:]}"
+            )
             continue
         err = r["ppl_stderr"] or 0.0
         # Pre-3.12 f-strings cannot reuse the outer quote, and this repo

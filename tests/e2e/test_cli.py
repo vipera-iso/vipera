@@ -25,12 +25,17 @@ def run_cli(tmp_path):
         env = dict(os.environ)
         env["VIPERA_HOME"] = str(home or tmp_path)
         # Windows runners default to cp1252; the CLI prints box-drawing glyphs.
+        # The child writes UTF-8, so the parent must decode the pipes as UTF-8
+        # too: with `text=True` alone the reader thread decodes cp1252, raises,
+        # and leaves stdout/stderr as None.
         env["PYTHONIOENCODING"] = "utf-8"
         env.pop("PYTHONPATH", None)
         return subprocess.run(
             [sys.executable, "-m", "vipera", *args],
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             env=env,
             timeout=120,
         )

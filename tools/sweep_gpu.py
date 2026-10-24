@@ -148,7 +148,9 @@ def main() -> int:
     hw = detect()
     print(f"model : {model_path}")
     print(f"gpu   : {hw.gpu_name} ({hw.vram_free_gb:.2f} GB free of {hw.vram_total_gb:.2f})")
-    print(f"ctx   : {args.ctx}  kv: {args.kv}  threads: {args.threads or 'planner'}  max_tokens: {args.max_tokens}")
+    print(
+        f"ctx   : {args.ctx}  kv: {args.kv}  threads: {args.threads or 'planner'}  max_tokens: {args.max_tokens}"
+    )
     print()
 
     header = (

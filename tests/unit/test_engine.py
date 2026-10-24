@@ -268,7 +268,9 @@ def test_create_engine_selects_the_server_backend(monkeypatch):
 
 
 def test_resolve_backend_upgrades_an_moe_plan(monkeypatch, capsys):
-    monkeypatch.setattr("vipera.optimizer.find_llama_tool", lambda *a, **kw: "/bin/llama-server")
+    monkeypatch.setattr(
+        "vipera.backends.registry.find_llama_tool", lambda *a, **kw: "/bin/llama-server"
+    )
     monkeypatch.setattr("vipera.backends.server.supports_n_cpu_moe", lambda binary: True)
     monkeypatch.setattr(
         "vipera.backends.server.probe_devices",
@@ -288,7 +290,9 @@ def test_resolve_backend_upgrades_an_moe_plan(monkeypatch, capsys):
 def test_resolve_backend_refuses_a_cpu_only_server(monkeypatch, capsys):
     # A build can know -ncmoe and still be CPU-only (or miss its CUDA runtime
     # libraries). It must not displace a faster in-process GPU split.
-    monkeypatch.setattr("vipera.optimizer.find_llama_tool", lambda *a, **kw: "/bin/llama-server")
+    monkeypatch.setattr(
+        "vipera.backends.registry.find_llama_tool", lambda *a, **kw: "/bin/llama-server"
+    )
     monkeypatch.setattr("vipera.backends.server.supports_n_cpu_moe", lambda binary: True)
     monkeypatch.setattr(
         "vipera.backends.server.probe_devices",
@@ -311,7 +315,9 @@ def test_resolve_backend_refuses_a_cpu_only_server(monkeypatch, capsys):
 
 
 def test_resolve_backend_treats_a_failed_probe_as_no_cuda(monkeypatch, capsys):
-    monkeypatch.setattr("vipera.optimizer.find_llama_tool", lambda *a, **kw: "/bin/llama-server")
+    monkeypatch.setattr(
+        "vipera.backends.registry.find_llama_tool", lambda *a, **kw: "/bin/llama-server"
+    )
     monkeypatch.setattr("vipera.backends.server.supports_n_cpu_moe", lambda binary: True)
     monkeypatch.setattr("vipera.backends.server.probe_devices", lambda binary: None)
 
@@ -326,7 +332,9 @@ def test_resolve_backend_treats_a_failed_probe_as_no_cuda(monkeypatch, capsys):
 
 
 def test_resolve_backend_falls_back_when_ncmoe_is_missing(monkeypatch, capsys):
-    monkeypatch.setattr("vipera.optimizer.find_llama_tool", lambda *a, **kw: "/bin/llama-server")
+    monkeypatch.setattr(
+        "vipera.backends.registry.find_llama_tool", lambda *a, **kw: "/bin/llama-server"
+    )
     monkeypatch.setattr("vipera.backends.server.supports_n_cpu_moe", lambda binary: False)
 
     backend, plan = resolve_backend(

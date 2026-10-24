@@ -100,9 +100,7 @@ def main() -> int:
         changed = report_types(tensor_types(src), tensor_types(out), f"{args.out} vs source")
         if args.skip_data:
             return 3 if changed == 0 else 0
-        data_changed = report_data(
-            data_hashes(src, src_path), data_hashes(out, out_path), "data"
-        )
+        data_changed = report_data(data_hashes(src, src_path), data_hashes(out, out_path), "data")
         if changed == 0 or data_changed == 0:
             print(
                 "\nNO-OP: this run never reached the quantizer, so an importance\n"
