@@ -503,10 +503,12 @@ def test_server_command_keeps_one_context_per_slot():
     assert command[command.index("-c") + 1] == str(8192 * 4)
 
 
-def test_server_command_omits_np_for_a_single_slot():
+def test_server_command_always_states_the_slot_count():
+    # These builds default to 4 slots, and a slot only receives 1/N of -c, so
+    # an omitted -np would hand each request a quarter of the planned window.
     command = sb.server_command("/bin/llama-server", "/m.gguf", _plan(), 1, parallel=1)
 
-    assert "-np" not in command
+    assert command[command.index("-np") + 1] == "1"
     assert command[command.index("-c") + 1] == "8192"
 
 

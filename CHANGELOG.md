@@ -42,6 +42,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   otherwise. The `repeat_penalty` config key still drives `vipera chat`.
 
 ### Fixed
+- **The slot count is now always passed (`-np`).** Builds here default to four
+  slots and split `-c` across them, so a plan that promised 4096 tokens was
+  handing each request 1024. With `parallel: 4` the gateway now serves four
+  requests at once through continuous batching: **289 t/s aggregate against 145
+  t/s serialised**, single-request speed unchanged, while Ollama's default one
+  slot stays at ~163 t/s aggregate.
+- **The planner charges the prefill micro-batch against VRAM.** A 16-layer plan
+  that loaded fine still died with `CUDA error: out of memory` while prefilling
+  a ~3 300-token prompt; 15 layers at the same window took it at 37 t/s. The
+  reserve now grows with `-ub`, which lands the plan on the measured-safe side
+  of that cliff instead of one layer past it.
+- **Shaping no longer trusts 3 characters per token near the limit.** A log dump
+  estimated at 8 220 tokens and trimmed to 4 000 real ones tokenized to 5 933,
+  so llama-server answered 400 (`exceed_context_size_error`). When a trim lands
+  within 60% of the budget, the layer now asks the engine's own tokenizer and
+  re-shapes against the measured ratio; the same request returns 200.
 - **`apply_tuning` replayed a profile across context sizes.** The stored profile
   is a layer split measured at one `ctx`; applying it to a larger window
   over-allocates the KV cache by the ratio of the two, which is a failed context

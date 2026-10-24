@@ -19,6 +19,11 @@ from typing import Any
 from vipera.optimize.prefix import PrefixStats, cached_tokens, prefix_key
 from vipera.optimize.shaping import Shaping, shape
 
+# Fraction of the prompt budget above which the estimate is checked against the
+# real tokenizer. Below it the 3-chars/token estimate is not close enough to the
+# limit for its error to matter.
+_MEASURE_THRESHOLD = 0.6
+
 
 class OptimizeLayer:
     """Per-gateway optimization state (one instance per served app)."""
@@ -46,7 +51,43 @@ class OptimizeLayer:
         if not self.shaping_enabled:
             return Shaping(messages=list(messages))
         context = int(getattr(getattr(engine, "plan", None), "context", 0) or 0)
-        return shape(messages, budget_tokens=context, max_tokens=max_tokens, tools=tools)
+        shaping = shape(messages, budget_tokens=context, max_tokens=max_tokens, tools=tools)
+        if context <= 0:
+            return shaping
+        budget = context - max(0, max_tokens)
+        # The estimator assumes 3 characters per token. Vietnamese, CJK and
+        # random-looking text do worse (measured below 2 on a log dump), so a
+        # request it calls "fits" can still come back 400 from llama-server.
+        # When the trim lands near the limit, ask the tokenizer instead of
+        # trusting the estimate, and re-shape against the measured ratio.
+        for _ in range(2):
+            if shaping.estimated_after <= budget * _MEASURE_THRESHOLD:
+                break
+            exact = self._exact_tokens(engine, shaping.messages)
+            if not exact or exact <= budget:
+                break
+            scaled = int(budget * shaping.estimated_after / exact)
+            if scaled >= budget:
+                break
+            shaping = shape(
+                messages,
+                budget_tokens=scaled + max(0, max_tokens),
+                max_tokens=max_tokens,
+                tools=tools,
+            )
+        return shaping
+
+    @staticmethod
+    def _exact_tokens(engine: Any, messages: list[dict]) -> int:
+        """Token count from the engine's own tokenizer, or 0 when unavailable."""
+        tokenize = getattr(engine, "tokenize", None)
+        if tokenize is None:
+            return 0
+        text = "\n".join(str(m.get("content") or "") for m in messages)
+        try:
+            return len(tokenize(text))
+        except Exception:  # noqa: BLE001 - a tokenizer hiccup must not fail the request
+            return 0
 
     def note(
         self,

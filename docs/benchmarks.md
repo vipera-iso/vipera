@@ -202,6 +202,35 @@ why every round here hits all three arms. What the comparison supports:
 Both numbers are for one box. Run the same three arms on yours before
 concluding anything about your hardware.
 
+### Concurrent requests: slots vs a queue
+
+qwen2.5-0.5B Q4_K_M, `ctx 4096`, four streaming requests of 128 tokens issued at
+the same time, aggregate = tokens / wall clock:
+
+| Arm | Aggregate | Per client |
+|---|---:|---:|
+| Vipera, `parallel: 1` (serialised) | 145 t/s | 162 t/s each, one after another |
+| **Vipera, `parallel: 4`** | **289 t/s** | ~92 t/s each, interleaved |
+| Ollama 0.40.8 (`NUM_PARALLEL=1`) | 163 t/s | 165 t/s each, one after another |
+
+One request is unaffected by the slot count; the gain is in what an agent loop
+with four tools in flight actually experiences. Slots cost KV memory
+(`-c ctx × parallel`), which is why the default stays at 1 on a 4 GB card: four
+slots of a hybrid 14B do not fit, and the load would fall back a rung.
+
+### Long prompts on a hybrid split
+
+Hermes-4-14B Q3_K_M, 18/40 layers, `ctx 4096`, a 24.6 KB log dump:
+
+| Request | Result |
+|---|---|
+| a trimmed 3 978-token prompt | 200; 30.9 s of prefill for the uncached 1 020 tokens (33 t/s), 32 tokens out in 38.4 s total |
+| same, before the planner charged `-ub` | child aborted: `CUDA error: out of memory` |
+| same, before shaping measured tokens | 400 `exceed_context_size_error` |
+
+Decode after the load sits at 6.12 t/s against Ollama's 4.56 t/s at 14/40
+layers, both on the same card.
+
 ## Method
 
 ```bash

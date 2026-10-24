@@ -4,6 +4,7 @@ import types
 
 from fastapi.testclient import TestClient
 
+from vipera.optimize.layer import OptimizeLayer
 from vipera.server import build_app
 
 SYSTEM = {"role": "system", "content": "you are a careful assistant."}
@@ -161,3 +162,40 @@ def test_a_gateway_without_the_layer_still_serves(monkeypatch):
     assert engine.calls[-1]["messages"] == messages
     # No layer, no counters to report.
     assert "optimize" not in client.get("/health").json()
+
+
+class _TokenizerEngine:
+    """An engine whose tokenizer disagrees with the 3-chars/token estimate."""
+
+    def __init__(self, context=4096, chars_per_token=1.8):
+        self.plan = types.SimpleNamespace(context=context)
+        self.chars_per_token = chars_per_token
+        self.calls = 0
+
+    def tokenize(self, text):
+        self.calls += 1
+        return [0] * int(len(text) / self.chars_per_token)
+
+
+def test_shaping_defers_to_the_tokenizer_when_the_estimate_is_near_the_limit():
+    # A log dump tokenizes at ~1.8 chars/token; the 3-chars estimate would leave
+    # the prompt 1.7x over the window and llama-server would answer 400.
+    engine = _TokenizerEngine()
+    blob = "abcdefgh " * 2600  # ~23.4k chars, estimates to ~7.8k tokens
+    messages = [{"role": "user", "content": blob}]
+
+    shaping = OptimizeLayer(shaping=True).prepare(engine, messages, max_tokens=32)
+
+    assert engine.calls >= 1
+    assert shaping.truncated == 1
+    real = len(engine.tokenize("\n".join(m["content"] for m in shaping.messages)))
+    assert real <= 4096 - 32
+
+
+def test_shaping_does_not_tokenize_a_request_that_fits_comfortably():
+    engine = _TokenizerEngine()
+    messages = [{"role": "user", "content": "short question"}]
+
+    OptimizeLayer(shaping=True).prepare(engine, messages, max_tokens=32)
+
+    assert engine.calls == 0

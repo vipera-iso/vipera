@@ -56,6 +56,18 @@ def profile_names() -> tuple[str, ...]:
 # measured figure, big cards still keep ~1 GB for their larger compute buffers.
 _VRAM_RESERVE_BASE_GB = 0.3
 _VRAM_RESERVE_FRACTION = 0.07
+# Compute buffers grow with the micro-batch, and they are allocated on the card
+# for the whole load. On the reference 4 GB card a 16-layer plan at -ub 512
+# loaded fine but died with "CUDA error: out of memory" while prefilling a
+# ~3300-token prompt; 15 layers at -ub 896 took the same prompt at 37.8 t/s.
+# Charging the ubatch here is what keeps the plan on the safe side of that
+# cliff, and it moves in the right direction when a caller asks for a smaller
+# batch. Same coefficient the MoE path measured (0.20 GB base + this per token).
+_RESERVE_PER_UBATCH_GB = 0.00022
+# The dense plan's micro-batch: config n_batch, capped the same way
+# server_command caps it, so the reserve below charges the buffer the child will
+# actually allocate.
+_DENSE_UBATCH = 512
 # Extra reserve when the plan cannot use flash attention. Without FA llama.cpp
 # allocates a full KQ matrix per batch instead of streaming it, which on the same
 # 4 GB card cuts the offload from 14 layers to 10 (0.9 GB of weights).
@@ -258,6 +270,13 @@ def plan(
     # scratch space llama.cpp needs on the card.
     flash_attn_on_gpu = kv_cache in _FA_REQUIRED_KV or hw.vram_total_gb > 4
     reserve_gb = max(_VRAM_RESERVE_BASE_GB, min(1.0, _VRAM_RESERVE_FRACTION * hw.vram_total_gb))
+    # Micro-batch first: the prefill compute buffer has to fit beside the
+    # weights, and that is what a long prompt runs out of room on.
+    dense_ubatch = n_ubatch if n_ubatch > 0 else min(n_batch, _DENSE_UBATCH)
+    # A MoE plan already charges its own ubatch overhead per expert layer
+    # (`_moe_cpu_layers`); charging it again here would only drop expert layers.
+    if want_gpu and not meta.get("expert_layer_bytes"):
+        reserve_gb += _RESERVE_PER_UBATCH_GB * dense_ubatch
     if want_gpu and not flash_attn_on_gpu:
         reserve_gb += _NO_FA_RESERVE_GB
     safe_vram = max(0.0, hw.vram_free_gb - reserve_gb)
@@ -372,6 +391,8 @@ def plan(
         kv_cache_gb=kv_cache_gb,
         kv_layers=kv_layers,
         moe_cpu_layers=moe_cpu_layers,
-        n_ubatch=moe_ubatch,
+        # A MoE plan has its own -ub (it is the expert-placement lever); a dense
+        # plan keeps the prefill batch it was budgeted for.
+        n_ubatch=moe_ubatch if moe_cpu_layers >= 0 else dense_ubatch,
         n_layers=n_layers,
     )

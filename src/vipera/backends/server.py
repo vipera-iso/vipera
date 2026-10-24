@@ -223,8 +223,10 @@ def server_command(
         "on" if plan.flash_attn else "off",
         "--jinja",
     ]
-    if parallel > 1:
-        command.extend(["-np", str(parallel)])
+    # Always explicit: llama.cpp builds here default to 4 slots, and a slot only
+    # gets 1/N of `-c`, so a plan that promised 4096 tokens would hand each
+    # request 1024. Passing -np 1 is what makes `-c` mean what the planner said.
+    command.extend(["-np", str(max(1, parallel))])
     if fit_supported is None:
         fit_supported = _supports_fit(binary)
     if fit_supported:
