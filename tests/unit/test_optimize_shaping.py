@@ -1,4 +1,4 @@
-from vipera.optimize.shaping import estimate_tokens, shape
+from vipera.optimize.shaping import estimate_tokens, estimate_tool_tokens, shape
 
 SYSTEM = {"role": "system", "content": "you are a careful assistant."}
 
@@ -100,6 +100,52 @@ def test_multiple_leading_system_messages_are_all_protected():
 
     assert out.messages[0]["content"] == "first rule"
     assert out.messages[1]["content"] == "second rule"
+
+
+def test_a_tool_schema_is_charged_against_the_budget():
+    # llama.cpp renders the schema into the prompt, so a request that fits as
+    # messages alone can still overflow the context once tools are declared.
+    messages = _history(6, chars=400)
+    tools = [
+        {
+            "type": "function",
+            "function": {"name": "read", "description": "d" * 3000, "parameters": {}},
+        }
+    ]
+    budget = estimate_tokens(messages) + 300
+
+    assert shape(messages, budget_tokens=budget, max_tokens=0).applied is False
+
+    out = shape(messages, budget_tokens=budget, max_tokens=0, tools=tools)
+
+    assert out.applied is True
+    assert estimate_tokens(out.messages) <= out.budget_tokens
+    assert estimate_tokens(out.messages) + estimate_tool_tokens(tools) <= budget
+
+
+def test_the_tool_schema_is_part_of_the_estimated_prompt():
+    # /health's cache rate divides by these estimates, so the schema has to be
+    # in them or a tool-heavy agent loop looks cheaper than it is.
+    messages = _history(1)
+    tools = [{"type": "function", "function": {"name": "read", "description": "d" * 600}}]
+
+    out = shape(messages, budget_tokens=8192, max_tokens=128, tools=tools)
+
+    assert out.applied is False
+    assert out.estimated_before == estimate_tokens(messages) + estimate_tool_tokens(tools)
+    assert out.estimated_after == out.estimated_before
+
+
+def test_a_tool_schema_too_large_for_the_context_leaves_messages_alone():
+    # Trimming messages cannot make the tools fit; the caller must see the
+    # request unchanged rather than history silently deleted for nothing.
+    messages = _history(4, chars=400)
+    tools = [{"type": "function", "function": {"description": "d" * 6000}}]
+
+    out = shape(messages, budget_tokens=2048, max_tokens=256, tools=tools)
+
+    assert out.messages == messages
+    assert out.applied is False
 
 
 def test_shaping_never_loops_on_a_message_that_cannot_shrink():

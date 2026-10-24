@@ -46,7 +46,7 @@ class OptimizeLayer:
         if not self.shaping_enabled:
             return Shaping(messages=list(messages))
         context = int(getattr(getattr(engine, "plan", None), "context", 0) or 0)
-        return shape(messages, budget_tokens=context, max_tokens=max_tokens)
+        return shape(messages, budget_tokens=context, max_tokens=max_tokens, tools=tools)
 
     def note(
         self,

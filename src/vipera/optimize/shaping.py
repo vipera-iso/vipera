@@ -69,6 +69,19 @@ def estimate_tokens(messages: list[dict]) -> int:
     return sum(_content_tokens(m) for m in messages)
 
 
+def estimate_tool_tokens(tools: list[dict] | None) -> int:
+    """Tokens the tool definitions add to the prompt.
+
+    llama.cpp renders every schema into the prompt before the messages, so a
+    large tool set consumes the same context as history does. It cannot be
+    trimmed (the model then stops calling the tool), so it has to reduce the
+    room left for messages instead.
+    """
+    if not tools:
+        return 0
+    return len(str(tools)) // _CHARS_PER_TOKEN + _OVERHEAD_TOKENS
+
+
 def _split(messages: list[dict]) -> tuple[int, int]:
     """Return (end of the protected system block, start of the current turn).
 
@@ -106,7 +119,14 @@ def _shrink(msg: dict, excess_tokens: int) -> bool:
     keep_chars = len(content) - max(1, excess_tokens) * _CHARS_PER_TOKEN
     if keep_chars >= len(content):
         return False
-    msg["content"] = _cut(content, keep_chars)
+    # _cut keeps that many characters of content and then appends the marker.
+    # Reserve the marker's length here, or the message stays a marker-length
+    # over budget and the request never actually fits.
+    marker = _marker(max(0, len(content) - keep_chars))
+    target = max(1, keep_chars - len(marker))
+    if target >= len(content):
+        return False
+    msg["content"] = _cut(content, target)
     return True
 
 
@@ -115,27 +135,35 @@ def shape(
     *,
     budget_tokens: int,
     max_tokens: int = 0,
+    tools: list[dict] | None = None,
 ) -> Shaping:
     """Trim ``messages`` to ``budget_tokens``; return them untouched when they fit.
 
     ``budget_tokens`` is the model's context and ``max_tokens`` the room the
     answer needs, so the prompt budget is the difference (minus a small
-    reserve). A non-positive budget means "no shaping" — the caller had no plan
+    reserve). ``tools`` is the request's tool schema: it is charged against the
+    same budget because the backend renders it into the prompt, and it is never
+    trimmed. A non-positive budget means "no shaping" — the caller had no plan
     to read a context from.
     """
     if not messages or budget_tokens <= 0:
         return Shaping(messages=list(messages))
 
+    tool_tokens = estimate_tool_tokens(tools)
+    # The whole prompt budget, tools included: what estimated_before/after are
+    # comparable to. Only the messages can be trimmed, so they get what is left.
     prompt_budget = budget_tokens - max(0, max_tokens) - _RESERVE_TOKENS
-    if prompt_budget <= 0:
+    message_budget = prompt_budget - tool_tokens
+    if message_budget <= 0:
+        # Even the tools do not fit; trimming messages cannot help.
         return Shaping(messages=list(messages))
 
     before = estimate_tokens(messages)
-    if before <= prompt_budget:
+    if before <= message_budget:
         return Shaping(
             messages=list(messages),
-            estimated_before=before,
-            estimated_after=before,
+            estimated_before=before + tool_tokens,
+            estimated_after=before + tool_tokens,
             budget_tokens=prompt_budget,
         )
 
@@ -148,7 +176,7 @@ def shape(
     # A 200 KB tool result the client resent by accident is a blob, not
     # conversation: cutting it keeps the turn that refers to it answerable,
     # where dropping it whole would not.
-    cap_tokens = max(64, prompt_budget // 4)
+    cap_tokens = max(64, message_budget // 4)
     for idx in sorted(
         range(head_end, turn_start), key=lambda i: _content_tokens(shaped[i]), reverse=True
     ):
@@ -161,7 +189,7 @@ def shape(
     # 2. Still over: give up the oldest history, whole messages at a time. The
     # system block and the current turn stay: losing either changes the answer,
     # not just its length.
-    while estimate_tokens(shaped) > prompt_budget and turn_start > head_end:
+    while estimate_tokens(shaped) > message_budget and turn_start > head_end:
         del shaped[head_end]
         turn_start -= 1
         dropped += 1
@@ -170,7 +198,7 @@ def shape(
     # its head and tail so the instructions and the actual question survive, and
     # stop as soon as the request fits or nothing more can be removed.
     for _ in range(len(shaped)):
-        excess = estimate_tokens(shaped) - prompt_budget
+        excess = estimate_tokens(shaped) - message_budget
         if excess <= 0:
             break
         target = next(
@@ -185,7 +213,7 @@ def shape(
         messages=shaped,
         dropped=dropped,
         truncated=truncated,
-        estimated_before=before,
-        estimated_after=estimate_tokens(shaped),
+        estimated_before=before + tool_tokens,
+        estimated_after=estimate_tokens(shaped) + tool_tokens,
         budget_tokens=prompt_budget,
     )

@@ -87,6 +87,28 @@ def test_health_reports_prefix_reuse_and_cache_hits():
     assert stats["cache_rate"] > 0
 
 
+def test_the_tool_schema_reaches_the_shaper():
+    # The layer used to accept `tools` and drop it, so a large schema pushed the
+    # rendered prompt past the context without anything being trimmed.
+    engine = FakeEngine(context=1024)
+    client = _client(engine)
+    messages = _history(3, chars=400)
+    tools = [
+        {
+            "type": "function",
+            "function": {"name": "read", "description": "d" * 1200, "parameters": {}},
+        }
+    ]
+
+    client.post(
+        "/v1/chat/completions",
+        json={"messages": messages, "max_tokens": 128, "tools": tools},
+    )
+
+    assert engine.calls[-1]["tools"] == tools
+    assert len(engine.calls[-1]["messages"]) < len(messages)
+
+
 def test_the_ollama_layer_shapes_and_counts_too():
     engine = FakeEngine()
     client = TestClient(build_app(engine, "test-model", protocols=["ollama"]))
