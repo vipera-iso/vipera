@@ -220,7 +220,9 @@ def test_chat_drops_unknown_and_unset_params(fake_llama):
     assert kwargs["temperature"] == pytest.approx(0.7)
     assert kwargs["max_tokens"] == 2048
     assert kwargs["top_p"] == pytest.approx(0.95)
-    assert kwargs["repeat_penalty"] == pytest.approx(1.1)
+    # repeat_penalty is not a default: it costs ~10% decode on llama.cpp's
+    # sampler and no OpenAI client sends it. llama.cpp's 1.0 applies.
+    assert "repeat_penalty" not in kwargs
 
 
 def test_tokenize_goes_through_the_loaded_model(fake_llama):

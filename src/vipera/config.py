@@ -53,11 +53,14 @@ DEFAULT_CONFIG = {
     "max_tokens": 2048,
     "top_p": 0.95,
     "repeat_penalty": 1.1,
-    # llama-server's own still-free speed lever: --spec-type ngram-*. The
-    # in-process engine has no equivalent (llama-cpp-python's prompt-lookup
-    # draft measured -29% decode on this box), so the value only applies to the
-    # `server` backend. "none" turns it off.
-    "spec_type": "ngram-map-k",
+    # llama-server's draft-free speculation: --spec-type ngram-*. Off by
+    # default. The n-gram drafter only pays where the output repeats the input:
+    # measured +37% on a prompt the model rewrites, -1% on 14B prose and -2.1%
+    # on 0.5B prose (interleaved A/B, 3 runs each). A default has to hold for
+    # both, and a rewrite workload can turn it on. Applies to the `server`
+    # backend only; the in-process engine has no equivalent (llama-cpp-python's
+    # prompt-lookup draft measured -29% decode on this box).
+    "spec_type": "none",
     # The optimization layer (vipera.optimize). `shaping` trims a request that
     # is larger than the loaded context instead of letting llama.cpp cut the
     # system prompt itself; `tuning` reuses the split a previous `vipera bench`

@@ -258,6 +258,43 @@ def server_command(
     return command
 
 
+class _SseStream:
+    """The child's SSE response as a blocking iterator that can be closed.
+
+    `read1` returns whatever has already arrived instead of one SSE line, so a
+    single read carries several tokens when the model is fast. `close()` is
+    callable from another thread on purpose: the gateway closes it to unblock a
+    reader parked inside a read when the client goes away, and only then hands
+    the slot to the next request.
+    """
+
+    def __init__(self, response) -> None:
+        self._response = response
+        self._finished = False
+
+    def __iter__(self) -> _SseStream:
+        return self
+
+    def __next__(self) -> bytes:
+        if self._finished:
+            raise StopIteration
+        chunk = self._response.read1(65536)
+        if not chunk:
+            self.close()
+            raise StopIteration
+        if b"[DONE]" in chunk:
+            # The last frame is already in hand; nobody will read more.
+            self._finished = True
+            with contextlib.suppress(OSError, AttributeError):
+                self._response.close()
+        return chunk
+
+    def close(self) -> None:
+        self._finished = True
+        with contextlib.suppress(OSError, AttributeError):
+            self._response.close()
+
+
 class ServerEngine:
     """Engine-compatible client for a `llama-server` child process."""
 
@@ -496,8 +533,8 @@ class ServerEngine:
     #: parsing and re-serialising every chunk in Python (see `chat_sse`).
     passthrough_sse = True
 
-    def chat_sse(self, messages: list[dict], **kw: Any) -> Iterator[bytes]:
-        """Yield llama-server's SSE frames unchanged, as the client sent them.
+    def chat_sse(self, messages: list[dict], **kw: Any) -> _SseStream:
+        """Return llama-server's SSE frames unchanged, as the client sent them.
 
         The child already speaks the OpenAI wire format, so a gateway that
         re-encodes each frame in Python pays for parsing and `json.dumps` on
@@ -509,23 +546,7 @@ class ServerEngine:
         body: dict[str, Any] = {"messages": messages, "stream": True, **params}
         if kw.get("stream_options") is not None:
             body["stream_options"] = kw["stream_options"]
-        response = self._post("/v1/chat/completions", body)
-        try:
-            # read1 returns what has already arrived instead of one SSE line at
-            # a time. Every yielded item costs the gateway a thread hop and a
-            # socket write, and on a 150 t/s model there are two lines per
-            # token; batching them is the difference between ~0.6 ms and ~0.05
-            # ms of overhead per token.
-            while True:
-                raw = response.read1(65536)
-                if not raw:
-                    return
-                yield raw
-                if b"[DONE]" in raw:
-                    return
-        finally:
-            with contextlib.suppress(OSError, AttributeError):
-                response.close()
+        return _SseStream(self._post("/v1/chat/completions", body))
 
     @staticmethod
     def _iter_sse(response) -> Iterator[dict]:

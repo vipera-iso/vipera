@@ -243,3 +243,9 @@ def test_every_declared_protocol_is_accepted(protocol):
 def test_coerce_strict_rejects_unknown_protocol():
     with pytest.raises(ValueError, match="protocols"):
         cfg_mod._coerce_strict({"protocols": "mcp"})
+
+
+def test_speculative_ngram_is_off_by_default():
+    # +37% on rewrite prompts, -1% / -2.1% on fresh prose: a default has to
+    # hold for both, so the win stays opt-in.
+    assert cfg_mod.DEFAULT_CONFIG["spec_type"] == "none"

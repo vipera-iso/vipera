@@ -177,28 +177,27 @@ fan. Medians of 5 rounds for the 0.5B and 3 for the 14B, both fully warmed
 
 | Arm | qwen2.5-0.5B Q4_K_M (24/24 layers) | Hermes-4-14B Q3_K_M (16/40 layers) |
 |---|---:|---:|
-| Vipera, `backend: auto` → `server` (HTTP) | 178.3 t/s | 5.99 t/s |
-| the same `llama-server` child, called directly | 197.6 t/s | 6.02 t/s |
-| Ollama 0.40.8, defaults | 206.5 t/s | 4.56 t/s |
+| Vipera, `backend: auto` → `server` (HTTP) | 166.2 t/s | 5.99 t/s |
+| the same `llama-server` child, called directly | 169.1 t/s | 6.02 t/s |
+| Ollama 0.40.8, defaults | 165.6 t/s | 4.56 t/s |
 
-Reading it:
+Absolute numbers drift with the card's thermal state (the same Ollama arm read
+205 t/s when the box was cool and 165 t/s an hour of benchmarks later), which is
+why every round here hits all three arms. What the comparison supports:
 
-- **The gateway layer costs ~10% on a 150 t/s model and ~0.5% on the 14B.**
-  Every streamed frame crosses a worker thread and a socket write; at 5.3 ms per
-  token the tiny model feels that, at 167 ms per token the 14B does not. Raw
-  SSE passthrough (the child's bytes are forwarded unchanged instead of parsed
-  and re-serialised) plus `read1` batching moved this arm from 167.8 to 178.3
-  t/s; the remaining 10% is the proxy hop, not JSON.
-- **Ollama's `llama.cpp` build is ~4.5% faster than b11827** on the same card
-  and the same flags (206.5 vs 197.6 t/s). That is a build difference, not a
-  gateway one, and it is the whole of Ollama's lead on a model that fits.
-- **On the hybrid model Vipera is 31% faster** because of placement, not
-  kernels: it planned 16/40 layers at 3.42 GB used against Ollama's 14/40 at
-  2.67 GB, and decoding a 14B from system RAM is bandwidth-bound, so each extra
-  GPU layer pays. Ollama can close the gap with `OLLAMA_FLASH_ATTENTION=1`,
-  `OLLAMA_KV_CACHE_TYPE=q4_0` and `num_gpu=18`: an earlier run on this card
-  measured 6.13 vs 5.95 t/s that way — but that is three settings a user has to
-  know, and none of them is on by default.
+- **The gateway costs ~1%, not 10%.** Before the SSE relay it *was* ~10% at
+  this model's 5 ms/token; one reader thread per stream instead of a thread
+  round trip per frame removed it. On the 14B it was already ~0.5%.
+- **Two Vipera defaults were the rest of the gap, and both were wrong for an
+  OpenAI-shaped API.** `--spec-type ngram-map-k` cost 2.1% on fresh prose
+  (204.4 → 200.2 t/s, interleaved) and is now opt-in; injecting
+  `repeat_penalty: 1.1` into every request cost **10%** (167.4 → 150.6 t/s) and
+  is now left to llama.cpp's own 1.0. Ollama charges neither.
+- **Vipera's planner still wins where the model does not fit**: 16/40 layers at
+  3.42 GB against Ollama's 14/40 at 2.67 GB, and a 14B decoded from system RAM
+  is bandwidth-bound, so each extra GPU layer pays: **+31%**. Ollama closes it
+  with `OLLAMA_FLASH_ATTENTION=1`, `OLLAMA_KV_CACHE_TYPE=q4_0` and
+  `num_gpu=18` — three settings a user has to know, none on by default.
 
 Both numbers are for one box. Run the same three arms on yours before
 concluding anything about your hardware.

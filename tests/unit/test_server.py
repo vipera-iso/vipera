@@ -737,3 +737,88 @@ def test_a_finished_stream_gives_its_pool_reference_back():
 
     assert pool.releases == 1
     assert pool.in_flight == 0
+
+
+# -- SSE relay ---------------------------------------------------------------
+
+
+def _drain(agen):
+    async def _collect():
+        return [item async for item in agen]
+
+    return asyncio.run(_collect())
+
+
+def test_relay_yields_every_item_and_releases_the_slot():
+    from vipera.protocols.streaming import relay_chunks
+
+    closed = []
+
+    async def _run():
+        lock = asyncio.Lock()
+        items = [b"a", b"b", b"c"]
+        got = [item async for item in relay_chunks(lock, lambda: iter(items), on_close=lambda: closed.append(1))]
+        return got, lock.locked()
+
+    got, locked = asyncio.run(_run())
+
+    assert got == [b"a", b"b", b"c"]
+    assert locked is False
+    assert closed == [1]
+
+
+def test_relay_closes_a_parked_reader_before_releasing_the_slot():
+    """A client that disconnects mid-stream must not hand a busy context on."""
+
+    from vipera.protocols.streaming import relay_chunks
+
+    events = []
+
+    class _Stream:
+        def __init__(self):
+            self.first = True
+            self.gate = threading.Event()
+
+        def __iter__(self):
+            return self
+
+        def __next__(self):
+            if self.first:
+                self.first = False
+                return b"data: one\n\n"
+            # Parks here like a socket read with no data yet.
+            assert self.gate.wait(5), "close() never unblocked the reader"
+            raise StopIteration
+
+        def close(self):
+            events.append("closed")
+            self.gate.set()
+
+    async def _run():
+        lock = asyncio.Lock()
+        agen = relay_chunks(lock, _Stream)
+        assert await agen.__anext__() == b"data: one\n\n"
+        await agen.aclose()
+        return lock.locked()
+
+    locked = asyncio.run(_run())
+
+    assert events == ["closed"]
+    assert locked is False
+
+
+def test_relay_surfaces_a_reader_error():
+    from vipera.protocols.streaming import relay_chunks
+
+    class _Boom:
+        def __iter__(self):
+            raise RuntimeError("child died")
+
+    async def _run():
+        lock = asyncio.Lock()
+        with pytest.raises(RuntimeError, match="child died"):
+            async for _ in relay_chunks(lock, _Boom):
+                pass
+        return lock.locked()
+
+    assert asyncio.run(_run()) is False

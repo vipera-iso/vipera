@@ -135,7 +135,7 @@ Request body:
 | `top_p` | `number` | `0.95` | (0, 1]. Forwarded. |
 | `top_k` | `integer \| null` | `null` | ≥ 0. Forwarded when set. |
 | `min_p` | `number \| null` | `null` | 0–1. Forwarded when set. |
-| `repeat_penalty` | `number` | `1.1` | Forwarded. |
+| `repeat_penalty` | `number \| null` | `null` | Forwarded when set; otherwise llama.cpp's own 1.0 applies. Injecting 1.1 here cost ~10% of decode on a small model, so it is not a default. |
 | `presence_penalty` | `number \| null` | `null` | −2–2. Forwarded when set. |
 | `frequency_penalty` | `number \| null` | `null` | −2–2. Forwarded when set. |
 | `stop` | `string \| array \| null` | `null` | Stop sequence(s). Forwarded. |

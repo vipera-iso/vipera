@@ -21,12 +21,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (`-np`). Above 1 the gateway admits that many concurrent requests through a
   semaphore instead of one at a time, and the child gets `-c ctx × parallel`
   because llama.cpp splits the window across slots.
-- **Raw SSE passthrough.** A backend that already speaks the OpenAI wire format
-  now forwards its bytes unchanged (`ServerEngine.chat_sse`) instead of the
-  gateway parsing and re-serialising every frame, and it reads with `read1` so
-  one thread hop carries whatever has arrived rather than a single line.
-  Measured on the reference box: 167.8 → 178.3 t/s at 0.5B, i.e. ~10% gateway
-  overhead where there had been ~18%; on a 6 t/s 14B the overhead is ~0.5%.
+- **Raw SSE passthrough with a single reader thread.** A backend that already
+  speaks the OpenAI wire format forwards its bytes unchanged
+  (`ServerEngine.chat_sse`) instead of the gateway parsing and re-serialising
+  every frame, it reads with `read1` so one read carries whatever has arrived
+  rather than a single line, and `relay_chunks` pumps the body from one
+  dedicated thread instead of paying a thread round trip per frame. Gateway
+  share of decode time on a 0.5B: **~10% → ~1%** (166.2 t/s through Vipera vs
+  169.1 t/s calling the child directly). On a 6 t/s 14B it was already ~0.5%.
+
+### Changed
+- **`spec_type` defaults to `none`.** The n-gram drafter pays only where the
+  output repeats the input: measured +37% on a rewrite prompt, −1% on 14B prose
+  and **−2.1%** on 0.5B prose (interleaved A/B). A default has to hold for
+  both, so the win is now opt-in.
+- **No default `repeat_penalty`.** The HTTP layer used to fill in 1.1 for every
+  request; on llama.cpp that sampling pass cost **10%** of decode on a small
+  model (167.4 → 150.6 t/s) for a parameter an OpenAI client never sends. It is
+  passed through when a client asks for it, and llama.cpp's own 1.0 applies
+  otherwise. The `repeat_penalty` config key still drives `vipera chat`.
 
 ### Fixed
 - **`apply_tuning` replayed a profile across context sizes.** The stored profile

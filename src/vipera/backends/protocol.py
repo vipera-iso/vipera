@@ -57,9 +57,13 @@ CHAT_PARAMS = frozenset(
     }
 )
 
+# Filled in when a caller sends nothing. `repeat_penalty` is deliberately not
+# here: llama.cpp's own default is 1.0, an OpenAI client never sends the
+# parameter, and on the reference box charging it on every request cost ~10%
+# of decode (sampler work per token) for a setting nobody asked for. A caller
+# that wants it passes it explicitly.
 DEFAULT_SAMPLING = {
     "temperature": 0.7,
     "max_tokens": 2048,
     "top_p": 0.95,
-    "repeat_penalty": 1.1,
 }

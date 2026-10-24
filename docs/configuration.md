@@ -71,13 +71,13 @@ to the defaults. Corrupt JSON does not produce an error.
 | `ctx` | `int` | `8192` | `serve start`, `chat` | Context size for the planner. `bench run` uses its own `--ctx` list. |
 | `kv_cache` | `str` | `q8_0` | `serve start`, `chat`, `bench` | KV cache type: `f32`, `bf16`, `f16`, `q8_0`, `q5_1`, `q5_0`, `q4_1`, `q4_0`, `iq4_nl`. Honored on CPU-only plans too; flash attention is enabled only for the quantized types, which require it. |
 | `n_batch` | `int` | `512` | `serve start`, `chat`, `bench` | Prompt batch size; capped by the plan. |
-| `spec_type` | `str` | `ngram-map-k` | `serve start`, `chat`, `bench` with `backend: server` | llama-server's `--spec-type`, i.e. draft-free n-gram speculation. `none` turns it off; `ngram-simple`, `ngram-map-k`, `ngram-map-k4v`, `ngram-mod`, `ngram-cache` are the draft-free values. Measured +37% decode when the answer rewrites text from the prompt, -1% on fresh prose; ignored by `inprocess` (no equivalent exists: the Python binding's prompt lookup measured -29%). Background in [techniques](../OPTIMIZE-techniques.md). |
+| `spec_type` | `str` | `none` | `serve start`, `chat`, `bench` with `backend: server` | llama-server's `--spec-type`, i.e. draft-free n-gram speculation. `none` turns it off; `ngram-simple`, `ngram-map-k`, `ngram-map-k4v`, `ngram-mod`, `ngram-cache` are the draft-free values. Measured **+37%** when the answer rewrites text from the prompt, **-1%** on 14B prose and **-2.1%** on 0.5B prose (interleaved A/B), so it is opt-in for rewrite/copy workloads rather than a default. Ignored by `inprocess` (no equivalent exists: the Python binding's prompt lookup measured -29%). Background in [techniques](../OPTIMIZE-techniques.md). |
 | `shaping` | `bool` | `true` | `serve start` | Fit an oversized request into the loaded context instead of letting llama.cpp cut the prompt itself. See [optimization layer](architecture.md#optimization-layer). |
 | `tuning` | `bool` | `true` | `serve start`, `chat`, `bench` | Reuse the layer split a previous `vipera bench` measured for this model and machine; also controls whether `bench` writes one. |
 | `temperature` | `float` | `0.7` | `chat` (REPL and oneshot) | HTTP requests default to `server.ChatRequest` instead. |
 | `max_tokens` | `int` | `2048` | `chat` (REPL and oneshot) | HTTP requests default to `server.ChatRequest` instead. |
 | `top_p` | `float` | `0.95` | `chat` (REPL and oneshot) | HTTP requests default to `server.ChatRequest` instead. |
-| `repeat_penalty` | `float` | `1.1` | `chat` (REPL and oneshot) | Must exist in the defaults or the key never reaches the engine. |
+| `repeat_penalty` | `float` | `1.1` | `chat` (REPL and oneshot) | Must exist in the defaults or the key never reaches the engine. HTTP requests do **not** inherit it: an unset `repeat_penalty` there means llama.cpp's 1.0, because charging 1.1 on every request cost ~10% of decode on the reference box. |
 
 Every key is validated on load: a wrong type, an unknown `backend`,
 `kv_cache`, `profile`, or `protocols` value is repaired to its default with a

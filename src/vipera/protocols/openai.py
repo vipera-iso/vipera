@@ -21,6 +21,7 @@ from vipera.protocols.streaming import (
     Lease,
     iter_chunks,
     leased_iterator,
+    relay_chunks,
     run_leased,
 )
 
@@ -60,7 +61,9 @@ class ChatRequest(BaseModel):
     temperature: float = 0.7
     max_tokens: int = 2048
     top_p: float = 0.95
-    repeat_penalty: float = 1.1
+    # None means "llama.cpp's default" (1.0). Sending 1.1 here would put ~10%
+    # of decode time into a sampler the client never asked for.
+    repeat_penalty: float | None = None
     top_k: int | None = Field(None, ge=0)
     min_p: float | None = Field(None, ge=0.0, le=1.0)
     presence_penalty: float | None = Field(None, ge=-2.0, le=2.0)
@@ -162,13 +165,15 @@ def mount(app: FastAPI, gateway: Gateway) -> None:
                     usage = None
                     try:
                         if raw_stream:
-                            frames = iter_chunks(
+                            # One reader thread for the whole body: the bytes go
+                            # out as they arrive, without a thread round trip
+                            # per frame (measured 0.8% of decode time against
+                            # 9.6% for the per-item path).
+                            frames = relay_chunks(
                                 gateway.lock,
-                                leased_iterator(
-                                    lease,
-                                    lambda: active.chat_sse(messages, **kwargs),
-                                ),
+                                lambda: active.chat_sse(messages, **kwargs),
                                 on_start=lease.start,
+                                on_close=lease.release,
                             )
                             async for frame in frames:
                                 yield frame

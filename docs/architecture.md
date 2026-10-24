@@ -289,9 +289,11 @@ time.
 If every load fails, the engine raises `RuntimeError`.
 
 `chat()` forwards `messages`, `stream`, and sampling parameters
-(`temperature`, `max_tokens`, `top_p`, `repeat_penalty`, with defaults
-0.7 / 2048 / 0.95 / 1.1) to `create_chat_completion`. Any other keyword
-arguments are ignored.
+(`temperature`, `max_tokens`, `top_p`, with defaults 0.7 / 2048 / 0.95) to
+`create_chat_completion`. `repeat_penalty` is forwarded only when a caller
+passes it: defaulting it to 1.1 cost ~10% of decode on llama.cpp's sampler for
+a parameter an OpenAI client never sends. Any other keyword argument is
+ignored.
 
 Supported KV cache names: `f32`→0, `f16`→1, `q4_0`→2, `q4_1`→3, `q5_0`→6,
 `q5_1`→7, `q8_0`→8, `iq4_nl`→20, `bf16`→30. An unknown name maps to `None`,
@@ -449,7 +451,7 @@ These are observable in the current code and worth knowing before filing a bug:
 - `flash_attn` is deliberately not a config key: the planner derives it from
   `kv_cache`. Sampling keys (`temperature`, `max_tokens`, `top_p`,
   `repeat_penalty`) feed `chat`, while HTTP requests default to the values in
-  `server.ChatRequest`, not to config.
+  `server.ChatRequest` (which leaves `repeat_penalty` unset), not to config.
 - The VRAM model assumes the KV cache stays per layer, and its reserve is
   calibrated on one card. Verified for a 14B/Q4 at 8K/`q8_0` (14 layers load,
   15 fail) and 16K/`q8_0` (13 load); the f16 non-FA path is covered by an extra
