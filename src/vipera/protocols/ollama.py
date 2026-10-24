@@ -341,9 +341,7 @@ def mount(app: FastAPI, gateway: Gateway) -> None:
                 }
 
             response = StreamingResponse(
-                _stream_chat(
-                    gateway, active, req.model, messages, kwargs, started, shaping, lease
-                ),
+                _stream_chat(gateway, active, req.model, messages, kwargs, started, shaping, lease),
                 media_type="application/x-ndjson",
                 background=BackgroundTask(lease.release_if_unstarted),
             )
@@ -422,9 +420,7 @@ def mount(app: FastAPI, gateway: Gateway) -> None:
             if not texts:
                 return _error(400, "input must not be empty")
             started = time.perf_counter()
-            vectors, tokens = await run_leased(
-                gateway.lock, lease, _embed_and_count, active, texts
-            )
+            vectors, tokens = await run_leased(gateway.lock, lease, _embed_and_count, active, texts)
             elapsed = time.perf_counter() - started
             return {
                 "model": req.model,
@@ -558,7 +554,9 @@ async def _stream_chat(gateway, active, model, messages, kwargs, started, shapin
     )
 
 
-async def _stream_generate(gateway, active, model, messages, kwargs, started, shaping=None, lease=None):
+async def _stream_generate(
+    gateway, active, model, messages, kwargs, started, shaping=None, lease=None
+):
     text = ""
     usage = None
     finish_reason = None

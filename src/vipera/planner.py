@@ -46,6 +46,7 @@ def profile_names() -> tuple[str, ...]:
     """The planner profiles a config or CLI flag may name."""
     return _VALID_PROFILES
 
+
 # Room left on the card for the CUDA/driver context and llama.cpp's compute
 # buffers. This used to be a flat 1.0 GB (driver) + 0.3 GB (compute), which on a
 # 4 GB card gave away four layers: measured on a GTX 1650 with 3.64 GB free, a

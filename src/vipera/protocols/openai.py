@@ -208,9 +208,7 @@ def mount(app: FastAPI, gateway: Gateway) -> None:
                 streaming = True
                 return response
 
-            result = await run_leased(
-                gateway.lock, lease, active.chat, messages, False, **kwargs
-            )
+            result = await run_leased(gateway.lock, lease, active.chat, messages, False, **kwargs)
             if gateway.optimizer is not None:
                 gateway.optimizer.note(
                     messages, tools=kwargs.get("tools"), payload=result, shaping=shaping

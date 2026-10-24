@@ -707,9 +707,7 @@ def test_a_pool_load_does_not_run_on_the_event_loop():
     pool = _RecordingPool()
     client = TestClient(build_app(pool=pool))
 
-    r = client.post(
-        "/v1/chat/completions", json={"messages": [{"role": "user", "content": "hi"}]}
-    )
+    r = client.post("/v1/chat/completions", json={"messages": [{"role": "user", "content": "hi"}]})
 
     assert r.status_code == 200
     assert pool.ran_on_loop is False

@@ -379,9 +379,7 @@ def test_ollama_rejects_images_instead_of_dropping_them():
         "/api/chat",
         json={
             "model": "test-model",
-            "messages": [
-                {"role": "user", "content": "what is this?", "images": ["aGVsbG8="]}
-            ],
+            "messages": [{"role": "user", "content": "what is this?", "images": ["aGVsbG8="]}],
             "stream": False,
         },
     )
@@ -408,7 +406,10 @@ def test_ollama_non_stream_reports_prompt_tokens_without_usage():
             self.calls.append({"messages": messages, "stream": stream, **kw})
             return {
                 "choices": [
-                    {"message": {"role": "assistant", "content": "hi there"}, "finish_reason": "stop"}
+                    {
+                        "message": {"role": "assistant", "content": "hi there"},
+                        "finish_reason": "stop",
+                    }
                 ]
             }
 
@@ -435,7 +436,10 @@ def test_ollama_generate_non_stream_reports_prompt_tokens_without_usage():
             self.calls.append({"messages": messages, "stream": stream, **kw})
             return {
                 "choices": [
-                    {"message": {"role": "assistant", "content": "hi there"}, "finish_reason": "stop"}
+                    {
+                        "message": {"role": "assistant", "content": "hi there"},
+                        "finish_reason": "stop",
+                    }
                 ]
             }
 
