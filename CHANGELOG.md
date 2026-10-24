@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.2.1] - 2026-10-24
+
 ### Added
 - **Optimization layer** (`vipera.optimize`) — a layer between the protocol
   routes and the engine, in three pieces. *Shaping* fits an oversized request
@@ -122,8 +124,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `kv_cache` (quantized KV requires it), so the key never had an effect and
   only suggested it did. `vipera system config flash_attn ...` now rejects it.
   Existing `config.json` files keep the stale key harmlessly; drop the line.
-- **`profile` in the config is now read** — `serve start` used to pass `auto`
-  unconditionally, ignoring a configured `profile`.
+- **`profile` in the config is read by `serve`, `chat` and `bench`** — it used
+  to be ignored by `serve start` (which passed `auto` unconditionally) and by
+  `chat`/`bench` entirely. An unknown value is repaired to `auto` on load, and
+  `vipera system config profile` refuses to write one. The docs now describe
+  the config as the source of truth for the profile, and list which Ollama
+  request fields the gateway honors or rejects.
 - **Throughput: 4.55 → 6.3 t/s on the reference 14B** (8K, interleaved A/B,
   median-3). Three measured changes: `cpu_threads` is now one per physical core
   instead of `cores - 1` (+9%, and +19-21% at f16 KV); the VRAM reserve is
@@ -150,6 +156,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `GGUFAnalysisError: failed to read ...` instead of a traceback.
 
 ### Fixed
+- **A pooled model is no longer closed mid-generation** — with `--models a,b`
+  and `--max-loaded 1`, loading B closed A's engine even while a request was
+  still generating in it (a use-after-free on the llama.cpp context). The pool
+  now counts in-flight references, evicts only idle engines and waits for a
+  slot instead of taking one, and every request holds a lease until its call
+  returns or its stream is closed.
+- **Loading a pooled model no longer freezes the gateway** — planning and
+  loading ran on the event loop, so `/health` and every other request waited
+  for the whole load. The pool is acquired through `asyncio.to_thread`.
+- **Shaping counts the tool schema** — `tools` was handed to the layer and
+  ignored, so a large schema pushed the rendered prompt past the loaded
+  context and llama.cpp cut it from the front. The schema now reduces the room
+  left for messages and is part of the prompt estimate; the omission marker is
+  reserved when a message is cut, so a "trimmed" request really fits.
+- **The Ollama layer honors or rejects what clients send** — `format: "json"`
+  and a JSON-schema `format` now request JSON output instead of being dropped;
+  `images` and an empty `messages` list return `400` (this gateway serves
+  text-only models) instead of answering as if the image or question were not
+  there; non-streaming replies report `prompt_eval_count`/`eval_count` from
+  the tokenizer when the backend reports no usage, instead of zero.
 - **`vipera serve stop` now stops the `llama-server` child** — uvicorn exits
   on SIGTERM without unwinding, so neither `serve start`'s `finally` nor the
   engines' `atexit` hooks ran and a `backend: server` child was left holding
@@ -268,7 +294,8 @@ First public release.
 - The `model` field in `/v1/chat/completions` is ignored; one gateway serves
   one model.
 
-[Unreleased]: https://github.com/vipera-iso/vipera/compare/v1.2.0...HEAD
+[Unreleased]: https://github.com/vipera-iso/vipera/compare/v1.2.1...HEAD
+[1.2.1]: https://github.com/vipera-iso/vipera/releases/tag/v1.2.1
 [1.2.0]: https://github.com/vipera-iso/vipera/releases/tag/v1.2.0
 [1.1.0]: https://github.com/vipera-iso/vipera/releases/tag/v1.1.0
 [1.0.0]: https://github.com/vipera-iso/vipera/releases/tag/v1.0.0
