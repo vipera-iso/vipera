@@ -305,6 +305,151 @@ def test_ollama_embed_explains_when_embeddings_are_off():
     assert "embeddings true" in r.json()["error"]
 
 
+def test_ollama_chat_honours_format_json():
+    engine = FakeEngine()
+    client = _client(engine, protocols=["ollama"])
+
+    r = client.post(
+        "/api/chat",
+        json={
+            "model": "test-model",
+            "messages": [{"role": "user", "content": "hi"}],
+            "stream": False,
+            "format": "json",
+        },
+    )
+
+    assert r.status_code == 200
+    assert engine.calls[-1]["response_format"] == {"type": "json_object"}
+
+
+def test_ollama_chat_keeps_a_json_schema_format():
+    schema = {"type": "object", "properties": {"city": {"type": "string"}}}
+    engine = FakeEngine()
+    client = _client(engine, protocols=["ollama"])
+
+    client.post(
+        "/api/chat",
+        json={
+            "model": "test-model",
+            "messages": [{"role": "user", "content": "hi"}],
+            "stream": False,
+            "format": schema,
+        },
+    )
+
+    assert engine.calls[-1]["response_format"] == {"type": "json_object", "schema": schema}
+
+
+def test_ollama_generate_honours_format_json():
+    engine = FakeEngine()
+    client = _client(engine, protocols=["ollama"])
+
+    client.post(
+        "/api/generate",
+        json={"model": "test-model", "prompt": "hi", "stream": False, "format": "json"},
+    )
+
+    assert engine.calls[-1]["response_format"] == {"type": "json_object"}
+
+
+def test_ollama_rejects_an_unknown_format_before_loading_a_model():
+    engine = FakeEngine()
+    client = _client(engine, protocols=["ollama"])
+
+    r = client.post(
+        "/api/chat",
+        json={
+            "model": "ghost",
+            "messages": [{"role": "user", "content": "hi"}],
+            "format": "yaml",
+        },
+    )
+
+    assert r.status_code == 400
+    assert "format" in r.json()["error"]
+    assert engine.calls == []
+
+
+def test_ollama_rejects_images_instead_of_dropping_them():
+    engine = FakeEngine()
+    client = _client(engine, protocols=["ollama"])
+
+    r = client.post(
+        "/api/chat",
+        json={
+            "model": "test-model",
+            "messages": [
+                {"role": "user", "content": "what is this?", "images": ["aGVsbG8="]}
+            ],
+            "stream": False,
+        },
+    )
+
+    assert r.status_code == 400
+    assert "image" in r.json()["error"]
+    assert engine.calls == []
+
+
+def test_ollama_rejects_an_empty_message_list():
+    engine = FakeEngine()
+    client = _client(engine, protocols=["ollama"])
+
+    r = client.post("/api/chat", json={"model": "test-model", "messages": []})
+
+    assert r.status_code == 400
+    assert "messages" in r.json()["error"]
+    assert engine.calls == []
+
+
+def test_ollama_non_stream_reports_prompt_tokens_without_usage():
+    class NoUsageEngine(FakeEngine):
+        def chat(self, messages, stream=False, **kw):
+            self.calls.append({"messages": messages, "stream": stream, **kw})
+            return {
+                "choices": [
+                    {"message": {"role": "assistant", "content": "hi there"}, "finish_reason": "stop"}
+                ]
+            }
+
+    client = _client(NoUsageEngine(), protocols=["ollama"])
+
+    body = client.post(
+        "/api/chat",
+        json={
+            "model": "test-model",
+            "messages": [{"role": "user", "content": "one two three"}],
+            "stream": False,
+        },
+    ).json()
+
+    # Ollama clients read these as the context the prompt occupied. Reporting 0
+    # made them think the prompt was free.
+    assert body["prompt_eval_count"] == 3
+    assert body["eval_count"] == 2
+
+
+def test_ollama_generate_non_stream_reports_prompt_tokens_without_usage():
+    class NoUsageEngine(FakeEngine):
+        def chat(self, messages, stream=False, **kw):
+            self.calls.append({"messages": messages, "stream": stream, **kw})
+            return {
+                "choices": [
+                    {"message": {"role": "assistant", "content": "hi there"}, "finish_reason": "stop"}
+                ]
+            }
+
+    client = _client(NoUsageEngine(), protocols=["ollama"])
+
+    body = client.post(
+        "/api/generate",
+        json={"model": "test-model", "prompt": "one two three", "stream": False},
+    ).json()
+
+    assert body["prompt_eval_count"] == 3
+    assert body["eval_count"] == 2
+
+
 def test_ollama_tool_call_arguments_become_an_object():
     # OpenAI streams arguments as a JSON string; Ollama clients expect a map.
     calls = _ollama_tool_calls(

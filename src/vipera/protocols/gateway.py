@@ -10,17 +10,22 @@ the server module's internals (and keeps the dependency arrow one-way:
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any
+
+
+def _noop_release(engine: Any) -> None:
+    """Single-model gateways never evict, so releasing is a no-op."""
 
 
 @dataclass(frozen=True)
 class Gateway:
     #: One llama.cpp context, one request at a time.
     lock: asyncio.Lock
-    #: Resolve the `model` field of a request; raises UnknownModelError.
-    engine_for: Callable[[str | None], Any]
+    #: Resolve the `model` field of a request; raises UnknownModelError. In pool
+    #: mode this loads in a worker thread, so it is always awaited.
+    engine_for: Callable[[str | None], Awaitable[Any]]
     #: Every alias this process serves.
     ids: Callable[[], list[str]]
     #: The alias used when a request names none.
@@ -29,3 +34,5 @@ class Gateway:
     loaded_ids: Callable[[], list[str]]
     #: The optimization layer (shaping + prefix accounting); None disables it.
     optimizer: Any = None
+    #: Give back one in-flight reference after a request (or its stream) ends.
+    release: Callable[[Any], None] = _noop_release

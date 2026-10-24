@@ -35,9 +35,14 @@ def build_app(engine=None, model_name: str | None = None, *, pool=None, protocol
 
     if pool is not None:
 
-        def engine_for(name: str | None):
-            active, _ = pool.get(name)
+        async def engine_for(name: str | None):
+            # Planning and loading a GGUF can take minutes; keep it off the
+            # event loop so /health and other requests stay responsive.
+            active, _ = await asyncio.to_thread(pool.acquire, name)
             return active
+
+        def release(engine) -> None:
+            pool.release(engine)
 
         def ids() -> list[str]:
             return pool.ids()
@@ -53,10 +58,13 @@ def build_app(engine=None, model_name: str | None = None, *, pool=None, protocol
         # Closures don't inherit the narrowing above, so bind the name here.
         single = model_name
 
-        def engine_for(name: str | None):
+        async def engine_for(name: str | None):
             if name and name != single:
                 raise UnknownModelError(name, [single])
             return engine
+
+        def release(engine) -> None:
+            return None
 
         def ids() -> list[str]:
             return [single]
@@ -75,6 +83,7 @@ def build_app(engine=None, model_name: str | None = None, *, pool=None, protocol
         default_model=default_model,
         loaded_ids=loaded_ids,
         optimizer=optimizer,
+        release=release,
     )
 
     @app.get("/health")

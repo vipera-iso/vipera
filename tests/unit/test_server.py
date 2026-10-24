@@ -668,3 +668,74 @@ def test_pool_health_reports_loaded_models():
 def test_build_app_requires_an_engine_or_a_pool():
     with pytest.raises(ValueError):
         build_app()
+
+
+class _RecordingPool:
+    """Minimal pool that records where acquire runs and how often release runs."""
+
+    default = "alpha"
+
+    def __init__(self):
+        self.ran_on_loop = None
+        self.in_flight = 0
+        self.releases = 0
+
+    def ids(self):
+        return ["alpha"]
+
+    def loaded_ids(self):
+        return ["alpha"]
+
+    def acquire(self, name):
+        # A load takes minutes; if this runs on the event loop, /health and
+        # every other request freeze behind it.
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            self.ran_on_loop = False
+        else:
+            self.ran_on_loop = True
+        self.in_flight += 1
+        return _NamedEngine("alpha"), "alpha"
+
+    def release(self, engine):
+        self.in_flight -= 1
+        self.releases += 1
+
+
+def test_a_pool_load_does_not_run_on_the_event_loop():
+    pool = _RecordingPool()
+    client = TestClient(build_app(pool=pool))
+
+    r = client.post(
+        "/v1/chat/completions", json={"messages": [{"role": "user", "content": "hi"}]}
+    )
+
+    assert r.status_code == 200
+    assert pool.ran_on_loop is False
+
+
+def test_a_finished_request_gives_its_pool_reference_back():
+    pool = _RecordingPool()
+    client = TestClient(build_app(pool=pool))
+
+    client.post("/v1/chat/completions", json={"messages": [{"role": "user", "content": "hi"}]})
+
+    assert pool.releases == 1
+    assert pool.in_flight == 0
+
+
+def test_a_finished_stream_gives_its_pool_reference_back():
+    pool = _RecordingPool()
+    client = TestClient(build_app(pool=pool))
+
+    with client.stream(
+        "POST",
+        "/v1/chat/completions",
+        json={"messages": [{"role": "user", "content": "hi"}], "stream": True},
+    ) as r:
+        assert r.status_code == 200
+        b"".join(r.iter_bytes())
+
+    assert pool.releases == 1
+    assert pool.in_flight == 0

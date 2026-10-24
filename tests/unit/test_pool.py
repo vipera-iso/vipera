@@ -1,3 +1,5 @@
+import threading
+
 import pytest
 
 from vipera.pool import ModelPool, UnknownModelError
@@ -89,6 +91,79 @@ def test_recently_used_engine_survives_eviction():
 
     assert a.closed is False
     assert pool.loaded_ids() == ["a", "c"]
+
+
+def test_an_engine_serving_a_request_is_never_evicted():
+    """Eviction used to close the LRU engine even while a request used it.
+
+    With max_loaded=1, loading "b" while "a" is in flight must wait for the
+    release instead of closing a llama.cpp context mid-generation.
+    """
+    pool = ModelPool({"a": "/a", "b": "/b"}, lambda alias, path: FakeEngine(alias), max_loaded=1)
+    in_flight, _ = pool.acquire("a")
+
+    loaded = threading.Thread(target=pool.acquire, args=("b",), daemon=True)
+    loaded.start()
+    loaded.join(timeout=0.2)
+
+    assert loaded.is_alive(), "the load must wait for the in-flight engine"
+    assert in_flight.closed is False
+    assert pool.loaded_ids() == ["a"]
+
+    pool.release(in_flight)
+    loaded.join(timeout=5)
+
+    assert not loaded.is_alive()
+    assert in_flight.closed is True
+    assert pool.loaded_ids() == ["b"]
+
+
+def test_reusing_an_in_flight_engine_does_not_evict_it():
+    pool = ModelPool(
+        {"a": "/a", "b": "/b", "c": "/c"},
+        lambda alias, path: FakeEngine(alias),
+        max_loaded=2,
+    )
+    first, _ = pool.acquire("a")
+    second, _ = pool.acquire("a")
+
+    assert first is second
+    assert first.closed is False
+
+    # Two acquires, two releases: the reference count must return to zero, or
+    # the engine would look busy forever and no later load could evict it.
+    pool.release(first)
+    pool.release(second)
+    pool.get("b")
+    pool.get("c")
+
+    assert first.closed is True
+
+
+def test_two_requests_for_the_same_model_load_it_once():
+    loads = []
+    started = threading.Barrier(2)
+
+    def factory(alias, path):
+        loads.append(alias)
+        return FakeEngine(alias)
+
+    pool = ModelPool({"a": "/a"}, factory, max_loaded=1)
+    engines = []
+
+    def request():
+        started.wait(timeout=5)
+        engines.append(pool.acquire("a")[0])
+
+    threads = [threading.Thread(target=request, daemon=True) for _ in range(2)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=5)
+
+    assert loads == ["a"]
+    assert len(engines) == 2
+    assert engines[0] is engines[1]
 
 
 def test_close_closes_every_loaded_engine(pool):
