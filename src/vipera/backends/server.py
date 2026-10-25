@@ -195,6 +195,14 @@ def server_command(
     gpu_layers = (
         plan.n_layers if plan.moe_cpu_layers >= 0 and plan.n_layers > 0 else plan.gpu_layers
     )
+    # llama.cpp counts the output layer as one group past the GGUF's
+    # block_count, so "everything on the GPU" is n_layers + 1. Measured on
+    # qwen2.5-0.5B Q4_K_M (24 blocks, GTX 1650): -ngl 24 offloaded 24/25 and
+    # decoded 186.7 t/s, -ngl 25 offloaded 25/25 and decoded 203.7 t/s. The
+    # banner said 24/24 either way, so only llama.cpp's own "offloaded 24/25
+    # layers" line showed the missing layer.
+    if plan.n_layers > 0 and gpu_layers >= plan.n_layers:
+        gpu_layers = plan.n_layers + 1
     # -ub is the prefill lever (measured: 896 was the best all-round point on
     # the reference 4 GB card); -b must be at least as large as -ub.
     ubatch = plan.n_ubatch or min(plan.n_batch, 512)

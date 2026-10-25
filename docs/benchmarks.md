@@ -175,9 +175,9 @@ cached). Final run on a cool card (42 °C at start, 2 MiB resident).
 
 | Arm | qwen2.5-0.5B Q4_K_M (24/24 layers) | Hermes-4-14B Q3_K_M (18/40 layers) |
 |---|---:|---:|
-| Vipera, `backend: auto` → `server` (HTTP) | **193.3 t/s** | **5.90 t/s** |
-| the same `llama-server` child, called directly | 192.0 t/s | — |
-| Ollama 0.40.8, defaults | 204.3 t/s | 5.56 t/s |
+| Vipera, `backend: auto` → `server` (HTTP) | **197.6 t/s** | **5.90 t/s** |
+| the same `llama-server` child, called directly | 198.4 t/s | — |
+| Ollama 0.40.8, defaults | 203.6 t/s | 5.56 t/s |
 
 The 0.5B row is six interleaved rounds; the 14B alternates four blocks
 (Vipera, Ollama, Vipera, Ollama, three generations each) because the two
@@ -185,13 +185,15 @@ combined need ~6 GB of a 4 GB card and cannot share it.
 
 What the numbers say:
 
-- **The gateway costs nothing measurable.** Through Vipera's HTTP stack:
-  193.3 t/s; calling the same child directly: 192.0. It was ~10% before the
-  SSE relay replaced a thread round trip per frame with one reader thread per
-  stream, and the `read1` batching that came with it.
-- **Ollama's 0.5B lead is its `llama.cpp` build, not its gateway.** +5.7%
-  (204.3 against 192.0 on the *same* Vipera binary and flags). That fork ships
-  its own kernels; nothing in the flag set closes it.
+- **The gateway costs nothing measurable.** 197.6 t/s through Vipera's HTTP
+  stack against 198.4 calling the same child directly, on back-to-back runs.
+  It was ~10% before the SSE relay replaced a thread round trip per frame with
+  one reader thread per stream, and the `read1` batching that came with it.
+- **The last 3% against Ollama is the KV cache type, not the build.** q4_0 KV
+  costs 2.0% of decode here (198.4 → 202.5 with f16), and it is a deliberate
+  memory trade. An earlier revision of this file blamed Ollama's `llama.cpp`
+  build for a 5.7% lead; that was wrong — the lead was a bug in Vipera's
+  `-ngl`, fixed after 1.3.0 and dissected in the next section.
 - **On the hybrid model Vipera wins by 6%, not 31%.** 5.90 against 5.56 t/s:
   the planner put 18/40 layers on the card (3.42 GB) where Ollama's `--fit`
   stops at 14/40 (2.54 GB) to leave its 1 GiB margin. The earlier "+31%" in
@@ -209,6 +211,45 @@ What the numbers say:
 Absolute numbers move with the card: the same Ollama arm read 204 t/s cool and
 165 t/s after an hour of benchmarking, so every comparison above shares a round
 or an alternating block. Run the arms on your own box before quoting them.
+
+### Two binaries, four flag sets: where the Ollama gap came from
+
+Two `llama-server` binaries were on the box at once — Vipera's (build b11827,
+upstream `970b51ce7`) and the one Ollama 0.40.8 spawns
+(`~/.local/lib/ollama/llama-server`, fork commit `f174553e1`; run by hand it
+needs `GGML_BACKEND_PATH` pointed at `cuda_v13/libggml-cuda.so` or it silently
+decodes on the CPU). That makes build and flags separable instead of guessable.
+Same GGUF, prompt and measurement, three interleaved rounds:
+
+| Binary | Flags | Offloaded | Decode |
+|---|---|---|---:|
+| Vipera b11827 | Vipera's planner | 24/25 | 186.7 t/s |
+| Ollama f174553e1 | Vipera's planner | 24/25 | 186.6 t/s |
+| Vipera b11827 | Ollama's | 25/25 | 203.7 t/s |
+| Ollama f174553e1 | Ollama's | 25/25 | 203.3 t/s |
+
+Read down the columns: swapping the **binary** moves throughput by −0.1%,
+swapping the **flags** by +9%. The build was never the difference.
+
+The flags differed in one thing that matters. `llama.cpp` counts the output
+layer as one group past the GGUF's `block_count`, so `-ngl 24` on a 24-block
+model offloads **24 of 25** groups and leaves the output layer on the CPU.
+Vipera passed `n_layers` and its banner said `24/24` either way; Ollama passes
+no `-ngl` at all, so it gets everything. With `-ngl 25`, one flag removed at a
+time:
+
+| Arm | Decode | Δ |
+|---|---:|---:|
+| all of Vipera's flags | 198.4 t/s | — |
+| − `-ctk`/`-ctv q4_0` (f16 KV) | 202.5 t/s | **+2.0%** |
+| − `-lm mlock` | 198.6 t/s | +0.1% |
+| − `-fa on` (auto) | 198.0 t/s | −0.2% |
+| − `-t 4` | 199.0 t/s | +0.3% |
+| − `-fit off` | 197.5 t/s | −0.5% |
+
+Everything except the KV dtype is inside noise. The 14B row above is a hybrid
+plan (18 of 40 layers), which never triggered the bug, so it is unaffected and
+was not re-measured.
 
 ### Concurrent requests: slots vs a queue
 

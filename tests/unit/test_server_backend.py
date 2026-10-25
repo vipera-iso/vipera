@@ -112,13 +112,28 @@ def test_server_command_emits_moe_flags_and_uses_full_ngl():
         1,
     )
 
-    # A MoE plan keeps all 24 layers for dense tensors and moves the first 12
-    # layers' routed experts to the CPU.
-    assert command[command.index("-ngl") + 1] == "24"
+    # A MoE plan keeps all 24 blocks for dense tensors and moves the first 12
+    # layers' routed experts to the CPU. -ngl is 25 because llama.cpp counts
+    # the output layer as one group past block_count.
+    assert command[command.index("-ngl") + 1] == "25"
     assert command[command.index("-ncmoe") + 1] == "12"
     # -ub is the prefill lever and -b must be at least as large.
     assert command[command.index("-ub") + 1] == "896"
     assert command[command.index("-b") + 1] == "896"
+
+
+def test_server_command_offloads_the_output_layer_with_a_full_plan():
+    # A full plan means every block, so ask for the extra group llama.cpp uses
+    # for the output layer: -ngl 24 on a 24-block model offloads 24 of 25 and
+    # decoded 186.7 t/s against 203.7 t/s with 25 of 25 (qwen2.5-0.5B).
+    full = sb.server_command("/bin/llama-server", "/m.gguf", _plan(gpu_layers=24, n_layers=24), 1)
+    assert full[full.index("-ngl") + 1] == "25"
+
+    # A partial plan keeps exactly the layers the planner counted.
+    partial = sb.server_command(
+        "/bin/llama-server", "/m.gguf", _plan(gpu_layers=17, n_layers=40), 1
+    )
+    assert partial[partial.index("-ngl") + 1] == "17"
 
 
 def test_server_command_omits_ncmoe_for_dense_plans():

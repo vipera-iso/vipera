@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **A full plan left the output layer on the CPU.** `llama.cpp` counts the
+  output layer as one group past the GGUF's `block_count`, so `-ngl n_layers`
+  offloaded `n-1` of `n+1` groups while the banner still read `n/n`. Measured on
+  qwen2.5-0.5B Q4_K_M (24 blocks, GTX 1650): 24/25 groups decoded **186.7 t/s**,
+  25/25 decoded **203.7 t/s**, against **203.6 t/s** for Ollama, which passes no
+  `-ngl` at all. A full plan now asks for `n_layers + 1`. Hybrid plans are
+  unchanged, and the extra group needs no VRAM the plan had not already
+  budgeted: those bytes are in `size_bytes`, they just were not being placed.
+
 ## [1.3.0] - 2026-10-25
 
 ### Added

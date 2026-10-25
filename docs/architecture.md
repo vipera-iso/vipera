@@ -161,8 +161,8 @@ The algorithm, in order:
    `ubatch` values. `--n-cpu-moe N` keeps the **first** N layers' experts on
    the CPU, so the suffix is what stays on the GPU. The plan keeps
    `gpu_layers` at the classic value for the in-process fallback; the server
-   backend uses `n_layers` for `-ngl` and adds `-ncmoe N`. On the reference
-   GTX 1650 this selects `ncmoe=12`, `-ngl 24`, `-ub 896`; the last 12 expert
+   backend uses `n_layers + 1` for `-ngl` and adds `-ncmoe N`. On the reference
+   GTX 1650 this selects `ncmoe=12`, `-ngl 25`, `-ub 896`; the last 12 expert
    layers (2441 MiB) fit and the last 13 (2659 MiB) do not.
 
    Measured on that card with LFM2.5-8B-A1B-Q4_K_M, the MoE placement is a
@@ -308,9 +308,12 @@ It translates the `Plan` into `llama-server` flags (`-c`, `-ngl`, `-t`, `-b`,
 port, polls `/health` for up to 900 s, and talks the OpenAI HTTP API
 (`/v1/chat/completions`, streaming or not, plus `/tokenize`).
 
-For an MoE plan, `-ngl` is the full `n_layers` (all dense tensors and the KV
-cache stay on the GPU) and `-ncmoe` moves only the routed experts of the first
-N layers to the CPU. `resolve_backend()` upgrades `backend="inprocess"` to the
+For an MoE plan, `-ngl` is the full `n_layers + 1` (all dense tensors and the
+KV cache stay on the GPU) and `-ncmoe` moves only the routed experts of the
+first N layers to the CPU. The `+ 1` is the output layer: `llama.cpp` counts it
+as one group past `block_count`, so `-ngl n_layers` leaves it on the CPU and
+cost 9% of decode on qwen2.5-0.5B. A plan that keeps every block on the GPU is
+bumped the same way; a hybrid plan keeps exactly its `gpu_layers`. `resolve_backend()` upgrades `backend="inprocess"` to the
 server when the plan requires it and the binary advertises `-ncmoe`; if the
 binary is missing or too old, it clears the MoE fields and warns instead of
 silently running a different plan.
