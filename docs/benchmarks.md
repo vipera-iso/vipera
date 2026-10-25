@@ -170,53 +170,64 @@ it, because a failed load costs more than the extra layer.
 ### `auto` backend: the gateway vs its own child vs Ollama
 
 Same GGUF, same `ctx 4096`, same 226-token prompt, 128 max tokens, temperature
-0, streams read over HTTP. The three arms run **interleaved** (one round hits
-all of them) because sequential runs on this box drifted up to 16% with the
-fan. Medians of 5 rounds for the 0.5B and 3 for the 14B, both fully warmed
-(identical prompt, so prefill is cached).
+0, streams read over HTTP, both engines warmed (identical prompt, so prefill is
+cached). Final run on a cool card (42 °C at start, 2 MiB resident).
 
-| Arm | qwen2.5-0.5B Q4_K_M (24/24 layers) | Hermes-4-14B Q3_K_M (16/40 layers) |
+| Arm | qwen2.5-0.5B Q4_K_M (24/24 layers) | Hermes-4-14B Q3_K_M (18/40 layers) |
 |---|---:|---:|
-| Vipera, `backend: auto` → `server` (HTTP) | 166.2 t/s | 5.99 t/s |
-| the same `llama-server` child, called directly | 169.1 t/s | 6.02 t/s |
-| Ollama 0.40.8, defaults | 165.6 t/s | 4.56 t/s |
+| Vipera, `backend: auto` → `server` (HTTP) | **193.3 t/s** | **5.90 t/s** |
+| the same `llama-server` child, called directly | 192.0 t/s | — |
+| Ollama 0.40.8, defaults | 204.3 t/s | 5.56 t/s |
 
-Absolute numbers drift with the card's thermal state (the same Ollama arm read
-205 t/s when the box was cool and 165 t/s an hour of benchmarks later), which is
-why every round here hits all three arms. What the comparison supports:
+The 0.5B row is six interleaved rounds; the 14B alternates four blocks
+(Vipera, Ollama, Vipera, Ollama, three generations each) because the two
+combined need ~6 GB of a 4 GB card and cannot share it.
 
-- **The gateway costs ~1%, not 10%.** Before the SSE relay it *was* ~10% at
-  this model's 5 ms/token; one reader thread per stream instead of a thread
-  round trip per frame removed it. On the 14B it was already ~0.5%.
-- **Two Vipera defaults were the rest of the gap, and both were wrong for an
-  OpenAI-shaped API.** `--spec-type ngram-map-k` cost 2.1% on fresh prose
-  (204.4 → 200.2 t/s, interleaved) and is now opt-in; injecting
-  `repeat_penalty: 1.1` into every request cost **10%** (167.4 → 150.6 t/s) and
-  is now left to llama.cpp's own 1.0. Ollama charges neither.
-- **Vipera's planner still wins where the model does not fit**: 16/40 layers at
-  3.42 GB against Ollama's 14/40 at 2.67 GB, and a 14B decoded from system RAM
-  is bandwidth-bound, so each extra GPU layer pays: **+31%**. Ollama closes it
-  with `OLLAMA_FLASH_ATTENTION=1`, `OLLAMA_KV_CACHE_TYPE=q4_0` and
-  `num_gpu=18` — three settings a user has to know, none on by default.
+What the numbers say:
 
-Both numbers are for one box. Run the same three arms on yours before
-concluding anything about your hardware.
+- **The gateway costs nothing measurable.** Through Vipera's HTTP stack:
+  193.3 t/s; calling the same child directly: 192.0. It was ~10% before the
+  SSE relay replaced a thread round trip per frame with one reader thread per
+  stream, and the `read1` batching that came with it.
+- **Ollama's 0.5B lead is its `llama.cpp` build, not its gateway.** +5.7%
+  (204.3 against 192.0 on the *same* Vipera binary and flags). That fork ships
+  its own kernels; nothing in the flag set closes it.
+- **On the hybrid model Vipera wins by 6%, not 31%.** 5.90 against 5.56 t/s:
+  the planner put 18/40 layers on the card (3.42 GB) where Ollama's `--fit`
+  stops at 14/40 (2.54 GB) to leave its 1 GiB margin. The earlier "+31%" in
+  this file was measured with **both engines resident** — Ollama had planned
+  2.54 GB for a card that no longer had it and fell back to CPU for layers it
+  thought were on the GPU. That is a real failure mode, but it is not a
+  throughput comparison; do not quote it.
+- **Two Vipera defaults were costing speed and are now opt-in.**
+  `--spec-type ngram-map-k` measured 2.1% *slower* on fresh prose (204.4 →
+  200.2 interleaved) and `repeat_penalty: 1.1` on every request cost 10%
+  (167.4 → 150.6). Neither is on by default now; both are one config key away
+  for the workloads that do benefit (chapter 3 says +37% for the drafter when
+  the answer rewrites the prompt).
+
+Absolute numbers move with the card: the same Ollama arm read 204 t/s cool and
+165 t/s after an hour of benchmarking, so every comparison above shares a round
+or an alternating block. Run the arms on your own box before quoting them.
 
 ### Concurrent requests: slots vs a queue
 
 qwen2.5-0.5B Q4_K_M, `ctx 4096`, four streaming requests of 128 tokens issued at
 the same time, aggregate = tokens / wall clock:
 
-| Arm | Aggregate | Per client |
+| Arm | 1 request | 4 concurrent (aggregate) |
 |---|---:|---:|
-| Vipera, `parallel: 1` (serialised) | 145 t/s | 162 t/s each, one after another |
-| **Vipera, `parallel: 4`** | **289 t/s** | ~92 t/s each, interleaved |
-| Ollama 0.40.8 (`NUM_PARALLEL=1`) | 163 t/s | 165 t/s each, one after another |
+| Vipera, `parallel: 1` (serialised) | 173 t/s | 178 t/s |
+| **Vipera, `parallel: 4`** | 175 t/s | **229 t/s** (+29%) |
+| Ollama 0.40.8 (one slot) | 199 t/s | 202 t/s |
 
-One request is unaffected by the slot count; the gain is in what an agent loop
-with four tools in flight actually experiences. Slots cost KV memory
-(`-c ctx × parallel`), which is why the default stays at 1 on a 4 GB card: four
-slots of a hybrid 14B do not fit, and the load would fall back a rung.
+One request is unaffected by the slot count; the gain is what an agent loop
+with four tools in flight actually experiences — **+29% wall-clock work done**,
+not the 2× an earlier, throttled run suggested: continuous batching shares the
+same memory bandwidth, so four streams together decode at about a quarter of
+one stream's rate each. Slots also cost KV memory (`-c ctx × parallel`), which
+is why the default stays at 1 on a 4 GB card: four slots of a hybrid 14B do not
+fit, and the load would fall back a rung.
 
 ### Long prompts on a hybrid split
 
@@ -228,8 +239,9 @@ Hermes-4-14B Q3_K_M, 18/40 layers, `ctx 4096`, a 24.6 KB log dump:
 | same, before the planner charged `-ub` | child aborted: `CUDA error: out of memory` |
 | same, before shaping measured tokens | 400 `exceed_context_size_error` |
 
-Decode after the load sits at 6.12 t/s against Ollama's 4.56 t/s at 14/40
-layers, both on the same card.
+Decode after the load sits at 5.90 t/s (18/40 layers) against Ollama's 5.56 t/s
+(14/40), each measured alone on the same card — see the section above for why
+those two must not be run at the same time.
 
 ## Method
 

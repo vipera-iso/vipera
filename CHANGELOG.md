@@ -45,9 +45,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **The slot count is now always passed (`-np`).** Builds here default to four
   slots and split `-c` across them, so a plan that promised 4096 tokens was
   handing each request 1024. With `parallel: 4` the gateway now serves four
-  requests at once through continuous batching: **289 t/s aggregate against 145
-  t/s serialised**, single-request speed unchanged, while Ollama's default one
-  slot stays at ~163 t/s aggregate.
+  requests at once through continuous batching: **229 t/s aggregate against 178
+  t/s serialised** (+29%), single-request speed unchanged, while Ollama's one
+  slot stays at ~202 t/s aggregate.
 - **The planner charges the prefill micro-batch against VRAM.** A 16-layer plan
   that loaded fine still died with `CUDA error: out of memory` while prefilling
   a ~3 300-token prompt; 15 layers at the same window took it at 37 t/s. The

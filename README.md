@@ -163,10 +163,9 @@ or edit the JSON. The keys that change behavior most: `profile` (`auto`, `cpu`,
 `gpu`, `lowmem`, honored by serve, chat, and bench), `ctx`, `kv_cache` (`f16`,
 `q8_0`, `q4_0`), `spec_type` (draft-free n-gram speculation, off by default:
 +37% when the answer rewrites the prompt, −2% on fresh prose), `parallel`
-(llama-server slots; 4 of them measured 2× aggregate throughput on concurrent
-requests),
-`default_model`. Invalid values are repaired on load; `vipera system config`
-refuses to write them.
+(llama-server slots; four of them measured +29% aggregate throughput on
+concurrent requests), `default_model`. Invalid values are repaired on load;
+`vipera system config` refuses to write them.
 
 The optimization layer (`shaping`, `tuning`, both on) trims a request that is
 larger than the loaded context instead of letting llama.cpp cut the system
