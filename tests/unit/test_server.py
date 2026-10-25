@@ -80,9 +80,7 @@ def test_health_in_pool_mode_only_probes_loaded_models():
     assert r.json()["engines"] == {}
     assert pool.loaded_ids() == []
 
-    client.post(
-        "/v1/chat/completions", json={"messages": [{"role": "user", "content": "hi"}]}
-    )
+    client.post("/v1/chat/completions", json={"messages": [{"role": "user", "content": "hi"}]})
 
     assert client.get("/health").json()["engines"] == {"alpha": "ok"}
 

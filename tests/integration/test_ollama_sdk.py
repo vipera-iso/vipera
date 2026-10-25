@@ -175,9 +175,7 @@ def test_sdk_legacy_embeddings(client):
 # list) has to be updated. The count of passing vs xfail tests is the scoreboard
 # recorded in tasks/todo.md.
 
-_ONE_PIXEL_PNG = (
-    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8DwHwAFAAH/q842iQAAAABJRU5ErkJggg=="
-)
+_ONE_PIXEL_PNG = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8DwHwAFAAH/q842iQAAAABJRU5ErkJggg=="
 
 
 @pytest.mark.xfail(strict=True, reason="P2-4: /api/show hardcodes capabilities to ['completion']")
@@ -201,9 +199,7 @@ def test_sdk_chat_returns_a_thinking_trace(client):
 def test_sdk_chat_accepts_an_image(client):
     client.chat(
         model="test-model",
-        messages=[
-            {"role": "user", "content": "what is this?", "images": [_ONE_PIXEL_PNG]}
-        ],
+        messages=[{"role": "user", "content": "what is this?", "images": [_ONE_PIXEL_PNG]}],
         stream=False,
     )
 

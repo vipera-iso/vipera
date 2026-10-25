@@ -362,9 +362,7 @@ def mount(app: FastAPI, gateway: Gateway) -> None:
         alias = _resolve_alias(gateway, req.model)
         if alias is None:
             available = ", ".join(gateway.ids()) or "none"
-            return _error(
-                404, f"model '{req.model}' not found (available: {available})"
-            )
+            return _error(404, f"model '{req.model}' not found (available: {available})")
         spec = get_model(alias)
         meta = dict(spec.meta) if spec is not None else {}
         return {

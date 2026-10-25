@@ -16,9 +16,7 @@ _DURATION = re.compile(r"^(?P<value>[+-]?\d+(?:\.\d+)?)(?P<unit>ms|s|m|h|d)?$")
 _UNITS = {"ms": 0.001, "s": 1.0, "m": 60.0, "h": 3600.0, "d": 86400.0}
 
 
-def parse_keep_alive(
-    value: str | int | float | None, default: float | None = None
-) -> float | None:
+def parse_keep_alive(value: str | int | float | None, default: float | None = None) -> float | None:
     """Return seconds, ``0`` for "unload now", or a negative value for "forever".
 
     ``None`` means the request omitted the field, so the caller's default is

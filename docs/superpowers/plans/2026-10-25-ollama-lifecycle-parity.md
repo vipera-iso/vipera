@@ -44,15 +44,18 @@
 def test_keep_alive_defaults_to_the_caller_value():
     assert parse_keep_alive(None, default=300) == 300
 
+
 def test_keep_alive_parses_ollama_durations():
     assert parse_keep_alive("5m") == 300
     assert parse_keep_alive("1.5h") == 5400
     assert parse_keep_alive("500ms") == 0.5
     assert parse_keep_alive(90) == 90
 
+
 def test_keep_alive_zero_and_negative_are_special():
     assert parse_keep_alive("0") == 0
     assert parse_keep_alive(-1) == -1
+
 
 def test_keep_alive_rejects_garbage():
     with pytest.raises(ValueError):

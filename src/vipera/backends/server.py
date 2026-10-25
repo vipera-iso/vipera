@@ -69,6 +69,7 @@ def _request_timeout(max_tokens: Any) -> float:
 def _timeout_message(path: str, timeout: float) -> str:
     return f"llama-server did not respond on {path} within {timeout:.0f}s"
 
+
 # Printed by llama.cpp builds without a GPU backend. The child keeps running
 # but ignores --gpu-layers, so the plan must be corrected instead of reporting
 # layers that are not on the GPU.
@@ -323,9 +324,7 @@ class _SseStream:
             chunk = self._response.read1(65536)
         except TimeoutError:
             self.close()
-            raise RuntimeError(
-                _timeout_message("/v1/chat/completions", self._timeout)
-            ) from None
+            raise RuntimeError(_timeout_message("/v1/chat/completions", self._timeout)) from None
         if not chunk:
             self.close()
             raise StopIteration
