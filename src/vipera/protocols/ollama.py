@@ -21,6 +21,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel
 from starlette.background import BackgroundTask
 
+from vipera.keepalive import parse_keep_alive
 from vipera.pool import UnknownModelError
 from vipera.protocols.gateway import Gateway
 from vipera.protocols.streaming import (
@@ -38,6 +39,12 @@ NAME = "ollama"
 VERSION = "0.5.0+vipera"
 
 _MAX_PROMPT_CHARS = 500_000
+
+#: Ollama reports a model that is never unloaded with this timestamp.
+_NEVER = "9999-12-31T23:59:59Z"
+
+#: Shown by /api/show when the registry has no template for the model.
+_DEFAULT_TEMPLATE = "{{ if .System }}{{ .System }}\n{{ end }}{{ .Prompt }}"
 
 _OPTION_MAP = {
     "temperature": "temperature",
@@ -88,7 +95,7 @@ class OllamaChatRequest(BaseModel):
     options: OllamaOptions | None = None
     tools: list[dict] | None = None
     format: str | dict | None = None
-    keep_alive: str | int | None = None
+    keep_alive: str | int | float | None = None
 
 
 class OllamaGenerateRequest(BaseModel):
@@ -98,7 +105,12 @@ class OllamaGenerateRequest(BaseModel):
     stream: bool = True
     options: OllamaOptions | None = None
     format: str | dict | None = None
-    keep_alive: str | int | None = None
+    keep_alive: str | int | float | None = None
+
+
+class OllamaShowRequest(BaseModel):
+    model: str
+    verbose: bool = False
 
 
 class OllamaEmbedRequest(BaseModel):
@@ -115,6 +127,69 @@ class OllamaLegacyEmbedRequest(BaseModel):
 
 def _error(status: int, message: str) -> JSONResponse:
     return JSONResponse(status_code=status, content={"error": message})
+
+
+def _details(spec, meta: dict) -> dict:
+    """The model-details block Ollama clients read from tags/ps/show."""
+    return {
+        "parent_model": "",
+        "format": spec.format if spec is not None else "gguf",
+        "family": meta.get("architecture") or "",
+        "families": [meta["architecture"]] if meta.get("architecture") else None,
+        "parameter_size": _parameter_size(meta.get("n_params")),
+        "quantization_level": meta.get("quant") or "",
+    }
+
+
+def _model_info(alias: str, meta: dict) -> dict:
+    """GGUF metadata in Ollama's ``model_info`` shape.
+
+    Ollama prefixes per-architecture keys with the architecture name. Vipera
+    only has the analyzer's summary, so the keys it can populate are mapped;
+    everything else stays absent rather than being invented.
+    """
+    arch = meta.get("architecture") or "unknown"
+    info: dict[str, Any] = {
+        "general.architecture": arch,
+        "general.name": alias,
+    }
+    keys = {
+        "context_length": "context_length",
+        "n_layers": "block_count",
+        "n_heads": "attention.head_count",
+        "n_kv_heads": "attention.head_count_kv",
+        "embedding_length": "embedding_length",
+        "n_params": "parameter_count",
+    }
+    for source, target in keys.items():
+        value = meta.get(source)
+        if value:
+            info[f"{arch}.{target}"] = value
+    return info
+
+
+def _capabilities(meta: dict) -> list[str]:
+    """What this gateway can do with the model. Text generation only, for now."""
+    return ["completion"]
+
+
+def _resolve_alias(gateway: Gateway, name: str) -> str | None:
+    """Match an alias exactly, or after stripping Ollama's implicit ``:latest``."""
+    if name in gateway.ids():
+        return name
+    if name.endswith(":latest"):
+        stripped = name[: -len(":latest")]
+        if stripped in gateway.ids():
+            return stripped
+    return None
+
+
+def _keep_alive(value) -> tuple[float | None, JSONResponse | None]:
+    """Parse ``keep_alive`` before a model is loaded; 400 on bad input."""
+    try:
+        return parse_keep_alive(value), None
+    except ValueError as exc:
+        return None, _error(400, str(exc))
 
 
 async def _engine(gateway: Gateway, name: str) -> tuple[Any, JSONResponse | None]:
@@ -252,20 +327,14 @@ def mount(app: FastAPI, gateway: Gateway) -> None:
                     "modified_at": (spec.added if spec is not None else "") or _now(),
                     "size": int(size or 0),
                     "digest": hashlib.sha256(alias.encode()).hexdigest(),
-                    "details": {
-                        "parent_model": "",
-                        "format": spec.format if spec is not None else "gguf",
-                        "family": meta.get("architecture") or "",
-                        "families": [meta["architecture"]] if meta.get("architecture") else None,
-                        "parameter_size": _parameter_size(meta.get("n_params")),
-                        "quantization_level": meta.get("quant") or "",
-                    },
+                    "details": _details(spec, meta),
                 }
             )
         return {"models": models}
 
     @app.get("/api/ps")
     def ps():
+        expiries = gateway.expiries()
         models = []
         for alias in gateway.loaded_ids():
             spec = get_model(alias)
@@ -276,11 +345,37 @@ def mount(app: FastAPI, gateway: Gateway) -> None:
                     "model": alias,
                     "size": int(meta.get("size_bytes") or 0),
                     "digest": hashlib.sha256(alias.encode()).hexdigest(),
-                    "details": {"format": "gguf", "quantization_level": meta.get("quant") or ""},
-                    "expires_at": "9999-12-31T23:59:59Z",
+                    "details": {
+                        "format": spec.format if spec is not None else "gguf",
+                        "quantization_level": meta.get("quant") or "",
+                    },
+                    # Ollama reports a far-future stamp for a model that will
+                    # never be unloaded; the pool reports None for that case.
+                    "expires_at": expiries.get(alias) or _NEVER,
                 }
             )
         return {"models": models}
+
+    @app.post("/api/show")
+    def show(req: OllamaShowRequest):
+        """Describe an installed model without loading its weights."""
+        alias = _resolve_alias(gateway, req.model)
+        if alias is None:
+            available = ", ".join(gateway.ids()) or "none"
+            return _error(
+                404, f"model '{req.model}' not found (available: {available})"
+            )
+        spec = get_model(alias)
+        meta = dict(spec.meta) if spec is not None else {}
+        return {
+            "modified_at": (spec.added if spec is not None else "") or _now(),
+            "details": _details(spec, meta),
+            "model_info": _model_info(alias, meta),
+            "capabilities": _capabilities(meta),
+            "template": meta.get("template") or _DEFAULT_TEMPLATE,
+            "parameters": meta.get("parameters") or "",
+            "license": meta.get("license") or "",
+        }
 
     @app.post("/api/chat")
     async def chat(req: OllamaChatRequest):
@@ -296,16 +391,22 @@ def mount(app: FastAPI, gateway: Gateway) -> None:
         response_format = _response_format(req.format)
         if req.format is not None and response_format is None:
             return _error(400, "format must be 'json' or a JSON schema object")
+        ttl, problem = _keep_alive(req.keep_alive)
+        if problem is not None:
+            return problem
+        # Prompt size is a property of the request, so it is settled before a
+        # model load is paid for; only what needs the engine comes after.
+        messages = _messages(req.messages)
+        if sum(len(m.get("content") or "") for m in messages) > _MAX_PROMPT_CHARS:
+            return _error(400, "prompt too large")
 
         active, problem = await _engine(gateway, req.model)
         if problem is not None:
             return problem
+        gateway.keep_alive(active, ttl)
         lease = Lease(lambda: gateway.release(active))
         streaming = False
         try:
-            messages = _messages(req.messages)
-            if sum(len(m.get("content") or "") for m in messages) > _MAX_PROMPT_CHARS:
-                return _error(400, "prompt too large")
             kwargs = _chat_kwargs(req.options)
             if req.tools:
                 kwargs["tools"] = req.tools
@@ -356,10 +457,14 @@ def mount(app: FastAPI, gateway: Gateway) -> None:
         response_format = _response_format(req.format)
         if req.format is not None and response_format is None:
             return _error(400, "format must be 'json' or a JSON schema object")
+        ttl, problem = _keep_alive(req.keep_alive)
+        if problem is not None:
+            return problem
 
         active, problem = await _engine(gateway, req.model)
         if problem is not None:
             return problem
+        gateway.keep_alive(active, ttl)
         lease = Lease(lambda: gateway.release(active))
         streaming = False
         try:
@@ -409,6 +514,9 @@ def mount(app: FastAPI, gateway: Gateway) -> None:
 
     @app.post("/api/embed")
     async def embed(req: OllamaEmbedRequest):
+        texts = [req.input] if isinstance(req.input, str) else list(req.input)
+        if not texts:
+            return _error(400, "input must not be empty")
         active, problem = await _engine(gateway, req.model)
         if problem is not None:
             return problem
@@ -416,9 +524,6 @@ def mount(app: FastAPI, gateway: Gateway) -> None:
         try:
             if not _supports_embeddings(active):
                 return _error(501, _EMBEDDINGS_OFF)
-            texts = [req.input] if isinstance(req.input, str) else list(req.input)
-            if not texts:
-                return _error(400, "input must not be empty")
             started = time.perf_counter()
             vectors, tokens = await run_leased(gateway.lock, lease, _embed_and_count, active, texts)
             elapsed = time.perf_counter() - started

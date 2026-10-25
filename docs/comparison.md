@@ -31,7 +31,7 @@ All four accept `POST /v1/chat/completions`. The difference is what reaches the
 backend: Vipera forwards the full sampling surface — `stop`, `seed`,
 `logit_bias`, `logprobs`, penalties, `response_format`, `tools`/`tool_choice` —
 instead of dropping unknown fields
-([`engine.py`](../src/vipera/engine.py), [`server.py`](../src/vipera/server.py)).
+([`backends/inprocess.py`](../src/vipera/backends/inprocess.py), [`server.py`](../src/vipera/server.py)).
 
 ## Hardware-aware planner
 
@@ -82,17 +82,18 @@ Ollama has `ollama ps` and debug logging but no single environment check;
 ## Python-native, embeddable
 
 Vipera is a Python package: `from vipera.planner import plan` and
-`from vipera.engine import Engine` work in a script, and `build_app(engine,
-alias)` returns a FastAPI app you can mount
+`from vipera.backends.inprocess import Engine` work in a script, and
+`build_app(engine, alias)` returns a FastAPI app you can mount
 ([`server.py`](../src/vipera/server.py)). Ollama is a Go daemon with a Python
 client; `llama.cpp` has Python bindings but no gateway layer; LM Studio is
 closed-source.
 
 ## What Vipera does not do
 
-- One model per gateway process; no multi-model routing.
 - No authentication, TLS, CORS, or rate limiting. Bind to loopback.
-- No expert-placement flags for MoE models, and no disk-offload planner.
+- No disk-offload planner: expert weights stay wherever the plan places them.
+- No per-request routing or queueing priority across models; a loaded engine is
+  held for its whole request.
 - No web UI.
 
 See [architecture.md](architecture.md#known-gaps) for the maintained list.

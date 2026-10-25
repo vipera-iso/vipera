@@ -11,6 +11,7 @@ from vipera.backends.protocol import ChatEngine
 from vipera.backends.registry import create_engine, resolve_backend
 from vipera.config import VIPERA_HOME, load_config
 from vipera.hardware import detect
+from vipera.keepalive import parse_keep_alive
 from vipera.optimize.tuning import apply_tuning
 from vipera.planner import plan
 from vipera.pool import ModelPool
@@ -182,6 +183,11 @@ def start(
     max_loaded: int = typer.Option(
         None, "--max-loaded", help="How many of --models stay in memory (default 2)"
     ),
+    keep_alive: str = typer.Option(
+        None,
+        "--keep-alive",
+        help="Unload idle models after this long: 5m, 1h, seconds, 0, or -1 forever",
+    ),
     protocol: str = typer.Option(
         None, "--protocol", help="HTTP layers to mount: openai, ollama, or openai,ollama"
     ),
@@ -196,6 +202,12 @@ def start(
     bench = _resolve_option(bench, False)
     backend = cfg.get("backend", "inprocess")
     max_loaded = int(_resolve_option(max_loaded, cfg.get("max_loaded", 2)))
+    keep_alive = _resolve_option(keep_alive, cfg.get("keep_alive", "5m"))
+    try:
+        keep_alive_seconds = parse_keep_alive(keep_alive)
+    except ValueError as e:
+        console.print(f"[{C_RED}] ✗ {e}[/]")
+        raise typer.Exit(1) from e
 
     # Validate before loading a model: an unknown layer would otherwise fail
     # only after the (possibly minute-long) load finished.
@@ -291,12 +303,14 @@ def start(
             {alias: info.path for alias, info in metas.items()},
             lambda alias, _path: _mount(metas[alias], alias, announce=False)[1],
             max_loaded=max_loaded,
+            keep_alive=keep_alive_seconds,
         )
         section("models")
         ledger(
             [
                 ("serving", ", ".join(metas)),
                 ("max loaded", str(max_loaded)),
+                ("keep alive", str(keep_alive)),
                 ("backend", backend),
             ]
         )

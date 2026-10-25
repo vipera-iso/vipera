@@ -117,6 +117,17 @@ class GGUFAnalysisError(RuntimeError):
     """Raised when a GGUF file cannot be inspected."""
 
 
+#: A GGUF header can claim any layer count, and a tensor name any layer index;
+#: both size per-layer lists when the file is read. The bound is well above any
+#: real stack (the largest shipping models are under 200 layers) because the
+#: value is untrusted input, not a description of this machine.
+_MAX_LAYERS = 1024
+
+#: Critical-tensor warnings are per tensor, and a crafted file can hold as many
+#: as it likes; the UI only ever shows a handful.
+_MAX_WARNINGS = 100
+
+
 def _gguf_quant_names() -> dict[int, str]:
     """Map id -> name from the optional `gguf` package, cached on first use."""
     global _GGUF_QUANT_TYPES
@@ -318,6 +329,7 @@ def analyze_gguf(path: str) -> dict[str, Any]:
     quant_sizes: dict[str, int] = defaultdict(int)
     quant_counts: dict[str, int] = defaultdict(int)
     warnings: list[dict[str, str]] = []
+    warning_count = 0
     max_layer = -1
     # MoE weights split in two classes because llama.cpp's --n-cpu-moe only
     # moves routed experts (*_exps). Shared experts (*_shexp) and the router
@@ -366,20 +378,25 @@ def analyze_gguf(path: str) -> dict[str, Any]:
             and rank is not None
             and rank < _CRITICAL_RANK
         ):
-            warnings.append(
-                {
-                    "tensor": tensor_name,
-                    "quant": quant,
-                    "category": category,
-                    "message": (
-                        f"{tensor_name} is {quant}, below {_CRITICAL_THRESHOLD}; "
-                        "this tensor is sensitive to quantization."
-                    ),
-                }
-            )
+            warning_count += 1
+            if len(warnings) < _MAX_WARNINGS:
+                warnings.append(
+                    {
+                        "tensor": tensor_name,
+                        "quant": quant,
+                        "category": category,
+                        "message": (
+                            f"{tensor_name} is {quant}, below {_CRITICAL_THRESHOLD}; "
+                            "this tensor is sensitive to quantization."
+                        ),
+                    }
+                )
 
     if n_layers is None:
         n_layers = max_layer + 1
+    # Both sources are untrusted: `block_count` is read from the header and the
+    # fallback from tensor names, and either sizes the per-layer list below.
+    n_layers = max(0, min(n_layers, _MAX_LAYERS))
 
     expert_layer_sizes = [int(expert_layer_bytes.get(i, 0)) for i in range(n_layers)]
 
@@ -425,6 +442,9 @@ def analyze_gguf(path: str) -> dict[str, Any]:
         "quant_sizes": dict(quant_sizes),
         "quant_counts": dict(quant_counts),
         "warnings": warnings,
+        # True when low-quant critical tensors were dropped by the cap, so a
+        # consumer does not read a truncated list as the whole story.
+        "warnings_truncated": warning_count > len(warnings),
     }
 
 

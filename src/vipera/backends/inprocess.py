@@ -145,6 +145,10 @@ class Engine:
         data = text.encode() if isinstance(text, str) else text
         return self.llm.tokenize(data)
 
+    def health(self) -> str:
+        """In-process: an answer means the engine is this process, so alive."""
+        return "ok"
+
     def close(self) -> None:
         if self._closed:
             return

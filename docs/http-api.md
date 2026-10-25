@@ -79,6 +79,9 @@ FastAPI's `{"detail": ...}` format, not OpenAI's `{"error": {...}}` envelope.
 {
   "status": "ok",
   "model": "deepseek-v2-lite",
+  "engines": {
+    "deepseek-v2-lite": "ok"
+  },
   "optimize": {
     "requests": 42,
     "prefix_hits": 31,
@@ -92,8 +95,23 @@ FastAPI's `{"detail": ...}` format, not OpenAI's `{"error": {...}}` envelope.
 }
 ```
 
-The `model` value is the registry alias used at startup. The endpoint does not
-check that the engine is still healthy beyond the process being alive.
+The `model` value is the registry alias used at startup. `engines` maps each
+served model to what the engine itself answers: `ok` when the backend is
+serving, otherwise `starting` (the child is still loading), `exited` (the child
+process is gone) or `unreachable` (nothing answers on its port). The probe only
+asks a backend that is already loaded — it never starts, loads or restarts one,
+so polling stays cheap. A backend with no probe of its own (the `inprocess`
+engine) reports `ok` when it answers at all.
+
+The status code is `200` only while every served engine is `ok`; otherwise the
+response is `503` with `status` carrying the reason — the engine's own word in
+single-model mode, `unhealthy` in pool mode, where `engines` says which model is
+which. `vipera status` is unaffected: it checks the port, not this payload.
+
+Generation requests are bounded too: a child that stops producing bytes raises
+a `RuntimeError` (surfaced as an SSE error event on a stream) after
+`max_tokens / 0.5` seconds, with a 300 s floor, instead of holding the gateway
+forever.
 
 `optimize` is the [optimization layer](architecture.md#optimization-layer):
 `prefix_hits` counts requests whose reusable prefix (system prompt, tool schema,
@@ -104,7 +122,8 @@ much shaping had to give up. The block is present whenever the app was built
 with a layer (the normal case); `shaping: false` only stops the trimming, not
 the accounting.
 
-In pool mode the body also carries `loaded`, the aliases resident right now.
+In pool mode the body also carries `loaded`, the aliases resident right now,
+and only those appear in `engines`.
 
 ### `GET /v1/models`
 

@@ -184,6 +184,52 @@ async def run_leased(
         raise
 
 
+#: How long a teardown waits for a closed reader to notice before the permit is
+#: handed to a watcher. A blocking socket read does not observe ``close()``
+#: until the next byte or EOF arrives, which can be minutes into a prefill.
+_UNPARK_GRACE_S = 0.25
+
+
+def _give_back_slot(loop, thread, lock, on_close) -> None:
+    """Release the permit, but never while the reader thread still runs.
+
+    ``_close_iterator`` cannot unblock a thread parked inside a socket read, so
+    a join timeout does not mean the engine is idle: releasing there would let
+    the next request into a context that is still generating, and in pool mode
+    would let that engine be evicted and closed under a live reader. The permit
+    therefore waits for the thread — off the event loop when that takes longer
+    than the grace period.
+    """
+
+    def _release() -> None:
+        lock.release()
+        if on_close is not None:
+            on_close()
+
+    if thread is None or not thread.is_alive():
+        _release()
+        return
+    # Bounded, and only reached when close() did not unpark the reader; the
+    # event loop stays blocked for at most this long.
+    thread.join(_UNPARK_GRACE_S)
+    if not thread.is_alive():
+        _release()
+        return
+    threading.Thread(
+        target=_release_when_reader_returns,
+        args=(loop, thread, _release),
+        name="vipera-sse-reclaim",
+        daemon=True,
+    ).start()
+
+
+def _release_when_reader_returns(loop, thread, release) -> None:
+    thread.join()
+    # The permit is loop-owned; hand the release back to the loop's thread.
+    with contextlib.suppress(RuntimeError):
+        loop.call_soon_threadsafe(release)
+
+
 _RELAY_DONE = object()
 
 
@@ -212,10 +258,11 @@ async def relay_chunks(
     gateway's own share of decode time measured 9.6% on a 0.5B against 0.8%
     with this relay, for the same child process and the same bytes.
 
-    Cancellation still waits for the reader: ``close()`` on the iterator unblocks
-    it inside a read, and the slot is released only after the thread returns, so
-    a disconnected client cannot hand a busy context to the next request.
-    ``on_close`` runs once the reader is gone (the lease, for a pooled engine).
+    Cancellation never hands a busy context on: the slot is released only after
+    the reader thread returns. When ``close()`` cannot unpark a read, the permit
+    waits on the reader in a watcher thread instead of being released on a
+    timeout (see ``_give_back_slot``). ``on_close`` runs once the reader is gone
+    (the lease, for a pooled engine).
     """
     await lock.acquire()
     loop = asyncio.get_running_loop()
@@ -254,8 +301,4 @@ async def relay_chunks(
         stop.set()
         if iterator is not None:
             _close_iterator(iterator)
-        if thread is not None and thread.is_alive():
-            await asyncio.to_thread(thread.join, 10)
-        lock.release()
-        if on_close is not None:
-            on_close()
+        _give_back_slot(loop, thread, lock, on_close)

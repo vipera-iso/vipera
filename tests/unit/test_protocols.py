@@ -1,9 +1,11 @@
 import json
 import types
+from datetime import UTC, datetime
 
 import pytest
 from fastapi.testclient import TestClient
 
+from vipera.pool import ModelPool
 from vipera.protocols import mount
 from vipera.protocols.ollama import _ollama_tool_calls
 from vipera.server import build_app
@@ -45,6 +47,55 @@ class FakeEngine:
 
 def _client(engine, *, protocols=None, model="test-model"):
     return TestClient(build_app(engine, model, protocols=protocols))
+
+
+class PoolEngine(FakeEngine):
+    """A fake engine the pool can load, close, and count."""
+
+    def __init__(self):
+        super().__init__()
+        self.closed = False
+
+    def close(self):
+        self.closed = True
+
+
+def _pool_client(*, keep_alive=30):
+    engines = []
+
+    def factory(alias, path):
+        engine = PoolEngine()
+        engines.append(engine)
+        return engine
+
+    pool = ModelPool(
+        {"test-model": "/tmp/test-model.gguf"},
+        factory,
+        max_loaded=1,
+        keep_alive=keep_alive,
+        reap_interval=60,
+    )
+    client = TestClient(build_app(pool=pool, protocols=["ollama"]))
+    return client, pool, engines
+
+
+def test_ollama_rejects_an_oversized_prompt_without_loading_the_model():
+    """The prompt limit is checked before a load, not after it."""
+
+    client, pool, engines = _pool_client()
+    try:
+        r = client.post(
+            "/api/chat",
+            json={
+                "model": "test-model",
+                "stream": False,
+                "messages": [{"role": "user", "content": "x" * 500_001}],
+            },
+        )
+        assert r.status_code == 400
+        assert engines == []
+    finally:
+        pool.close()
 
 
 # -- OpenAI embeddings -------------------------------------------------------
@@ -519,3 +570,90 @@ def test_streaming_falls_back_to_re_encoding_for_other_engines():
     assert '"content": "hi"' in body
     assert body.rstrip().endswith("data: [DONE]")
     assert engine.calls[-1]["stream"] is True
+
+
+# -- Ollama lifecycle --------------------------------------------------------
+
+
+def test_ps_reports_the_keep_alive_deadline_after_a_chat():
+    client, pool, _engines = _pool_client()
+
+    response = client.post(
+        "/api/chat",
+        json={
+            "model": "test-model",
+            "messages": [{"role": "user", "content": "hi"}],
+            "stream": False,
+            "keep_alive": "5m",
+        },
+    )
+
+    assert response.status_code == 200
+    loaded = client.get("/api/ps").json()["models"]
+    assert [m["model"] for m in loaded] == ["test-model"]
+    deadline = datetime.fromisoformat(loaded[0]["expires_at"].replace("Z", "+00:00"))
+    assert deadline > datetime.now(UTC)
+    assert loaded[0]["expires_at"] != "9999-12-31T23:59:59Z"
+    pool.close()
+
+
+def test_keep_alive_zero_unloads_after_the_response():
+    client, pool, engines = _pool_client()
+
+    response = client.post(
+        "/api/chat",
+        json={
+            "model": "test-model",
+            "messages": [{"role": "user", "content": "hi"}],
+            "stream": False,
+            "keep_alive": 0,
+        },
+    )
+
+    assert response.status_code == 200
+    assert pool.loaded_ids() == []
+    assert engines[0].closed is True
+    pool.close()
+
+
+def test_invalid_keep_alive_is_rejected_before_loading_a_model():
+    client, pool, engines = _pool_client()
+
+    response = client.post(
+        "/api/chat",
+        json={
+            "model": "test-model",
+            "messages": [{"role": "user", "content": "hi"}],
+            "stream": False,
+            "keep_alive": "soon",
+        },
+    )
+
+    assert response.status_code == 400
+    assert "keep_alive" in response.json()["error"]
+    assert engines == []
+    pool.close()
+
+
+def test_show_describes_a_model_without_loading_it():
+    client, pool, engines = _pool_client()
+
+    response = client.post("/api/show", json={"model": "test-model"})
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["details"]["format"] == "gguf"
+    assert body["capabilities"] == ["completion"]
+    assert isinstance(body["model_info"], dict)
+    assert engines == [], "show must not load the weights"
+    pool.close()
+
+
+def test_show_rejects_an_unknown_model():
+    client, pool, _engines = _pool_client()
+
+    response = client.post("/api/show", json={"model": "ghost"})
+
+    assert response.status_code == 404
+    assert "ghost" in response.json()["error"]
+    pool.close()

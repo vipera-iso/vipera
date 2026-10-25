@@ -83,10 +83,40 @@ def test_coerce_strict_rejects_unknown_kv_cache():
 
 @pytest.mark.parametrize("value", ["maybe", "truthy", "2", "nope"])
 def test_parse_bool_rejects_garbage(value):
-    # Lenient loading treats anything unknown as False; a command writing the
-    # config back must not silently flip a flag the user mistyped.
+    # Lenient loading warns and keeps the default; a command writing the config
+    # back must not silently flip a flag the user mistyped either.
     with pytest.raises(ValueError, match="boolean"):
         cfg_mod._parse_bool(value)
+
+
+def test_a_boolean_typo_warns_and_keeps_the_default(isolated_home, capsys):
+    # "fasle" used to coerce to False without a word, silently disabling a
+    # feature the user thought they had configured.
+    (isolated_home / "config.json").write_text(json.dumps({"shaping": "fasle"}))
+
+    cfg = cfg_mod.load_config()
+
+    assert cfg["shaping"] is cfg_mod.DEFAULT_CONFIG["shaping"] is True
+    assert "shaping" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize(
+    "value, expected",
+    [
+        (True, True),
+        (False, False),
+        ("yes", True),
+        ("on", True),
+        ("1", True),
+        ("off", False),
+        ("no", False),
+        ("0", False),
+    ],
+    ids=repr,
+)
+def test_boolean_strings_are_still_coerced(isolated_home, value, expected):
+    (isolated_home / "config.json").write_text(json.dumps({"embeddings": value}))
+    assert cfg_mod.load_config()["embeddings"] is expected
 
 
 @pytest.mark.parametrize(

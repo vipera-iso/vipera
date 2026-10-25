@@ -96,6 +96,15 @@ def test_sdk_lists_the_served_model(client):
     assert models[0].details.format == "gguf"
 
 
+def test_sdk_show_describes_the_model(client):
+    info = client.show("test-model")
+
+    assert info.details.format == "gguf"
+    assert info.capabilities == ["completion"]
+    assert info.modelinfo["general.name"] == "test-model"
+    assert info.template
+
+
 def test_sdk_chat_without_streaming(client):
     response = client.chat(
         model="test-model",
@@ -150,3 +159,75 @@ def test_sdk_raises_response_error_for_an_unknown_model(client):
 
     assert exc.value.status_code == 404
     assert "ghost" in str(exc.value)
+
+
+def test_sdk_legacy_embeddings(client):
+    """`/api/embeddings` (the deprecated single-prompt route) still answers."""
+    assert client.embeddings(model="test-model", prompt="a").embedding == [0.5, 1.5]
+
+
+# -- parity scoreboard --------------------------------------------------------
+#
+# Every method the official client exposes gets a test here, whether or not the
+# gateway serves it yet. A test that is `xfail(strict=True)` is a gap with an
+# owning task; when that task lands the test starts passing, pytest reports
+# XPASS, and the strict marker turns it into a failure so the marker (and this
+# list) has to be updated. The count of passing vs xfail tests is the scoreboard
+# recorded in tasks/todo.md.
+
+_ONE_PIXEL_PNG = (
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8DwHwAFAAH/q842iQAAAABJRU5ErkJggg=="
+)
+
+
+@pytest.mark.xfail(strict=True, reason="P2-4: /api/show hardcodes capabilities to ['completion']")
+def test_sdk_show_reports_tools_in_capabilities(client):
+    assert "tools" in client.show("test-model").capabilities
+
+
+@pytest.mark.xfail(strict=True, reason="P2-2: `think` is ignored, no message.thinking")
+def test_sdk_chat_returns_a_thinking_trace(client):
+    response = client.chat(
+        model="test-model",
+        messages=[{"role": "user", "content": "hi"}],
+        stream=False,
+        think=True,
+    )
+
+    assert response.message.thinking
+
+
+@pytest.mark.xfail(strict=True, reason="P4-3: /api/chat rejects `images` with 400")
+def test_sdk_chat_accepts_an_image(client):
+    client.chat(
+        model="test-model",
+        messages=[
+            {"role": "user", "content": "what is this?", "images": [_ONE_PIXEL_PNG]}
+        ],
+        stream=False,
+    )
+
+
+@pytest.mark.xfail(strict=True, reason="P1-3/P1-8: no /api/create")
+def test_sdk_create_derives_a_model(client):
+    client.create(model="derived-test", from_="test-model", stream=False)
+
+
+@pytest.mark.xfail(strict=True, reason="P1-4/P3-4: no /api/copy")
+def test_sdk_copy_duplicates_a_model(client):
+    client.copy("test-model", "copy-test")
+
+
+@pytest.mark.xfail(strict=True, reason="P3-4: no /api/delete")
+def test_sdk_delete_removes_a_model(client):
+    client.delete("test-model")
+
+
+@pytest.mark.xfail(strict=True, reason="P3-5: no /api/pull")
+def test_sdk_pull_installs_a_model(client):
+    client.pull("test-model", stream=False)
+
+
+@pytest.mark.xfail(strict=True, reason="P3-5: no /api/push (documented 501, route absent)")
+def test_sdk_push_uploads_a_model(client):
+    client.push("test-model", stream=False)

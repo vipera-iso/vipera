@@ -25,6 +25,14 @@ class ChatEngine(Protocol):
 
     def tokenize(self, text: str | bytes) -> list[int]: ...
 
+    def health(self) -> str:
+        """One word the gateway's ``/health`` can report.
+
+        ``ok`` when the engine is serving; otherwise why not (``starting``,
+        ``exited``, ``unreachable``). Probing must not start or restart it.
+        """
+        ...
+
     def close(self) -> None: ...
 
 

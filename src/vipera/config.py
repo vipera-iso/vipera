@@ -7,6 +7,7 @@ from pathlib import Path
 
 from vipera.backends.names import is_known as _is_known_backend
 from vipera.backends.names import names as backend_names
+from vipera.keepalive import parse_keep_alive
 from vipera.planner import profile_names
 from vipera.protocols.names import is_known as _is_known_protocol
 from vipera.protocols.names import names as protocol_names
@@ -26,6 +27,10 @@ DEFAULT_CONFIG = {
     # Aliases to serve together (lazy-loaded); None means single-model mode.
     "models": None,
     "max_loaded": 2,
+    # How long a pool-mode model stays loaded after its last request. Ollama
+    # syntax: "5m", "1h", seconds, 0 to unload immediately, negative for
+    # forever. Single-model mode keeps its engine for the process lifetime.
+    "keep_alive": "5m",
     # `auto` uses llama-server when a CUDA build can see the card (its C++
     # engine is measurably faster than the Python binding), and falls back to
     # the in-process engine otherwise.
@@ -121,7 +126,9 @@ def _coerce(cfg: dict) -> dict:
         if k in cfg and cfg[k] is not None:
             try:
                 if cast is bool:
-                    cfg[k] = str(cfg[k]).lower() in ("1", "true", "yes", "on")
+                    # Strict, like the other types: a mistyped flag used to
+                    # coerce to False and quietly turn a feature off.
+                    cfg[k] = _parse_bool(cfg[k])
                 else:
                     cfg[k] = cast(cfg[k])
             except (ValueError, TypeError):
@@ -141,6 +148,15 @@ def _coerce(cfg: dict) -> dict:
         cfg["profile"] = DEFAULT_CONFIG["profile"]
     if cfg.get("parallel", 1) < 1:
         cfg["parallel"] = DEFAULT_CONFIG["parallel"]
+    try:
+        parse_keep_alive(cfg.get("keep_alive"))
+    except ValueError as exc:
+        print(
+            f"vipera: config keep_alive={cfg.get('keep_alive')!r} is invalid "
+            f"({exc}); using {DEFAULT_CONFIG['keep_alive']!r}",
+            file=sys.stderr,
+        )
+        cfg["keep_alive"] = DEFAULT_CONFIG["keep_alive"]
     requested = _split_protocols(cfg.get("protocols"))
     known = [name for name in requested if _is_known_protocol(name)]
     for name in requested:
@@ -182,6 +198,11 @@ def _coerce_strict(cfg: dict) -> dict:
         raise ValueError(f"kv_cache: must be one of {valid}")
     if "parallel" in cfg and int(cfg["parallel"]) < 1:
         raise ValueError("parallel: must be at least 1")
+    if "keep_alive" in cfg:
+        try:
+            parse_keep_alive(cfg["keep_alive"])
+        except ValueError as exc:
+            raise ValueError(f"keep_alive: {exc}") from exc
     if "backend" in cfg and not _is_known_backend(cfg["backend"]):
         valid = ", ".join(backend_names())
         raise ValueError(f"backend: must be one of {valid}")

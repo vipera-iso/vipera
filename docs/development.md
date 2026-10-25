@@ -72,11 +72,11 @@ Test layout:
 
 | File | Covers |
 |---|---|
-| `tests/test_planner.py` | CPU-only, full-GPU, hybrid, per-layer VRAM budgeting, and low-RAM planning. Uses a synthetic `HardwareInfo`. |
-| `tests/test_engine.py` | Staged GPU→CPU fallback using a fake `llama_cpp.Llama`. |
-| `tests/test_server.py` | `/health`, `/v1/models`, non-streaming and SSE completion against a fake engine. |
-| `tests/test_config.py` | Defaults, save/reload, type coercion, corrupt-file fallback. |
-| `tests/test_registry.py` | Add/get/list/remove. |
+| `tests/unit/test_planner.py` | CPU-only, full-GPU, hybrid, per-layer VRAM budgeting, and low-RAM planning. Uses a synthetic `HardwareInfo`. |
+| `tests/unit/test_engine.py` | Staged GPU→CPU fallback using a fake `llama_cpp.Llama`. |
+| `tests/unit/test_server.py` | `/health`, `/v1/models`, non-streaming and SSE completion against a fake engine. |
+| `tests/unit/test_config.py` | Defaults, save/reload, type coercion, corrupt-file fallback. |
+| `tests/unit/test_registry.py` | Add/get/list/remove. |
 | `tests/integration/test_ollama_sdk.py` | The `/api/*` layer over a real socket, driven by the official `ollama` client (installed by `.[dev]`). Starts uvicorn on a loopback port with the stub engine; no model and no Ollama daemon. |
 
 Rules:

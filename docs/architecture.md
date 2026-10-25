@@ -26,8 +26,10 @@ All code lives in `src/vipera`.
 |---|---|---|
 | `hardware.py` | Probe CPU topology, RAM, GPU name, VRAM. Returns `HardwareInfo`. No side effects beyond optional NVML init. | `psutil`, `pynvml` module (optional `nvidia` extra) |
 | `planner.py` | Turn `(model metadata, HardwareInfo, overrides)` into a `Plan` dataclass. Pure function. | `hardware` |
-| `engine.py` | Wrap `llama_cpp.Llama` from a `Plan`; perform the GPU→CPU and `mlock` retries; expose `chat()`/`tokenize()`. `create_engine()` picks the backend. | `llama-cpp-python` (optional extra), `planner` |
-| `server_backend.py` | Opt-in `llama-server` child process: translate a `Plan` into flags, wait for `/health`, proxy `chat()`/`tokenize()`, stop the child. | `planner`, `optimizer` (binary lookup) |
+| `backends/inprocess.py` | Wrap `llama_cpp.Llama` from a `Plan`; perform the GPU→CPU and `mlock` retries; expose `chat()`/`tokenize()`/`health()`. | `llama-cpp-python` (optional extra), `planner` |
+| `backends/server.py` | Opt-in `llama-server` child process: translate a `Plan` into flags, wait for `/health`, proxy `chat()`/`tokenize()`, stop the child. | `planner`, `optimizer` (binary lookup) |
+| `backends/registry.py` | `create_engine(plan, path, backend)` — the one place a backend name becomes an engine. | `backends` |
+| `pool.py` | Multi-model mode: load engines per alias, hand out one under a gateway lock, report `health()` and `keep_alive` expiry. | `backends`, `config` |
 | `server.py` | Build the FastAPI app around an engine: `/health`, `/v1/models`, `/v1/chat/completions`, SSE framing. | `fastapi`, `pydantic` |
 | `registry.py` | JSON model index at `$VIPERA_HOME/registry.json`: add/list/get/remove. | `config` |
 | `config.py` | Paths, default config, load/save with type coercion. | stdlib |

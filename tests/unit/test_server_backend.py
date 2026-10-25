@@ -81,6 +81,68 @@ def _engine():
     return engine
 
 
+def test_request_timeout_is_a_generous_backstop():
+    """The bound exists to break a hang, not to cut off slow hardware."""
+
+    assert sb._request_timeout(0) == sb._MIN_REQUEST_TIMEOUT_S
+    assert sb._request_timeout(None) == sb._MIN_REQUEST_TIMEOUT_S
+    assert sb._request_timeout("nonsense") == sb._MIN_REQUEST_TIMEOUT_S
+    # A long generation gets proportionally longer than the floor.
+    assert sb._request_timeout(8192) == pytest.approx(8192 / sb._MIN_TOKENS_PER_S)
+
+
+def test_chat_bounds_each_child_request_with_a_timeout(monkeypatch):
+    engine = _engine()
+    seen = {}
+
+    def fake_urlopen(request, timeout=None):
+        seen["timeout"] = timeout
+        return _Payload({"choices": []})
+
+    monkeypatch.setattr(sb.urllib.request, "urlopen", fake_urlopen)
+
+    engine.chat([{"role": "user", "content": "hi"}], max_tokens=4096)
+
+    assert seen["timeout"] == sb._request_timeout(4096)
+
+
+def test_health_reports_exited_when_the_child_is_gone():
+    engine = _engine()
+    assert engine.health() == "exited"  # no child was ever started
+
+    engine._proc = _Proc(alive=False)
+    assert engine.health() == "exited"  # the child died
+
+
+def test_health_asks_the_child_and_reports_its_state(monkeypatch):
+    engine = _engine()
+    engine._proc = _Proc(alive=True)
+
+    class _Ok:
+        status = 200
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+    monkeypatch.setattr(sb.urllib.request, "urlopen", lambda url, timeout=None: _Ok())
+    assert engine.health() == "ok"
+
+    def _starting(url, timeout=None):
+        raise sb.urllib.error.HTTPError(url, 503, "loading", {}, None)
+
+    monkeypatch.setattr(sb.urllib.request, "urlopen", _starting)
+    assert engine.health() == "starting"
+
+    def _unreachable(url, timeout=None):
+        raise sb.urllib.error.URLError("connection refused")
+
+    monkeypatch.setattr(sb.urllib.request, "urlopen", _unreachable)
+    assert engine.health() == "unreachable"
+
+
 # --- plan -> flags -----------------------------------------------------------
 
 
@@ -359,7 +421,7 @@ def test_tokenize_posts_text_and_returns_ints(monkeypatch):
     engine = _engine()
     seen = {}
 
-    def fake_post(path, body):
+    def fake_post(path, body, **kw):
         seen["path"], seen["body"] = path, body
         return _Payload({"tokens": [1, 2, "3"]})
 
@@ -373,7 +435,7 @@ def test_chat_streams_and_forwards_usage_options(monkeypatch):
     engine = _engine()
     seen = {}
 
-    def fake_post(path, body):
+    def fake_post(path, body, **kw):
         seen.update(path=path, body=body)
         return _Response([b'data: {"choices":[]}\n', b"data: [DONE]\n"])
 
@@ -407,7 +469,7 @@ def test_chat_without_stream_parses_the_json_body(monkeypatch):
     monkeypatch.setattr(
         engine,
         "_post",
-        lambda path, body: _Payload({"choices": [{"message": {"content": "ok"}}]}),
+        lambda path, body, **kw: _Payload({"choices": [{"message": {"content": "ok"}}]}),
     )
 
     out = engine.chat([{"role": "user", "content": "hi"}])
@@ -554,7 +616,7 @@ def test_chat_sse_forwards_the_child_frames_unchanged(monkeypatch):
             self.closed = True
 
     raw = _Raw([b"".join(frames[:3]), b"".join(frames[3:])])
-    monkeypatch.setattr(engine, "_post", lambda path, body: raw)
+    monkeypatch.setattr(engine, "_post", lambda path, body, **kw: raw)
 
     # Byte-for-byte, up to and including [DONE]; the child's trailing bytes are
     # never read.

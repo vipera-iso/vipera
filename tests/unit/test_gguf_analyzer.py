@@ -7,6 +7,8 @@ import pytest
 from vipera import gguf_analyzer as _analyzer
 from vipera.commands import model_cmd
 from vipera.gguf_analyzer import (
+    _MAX_LAYERS,
+    _MAX_WARNINGS,
     GGUFAnalysisError,
     _attention_profile,
     analyze_gguf,
@@ -132,6 +134,7 @@ def test_analyze_warns_about_low_quant_critical_tensors(tmp_path, mocked_gguf):
     warned = {warning["tensor"] for warning in result["warnings"]}
     assert "blk.0.attn_v.weight" in warned
     assert "blk.0.ffn_down.weight" not in warned
+    assert result["warnings_truncated"] is False
 
 
 def test_analyze_requires_optional_gguf_package(tmp_path, monkeypatch):
@@ -141,6 +144,69 @@ def test_analyze_requires_optional_gguf_package(tmp_path, monkeypatch):
 
     with pytest.raises(GGUFAnalysisError, match="gguf is not installed"):
         analyze_gguf(str(path))
+
+
+# -- untrusted headers -------------------------------------------------------
+
+
+def _mock_reader(monkeypatch, reader):
+    module = types.ModuleType("gguf")
+    module.GGUFReader = lambda path: reader
+    monkeypatch.setitem(sys.modules, "gguf", module)
+    return reader
+
+
+def test_an_absurd_block_count_does_not_size_the_layer_allocation(tmp_path, monkeypatch):
+    """`block_count` comes from the file; it must not drive an allocation.
+
+    A 160-byte GGUF claiming 10M layers used to build a 10M-entry list (~76 MB)
+    before any of the metadata was shown.
+    """
+
+    reader = FakeReader()
+    reader.fields["llama.block_count"] = FakeField(10_000_000)
+    _mock_reader(monkeypatch, reader)
+    path = tmp_path / "crafted.gguf"
+    path.write_bytes(b"")
+
+    result = analyze_gguf(str(path))
+
+    assert result["metadata"]["n_layers"] == _MAX_LAYERS
+    assert len(result["metadata"]["expert_layer_bytes"]) == _MAX_LAYERS
+
+
+def test_an_absurd_layer_index_does_not_size_the_layer_allocation(tmp_path, monkeypatch):
+    """Without `block_count` the layer count comes from tensor names instead."""
+
+    reader = FakeReader()
+    del reader.fields["llama.block_count"]
+    reader.tensors = [FakeTensor("blk.999999999.attn_q.weight", 12, [128, 128], 400, 16_384)]
+    _mock_reader(monkeypatch, reader)
+    path = tmp_path / "crafted.gguf"
+    path.write_bytes(b"")
+
+    result = analyze_gguf(str(path))
+
+    assert result["metadata"]["n_layers"] == _MAX_LAYERS
+    assert len(result["metadata"]["expert_layer_bytes"]) == _MAX_LAYERS
+
+
+def test_low_quant_warnings_are_capped_and_reported_as_truncated(tmp_path, monkeypatch):
+    """Every sub-Q4_K critical tensor adds a dict; a crafted file has millions."""
+
+    reader = FakeReader()
+    reader.tensors = [
+        FakeTensor(f"blk.{i}.ffn_down.weight", 10, [128, 256], 200, 32_768)
+        for i in range(_MAX_WARNINGS + 50)
+    ]
+    _mock_reader(monkeypatch, reader)
+    path = tmp_path / "crafted.gguf"
+    path.write_bytes(b"")
+
+    result = analyze_gguf(str(path))
+
+    assert len(result["warnings"]) == _MAX_WARNINGS
+    assert result["warnings_truncated"] is True
 
 
 def test_analyze_gguf_structure_is_an_alias():

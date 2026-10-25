@@ -80,7 +80,7 @@ Playground.
 | A reviewable answer to "why were these flags chosen" | **Vipera** ([planner](src/vipera/planner.py), [plan docs](docs/architecture.md#planner)) |
 | Peak tokens/second on hardware you already tuned | `llama.cpp/server` directly |
 | A desktop app with a model browser and chat UI | LM Studio |
-| Multi-model routing, auth, TLS, or a web dashboard | Not this — one model per process, loopback by default |
+| Auth, TLS, or a web dashboard | Not this — one process, loopback by default |
 
 Feature-by-feature with sources: [docs/comparison.md](docs/comparison.md).
 
@@ -115,7 +115,9 @@ flowchart LR
 |---|---|
 | [`hardware.py`](src/vipera/hardware.py) | Cores, RAM, GPU, VRAM. No side effects. |
 | [`planner.py`](src/vipera/planner.py) | `(model meta, hardware) → Plan`: layers, KV dtype, batch, `mlock`, KQV offload. |
-| [`engine.py`](src/vipera/engine.py) | Drives `llama.cpp`; owns the GPU → CPU ladder and the bake-off between backends. |
+| [`backends/inprocess.py`](src/vipera/backends/inprocess.py) | Drives `llama_cpp.Llama`; owns the GPU → CPU and `mlock` retries. |
+| [`backends/server.py`](src/vipera/backends/server.py) | Opt-in `llama-server` child: Plan → argv, `/health` wait, proxied `chat()`/`tokenize()`. |
+| [`pool.py`](src/vipera/pool.py) | Multi-model mode: keeps several engines loaded behind their aliases. |
 | [`server.py`](src/vipera/server.py) | FastAPI with real SSE, flushed per token. |
 | [`registry.py`](src/vipera/registry.py), [`ui.py`](src/vipera/ui.py) | Model store and the Rich terminal UI. |
 
@@ -141,7 +143,7 @@ Every command, flag, and default: [docs/cli.md](docs/cli.md).
 
 | Method | Path | Returns |
 |---|---|---|
-| `GET` | `/health` | `{"status": "ok", "model": "<alias>"}` |
+| `GET` | `/health` | `{"status": "ok", "model": "<alias>", "engines": {"<alias>": "ok"}}` — `503` with the engine's own state (`exited`, `unreachable`, `starting`) when a loaded model stopped serving |
 | `GET` | `/v1/models` | OpenAI-shaped model list |
 | `POST` | `/v1/chat/completions` | Chat completion, streaming or not |
 | `POST` | `/v1/embeddings` | Embeddings, with `embeddings: true` in the config |

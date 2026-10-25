@@ -98,6 +98,40 @@ def _supports_embeddings(engine) -> bool:
     return bool(getattr(engine, "supports_embeddings", False))
 
 
+def _validate_chat(req: ChatRequest) -> None:
+    """Reject an unusable request before any engine is acquired.
+
+    In pool mode acquiring an engine plans and loads a GGUF, which takes
+    minutes; a 400 that arrives after that load has already paid for it.
+    """
+    if not req.messages:
+        raise HTTPException(400, "messages must not be empty")
+    if len(req.messages) > _MAX_MESSAGES:
+        raise HTTPException(400, f"too many messages (max {_MAX_MESSAGES})")
+    if sum(len(m.content or "") for m in req.messages) > _MAX_PROMPT_CHARS:
+        raise HTTPException(400, "prompt too large")
+    if not 0 < req.max_tokens <= _MAX_TOKENS:
+        raise HTTPException(400, f"max_tokens must be in [1, {_MAX_TOKENS}]")
+    if not 0.0 <= req.temperature <= 2.0:
+        raise HTTPException(400, "temperature must be in [0, 2]")
+    if not 0.0 < req.top_p <= 1.0:
+        raise HTTPException(400, "top_p must be in (0, 1]")
+
+
+def _embedding_texts(req: EmbeddingRequest) -> list[str]:
+    """Validate an embedding request and return its inputs, before a load."""
+    if req.encoding_format == "base64":
+        raise HTTPException(400, "encoding_format 'base64' is not supported")
+    texts = [req.input] if isinstance(req.input, str) else list(req.input)
+    if not texts:
+        raise HTTPException(400, "input must not be empty")
+    if len(texts) > _MAX_EMBED_INPUTS:
+        raise HTTPException(400, f"too many inputs (max {_MAX_EMBED_INPUTS})")
+    if sum(len(t) for t in texts) > _MAX_EMBED_CHARS:
+        raise HTTPException(400, "input too large")
+    return texts
+
+
 def mount(app: FastAPI, gateway: Gateway) -> None:
     @app.get("/v1/models")
     def models():
@@ -110,23 +144,11 @@ def mount(app: FastAPI, gateway: Gateway) -> None:
 
     @app.post("/v1/chat/completions")
     async def chat(req: ChatRequest):
-        if not req.messages:
-            raise HTTPException(400, "messages must not be empty")
+        _validate_chat(req)
         active = await _engine(gateway, req.model)
         lease = Lease(lambda: gateway.release(active))
         streaming = False
         try:
-            if len(req.messages) > _MAX_MESSAGES:
-                raise HTTPException(400, f"too many messages (max {_MAX_MESSAGES})")
-            if sum(len(m.content or "") for m in req.messages) > _MAX_PROMPT_CHARS:
-                raise HTTPException(400, "prompt too large")
-            if not 0 < req.max_tokens <= _MAX_TOKENS:
-                raise HTTPException(400, f"max_tokens must be in [1, {_MAX_TOKENS}]")
-            if not 0.0 <= req.temperature <= 2.0:
-                raise HTTPException(400, "temperature must be in [0, 2]")
-            if not 0.0 < req.top_p <= 1.0:
-                raise HTTPException(400, "top_p must be in (0, 1]")
-
             # exclude_none keeps unset optional knobs out of the llama.cpp call
             # so the backend's own defaults apply (e.g. seed=None is not 0).
             messages = [m.model_dump(exclude_none=True) for m in req.messages]
@@ -258,11 +280,10 @@ def mount(app: FastAPI, gateway: Gateway) -> None:
 
     @app.post("/v1/embeddings")
     async def embeddings(req: EmbeddingRequest):
+        texts = _embedding_texts(req)
         active = await _engine(gateway, req.model)
         lease = Lease(lambda: gateway.release(active))
         try:
-            if req.encoding_format == "base64":
-                raise HTTPException(400, "encoding_format 'base64' is not supported")
             if not _supports_embeddings(active):
                 raise HTTPException(
                     501,
@@ -271,14 +292,6 @@ def mount(app: FastAPI, gateway: Gateway) -> None:
                     "(the server backend needs a llama-server build with --embeddings "
                     "and --pooling).",
                 )
-
-            texts = [req.input] if isinstance(req.input, str) else list(req.input)
-            if not texts:
-                raise HTTPException(400, "input must not be empty")
-            if len(texts) > _MAX_EMBED_INPUTS:
-                raise HTTPException(400, f"too many inputs (max {_MAX_EMBED_INPUTS})")
-            if sum(len(t) for t in texts) > _MAX_EMBED_CHARS:
-                raise HTTPException(400, "input too large")
 
             def _embed_and_count():
                 vectors = active.embed(texts)

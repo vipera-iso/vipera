@@ -41,6 +41,75 @@ def test_health():
     assert body["optimize"]["prefix_hits"] == 0
 
 
+def test_health_reports_the_engine_state_when_it_is_ok():
+    class HealthyEngine(FakeEngine):
+        def health(self):
+            return "ok"
+
+    client = TestClient(build_app(HealthyEngine(), "test-model"))
+
+    r = client.get("/health")
+
+    assert r.status_code == 200
+    assert r.json()["engines"] == {"test-model": "ok"}
+
+
+def test_health_is_503_when_the_engine_is_not_serving():
+    class SickEngine(FakeEngine):
+        def health(self):
+            return "exited"
+
+    client = TestClient(build_app(SickEngine(), "test-model"))
+
+    r = client.get("/health")
+
+    assert r.status_code == 503
+    body = r.json()
+    assert body["status"] == "exited"
+    assert body["engines"] == {"test-model": "exited"}
+
+
+def test_health_in_pool_mode_only_probes_loaded_models():
+    app, pool, _ = _pool_app()
+    client = TestClient(app)
+
+    # A health probe must not become the thing that loads a model.
+    r = client.get("/health")
+
+    assert r.status_code == 200
+    assert r.json()["engines"] == {}
+    assert pool.loaded_ids() == []
+
+    client.post(
+        "/v1/chat/completions", json={"messages": [{"role": "user", "content": "hi"}]}
+    )
+
+    assert client.get("/health").json()["engines"] == {"alpha": "ok"}
+
+
+def test_health_in_pool_mode_reports_a_model_that_stopped_responding():
+    from vipera.pool import ModelPool
+
+    class DeadEngine(_NamedEngine):
+        def health(self):
+            return "unreachable"
+
+    pool = ModelPool({"alpha": "/tmp/alpha.gguf"}, lambda alias, path: DeadEngine(alias))
+    client = TestClient(build_app(pool=pool))
+    try:
+        client.post(
+            "/v1/chat/completions",
+            json={"messages": [{"role": "user", "content": "hi"}]},
+        )
+        r = client.get("/health")
+
+        assert r.status_code == 503
+        assert r.json()["status"] == "unhealthy"
+        assert r.json()["engines"] == {"alpha": "unreachable"}
+    finally:
+        pool.close()
+
+
 def test_models():
     client = TestClient(build_app(FakeEngine(), "test-model"))
     r = client.get("/v1/models")
@@ -630,6 +699,40 @@ def test_pool_routes_to_the_requested_model():
     assert engines["alpha"].calls == []
 
 
+def test_an_invalid_request_is_rejected_without_loading_the_model():
+    """A rejected request must not pay for a multi-minute GGUF load first."""
+
+    from vipera.pool import ModelPool
+
+    loads = []
+
+    def factory(alias, path):
+        loads.append(alias)
+        return _NamedEngine(alias)
+
+    pool = ModelPool({"alpha": "/tmp/alpha.gguf"}, factory, max_loaded=1)
+    client = TestClient(build_app(pool=pool))
+    try:
+        bad_bodies = [
+            {"messages": [{"role": "user", "content": "hi"}], "temperature": 5},
+            {"messages": [{"role": "user", "content": "hi"}], "max_tokens": 0},
+            {"messages": [{"role": "user", "content": "x" * 500_001}]},
+        ]
+        for body in bad_bodies:
+            assert client.post("/v1/chat/completions", json=body).status_code == 400
+        assert loads == []
+
+        # A request that passes validation still loads the model and is served.
+        r = client.post(
+            "/v1/chat/completions",
+            json={"messages": [{"role": "user", "content": "hi"}]},
+        )
+        assert r.status_code == 200
+        assert loads == ["alpha"]
+    finally:
+        pool.close()
+
+
 def test_pool_defaults_to_the_first_model():
     app, _, _ = _pool_app()
     client = TestClient(app)
@@ -810,6 +913,58 @@ def test_relay_closes_a_parked_reader_before_releasing_the_slot():
 
     assert events == ["closed"]
     assert locked is False
+
+
+def test_relay_holds_the_slot_when_close_cannot_unblock_the_reader():
+    """A socket read already inside http.client survives close().
+
+    llama-server's SSE reader is a blocking ``read1``: closing the response from
+    another thread does not necessarily return it. Releasing the permit on a
+    join timeout would admit a second request into a context that is still
+    generating, so the permit must stay held until the reader returns.
+    """
+
+    from vipera.protocols.streaming import relay_chunks
+
+    class _SocketLike:
+        """``close()`` does nothing for the parked read, as http.client can be."""
+
+        def __init__(self):
+            self.first = True
+            self.unpark = threading.Event()
+
+        def __iter__(self):
+            return self
+
+        def __next__(self):
+            if self.first:
+                self.first = False
+                return b"data: one\n\n"
+            self.unpark.wait(15)
+            raise StopIteration
+
+        def close(self):
+            pass
+
+    stream = _SocketLike()
+
+    async def _run():
+        lock = asyncio.Lock()
+        agen = relay_chunks(lock, lambda: stream)
+        assert await agen.__anext__() == b"data: one\n\n"
+        await agen.aclose()
+        held_while_parked = lock.locked()
+        stream.unpark.set()
+        for _ in range(200):
+            if not lock.locked():
+                break
+            await asyncio.sleep(0.05)
+        return held_while_parked, lock.locked()
+
+    held_while_parked, released_after = asyncio.run(_run())
+
+    assert held_while_parked is True, "the slot was released while the reader was still parked"
+    assert released_after is False
 
 
 def test_relay_surfaces_a_reader_error():

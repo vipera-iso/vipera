@@ -140,14 +140,16 @@ When loading, known keys are coerced:
 - `port`, `ctx`, `n_batch`, `max_tokens`, `n_ubatch` → `int`
 - `temperature`, `top_p` → `float`
 - `embeddings` → `bool`
-- While loading, strings `"1"`, `"true"`, `"yes"`, `"on"` (case-insensitive)
-  become `True`; every other string becomes `False`.
+- Booleans accept `"1"`, `"true"`, `"yes"`, `"on"` (case-insensitive) for
+  `True` and `"0"`, `"false"`, `"no"`, `"off"` for `False`. Anything else is
+  reported on stderr and replaced by the key's default — a mistyped flag used
+  to coerce to `False` and silently turn the feature off.
 - `backend`, `protocols` and `kv_cache` are checked against their allowed
   sets: an unknown value falls back to the default on load (a protocol is
   dropped from the list), and `vipera system config` rejects it with the list
   of valid values.
 - `vipera system config` uses strict coercion: an unrecognized boolean raises
-  an error instead of silently becoming `False`.
+  an error instead of being loaded as the default.
 
 ```bash
 vipera system config port 9000        # stored as 9000, not "9000"

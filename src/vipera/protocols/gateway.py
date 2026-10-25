@@ -19,6 +19,15 @@ def _noop_release(engine: Any) -> None:
     """Single-model gateways never evict, so releasing is a no-op."""
 
 
+def _noop_keep_alive(engine: Any, seconds: float | None) -> None:
+    """Single-model gateways keep their one engine loaded for the process."""
+
+
+def _no_expiries() -> dict[str, str | None]:
+    """Single-model gateways have no pool deadline to report."""
+    return {}
+
+
 #: One permit per concurrent request. A Lock is a Semaphore with one slot; the
 #: server backend hands out `parallel` permits so llama.cpp slots can batch.
 Permit = asyncio.Lock | asyncio.Semaphore
@@ -42,3 +51,8 @@ class Gateway:
     optimizer: Any = None
     #: Give back one in-flight reference after a request (or its stream) ends.
     release: Callable[[Any], None] = _noop_release
+    #: Apply a keep_alive TTL to the engine serving this request. None uses the
+    #: pool default; a negative value means "never unload".
+    keep_alive: Callable[[Any, float | None], None] = _noop_keep_alive
+    #: Loaded alias -> ISO expiry (None = never), for Ollama's /api/ps.
+    expiries: Callable[[], dict[str, str | None]] = _no_expiries

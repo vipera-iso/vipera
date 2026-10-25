@@ -38,6 +38,36 @@ from vipera.planner import Plan
 _START_TIMEOUT_S = 900
 _HEALTH_INTERVAL_S = 0.5
 _STOP_TIMEOUT_S = 10.0
+#: The child's own /health is a loopback liveness check; a probe that takes
+#: longer than this is already the answer.
+_HEALTH_PROBE_TIMEOUT_S = 2.0
+#: Floor for one request's socket timeout. It exists to break a hang, so it is
+#: generous: a wedged child used to hold the gateway permit forever.
+_MIN_REQUEST_TIMEOUT_S = 300.0
+#: Slowest decode rate worth supporting on CPU-only hardware, in tokens/s.
+#: A request is allowed ``max_tokens / this`` seconds before it counts as stuck.
+_MIN_TOKENS_PER_S = 0.5
+#: Non-generation calls (tokenize, embeddings) are local and bounded.
+_AUX_TIMEOUT_S = 120.0
+
+
+def _request_timeout(max_tokens: Any) -> float:
+    """Socket timeout for one generation: a backstop, not a deadline.
+
+    ``urlopen`` applies it per socket operation, so a stream that keeps sending
+    tokens never trips it, while a child that stopped producing bytes trips it
+    once instead of blocking the gateway permit forever. Long generations get a
+    proportionally longer bound so slow hardware is not cut off.
+    """
+    try:
+        tokens = max(0, int(max_tokens or 0))
+    except (TypeError, ValueError):
+        tokens = 0
+    return max(_MIN_REQUEST_TIMEOUT_S, tokens / _MIN_TOKENS_PER_S)
+
+
+def _timeout_message(path: str, timeout: float) -> str:
+    return f"llama-server did not respond on {path} within {timeout:.0f}s"
 
 # Printed by llama.cpp builds without a GPU backend. The child keeps running
 # but ignores --gpu-layers, so the plan must be corrected instead of reporting
@@ -278,8 +308,9 @@ class _SseStream:
     the slot to the next request.
     """
 
-    def __init__(self, response) -> None:
+    def __init__(self, response, *, timeout: float) -> None:
         self._response = response
+        self._timeout = timeout
         self._finished = False
 
     def __iter__(self) -> _SseStream:
@@ -288,7 +319,13 @@ class _SseStream:
     def __next__(self) -> bytes:
         if self._finished:
             raise StopIteration
-        chunk = self._response.read1(65536)
+        try:
+            chunk = self._response.read1(65536)
+        except TimeoutError:
+            self.close()
+            raise RuntimeError(
+                _timeout_message("/v1/chat/completions", self._timeout)
+            ) from None
         if not chunk:
             self.close()
             raise StopIteration
@@ -492,7 +529,7 @@ class ServerEngine:
             raise RuntimeError("llama-server is not running")
         return f"http://127.0.0.1:{self._port}"
 
-    def _post(self, path: str, body: dict):
+    def _post(self, path: str, body: dict, *, timeout: float):
         request = urllib.request.Request(
             self._base_url + path,
             data=json.dumps(body).encode(),
@@ -500,12 +537,45 @@ class ServerEngine:
             method="POST",
         )
         try:
-            return urllib.request.urlopen(request, timeout=None)
+            return urllib.request.urlopen(request, timeout=timeout)
         except urllib.error.HTTPError as exc:
             detail = exc.read().decode("utf-8", "replace")[:500]
             raise RuntimeError(f"llama-server {path} returned {exc.code}: {detail}") from None
         except urllib.error.URLError as exc:
             raise RuntimeError(f"llama-server is unreachable: {exc.reason}") from None
+        except TimeoutError:
+            raise RuntimeError(_timeout_message(path, timeout)) from None
+
+    @staticmethod
+    def _body(resp, path: str, timeout: float) -> bytes:
+        """Read a response body, reporting a child that stopped sending."""
+        try:
+            return resp.read()
+        except TimeoutError:
+            raise RuntimeError(_timeout_message(path, timeout)) from None
+
+    def health(self) -> str:
+        """Ask the child's own ``/health``; never starts or restarts it.
+
+        ``ok`` only when the child answered 200. Otherwise the state a
+        readiness probe needs: ``starting`` (503 while it loads), ``exited``
+        (the process is gone) or ``unreachable`` (no answer on its port).
+        """
+        proc = self._proc
+        if proc is None or proc.poll() is not None:
+            return "exited"
+        try:
+            url = f"{self._base_url}/health"
+        except RuntimeError:
+            return "exited"
+        try:
+            with urllib.request.urlopen(url, timeout=_HEALTH_PROBE_TIMEOUT_S) as resp:
+                return "ok" if resp.status == 200 else "starting"
+        except urllib.error.HTTPError as exc:
+            return "starting" if exc.code == 503 else "unreachable"
+        except (urllib.error.URLError, OSError):
+            # Includes the socket timeout: no answer is no answer.
+            return "unreachable"
 
     def embed(self, texts: list[str]) -> list[list[float]]:
         """Return one vector per text, in the order they were given."""
@@ -514,8 +584,8 @@ class ServerEngine:
                 "this llama-server was not started with embedding support; "
                 "set `embeddings true` in the config and restart"
             )
-        with self._post("/v1/embeddings", {"input": texts}) as resp:
-            payload = json.loads(resp.read())
+        with self._post("/v1/embeddings", {"input": texts}, timeout=_AUX_TIMEOUT_S) as resp:
+            payload = json.loads(self._body(resp, "/v1/embeddings", _AUX_TIMEOUT_S))
         items = sorted(payload.get("data") or [], key=lambda item: item.get("index", 0))
         return [list(item["embedding"]) for item in items]
 
@@ -524,6 +594,7 @@ class ServerEngine:
         for key, default in DEFAULT_SAMPLING.items():
             params.setdefault(key, default)
         body: dict[str, Any] = {"messages": messages, "stream": stream, **params}
+        timeout = _request_timeout(params.get("max_tokens"))
         # Not part of the in-process engine's surface, but llama-server uses it
         # to put the exact token usage in the final SSE chunk; bench relies on
         # that for an exact generation count.
@@ -531,13 +602,13 @@ class ServerEngine:
             body["stream_options"] = kw["stream_options"]
 
         if not stream:
-            with self._post("/v1/chat/completions", body) as resp:
-                return json.loads(resp.read())
+            with self._post("/v1/chat/completions", body, timeout=timeout) as resp:
+                return json.loads(self._body(resp, "/v1/chat/completions", timeout))
 
         # A streaming generator keeps the HTTP response open across yields, so
         # the caller can consume it exactly like llama.cpp's own generator.
-        response = self._post("/v1/chat/completions", body)
-        return self._iter_sse(response)
+        response = self._post("/v1/chat/completions", body, timeout=timeout)
+        return self._iter_sse(response, timeout=timeout)
 
     #: The gateway may forward this engine's SSE bytes verbatim instead of
     #: parsing and re-serialising every chunk in Python (see `chat_sse`).
@@ -556,10 +627,13 @@ class ServerEngine:
         body: dict[str, Any] = {"messages": messages, "stream": True, **params}
         if kw.get("stream_options") is not None:
             body["stream_options"] = kw["stream_options"]
-        return _SseStream(self._post("/v1/chat/completions", body))
+        timeout = _request_timeout(params.get("max_tokens"))
+        return _SseStream(
+            self._post("/v1/chat/completions", body, timeout=timeout), timeout=timeout
+        )
 
     @staticmethod
-    def _iter_sse(response) -> Iterator[dict]:
+    def _iter_sse(response, *, timeout: float = _MIN_REQUEST_TIMEOUT_S) -> Iterator[dict]:
         try:
             for raw in response:
                 line = raw.decode("utf-8", "replace").strip()
@@ -570,11 +644,14 @@ class ServerEngine:
                     break
                 with contextlib.suppress(json.JSONDecodeError):
                     yield json.loads(payload)
+        except TimeoutError:
+            raise RuntimeError(_timeout_message("/v1/chat/completions", timeout)) from None
         finally:
             with contextlib.suppress(OSError):
                 response.close()
 
     def tokenize(self, text: str | bytes) -> list[int]:
         content = text.decode("utf-8", "replace") if isinstance(text, bytes) else text
-        with self._post("/tokenize", {"content": content}) as resp:
-            return [int(tok) for tok in json.loads(resp.read()).get("tokens") or []]
+        with self._post("/tokenize", {"content": content}, timeout=_AUX_TIMEOUT_S) as resp:
+            body = self._body(resp, "/tokenize", _AUX_TIMEOUT_S)
+        return [int(tok) for tok in json.loads(body).get("tokens") or []]
