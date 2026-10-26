@@ -7,16 +7,25 @@ validation the gateway has always had; only how it reaches an engine changed
 
 from __future__ import annotations
 
+import asyncio
 import json
 from typing import Literal
 
 from fastapi import FastAPI, HTTPException
-from fastapi.responses import StreamingResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field, model_validator
 from starlette.background import BackgroundTask
 
+from vipera.errors import log_failure
 from vipera.pool import UnknownModelError
 from vipera.protocols.gateway import Gateway
+from vipera.protocols.limits import (
+    MAX_EMBED_CHARS,
+    MAX_EMBED_INPUTS,
+    MAX_MESSAGES,
+    MAX_PROMPT_CHARS,
+    MAX_TOKENS,
+)
 from vipera.protocols.streaming import (
     Lease,
     iter_chunks,
@@ -26,12 +35,6 @@ from vipera.protocols.streaming import (
 )
 
 NAME = "openai"
-
-_MAX_TOKENS = 32_768
-_MAX_MESSAGES = 200
-_MAX_PROMPT_CHARS = 500_000
-_MAX_EMBED_INPUTS = 256
-_MAX_EMBED_CHARS = 1_000_000
 
 
 class Message(BaseModel):
@@ -84,14 +87,42 @@ class EmbeddingRequest(BaseModel):
     encoding_format: Literal["float", "base64"] | None = None
 
 
+def _error(status_code: int, message: str, *, error_type: str) -> JSONResponse:
+    """OpenAI's error object: clients read ``error.message``, not ``detail``."""
+    return JSONResponse(
+        status_code=status_code,
+        content={"error": {"message": message, "type": error_type, "param": None, "code": None}},
+    )
+
+
+def _backend_failure(exc: Exception, operation: str) -> JSONResponse:
+    """Report a failed engine call as a 502 that says why.
+
+    Letting the exception escape produced a bodyless 500: the cause (the
+    child's own 400, a dead process, a socket timeout) never reached the
+    client, and nothing recorded it here either.
+    """
+    log_failure(operation, exc)
+    return _error(502, str(exc) or exc.__class__.__name__, error_type="backend_error")
+
+
 async def _engine(gateway: Gateway, name: str | None):
+    """Resolve the engine for a request: ``(engine, None)`` or ``(None, error)``.
+
+    An unknown name stays a plain 404 (that shape predates this layer), but a
+    load that did not finish is a backend failure and is reported as one: it
+    used to escape as a bodyless 500.
+    """
     try:
-        return await gateway.engine_for(name)
+        return await gateway.engine_for(name), None
     except UnknownModelError as exc:
         raise HTTPException(
             404,
             f"model '{exc.name}' is not loaded (available: {', '.join(exc.available)})",
         ) from exc
+    except Exception as exc:
+        log_failure(f"model load ({name or 'default'})", exc)
+        return None, _error(503, f"model failed to load: {exc}", error_type="backend_error")
 
 
 def _supports_embeddings(engine) -> bool:
@@ -106,12 +137,12 @@ def _validate_chat(req: ChatRequest) -> None:
     """
     if not req.messages:
         raise HTTPException(400, "messages must not be empty")
-    if len(req.messages) > _MAX_MESSAGES:
-        raise HTTPException(400, f"too many messages (max {_MAX_MESSAGES})")
-    if sum(len(m.content or "") for m in req.messages) > _MAX_PROMPT_CHARS:
+    if len(req.messages) > MAX_MESSAGES:
+        raise HTTPException(400, f"too many messages (max {MAX_MESSAGES})")
+    if sum(len(m.content or "") for m in req.messages) > MAX_PROMPT_CHARS:
         raise HTTPException(400, "prompt too large")
-    if not 0 < req.max_tokens <= _MAX_TOKENS:
-        raise HTTPException(400, f"max_tokens must be in [1, {_MAX_TOKENS}]")
+    if not 0 < req.max_tokens <= MAX_TOKENS:
+        raise HTTPException(400, f"max_tokens must be in [1, {MAX_TOKENS}]")
     if not 0.0 <= req.temperature <= 2.0:
         raise HTTPException(400, "temperature must be in [0, 2]")
     if not 0.0 < req.top_p <= 1.0:
@@ -125,9 +156,9 @@ def _embedding_texts(req: EmbeddingRequest) -> list[str]:
     texts = [req.input] if isinstance(req.input, str) else list(req.input)
     if not texts:
         raise HTTPException(400, "input must not be empty")
-    if len(texts) > _MAX_EMBED_INPUTS:
-        raise HTTPException(400, f"too many inputs (max {_MAX_EMBED_INPUTS})")
-    if sum(len(t) for t in texts) > _MAX_EMBED_CHARS:
+    if len(texts) > MAX_EMBED_INPUTS:
+        raise HTTPException(400, f"too many inputs (max {MAX_EMBED_INPUTS})")
+    if sum(len(t) for t in texts) > MAX_EMBED_CHARS:
         raise HTTPException(400, "input too large")
     return texts
 
@@ -145,7 +176,9 @@ def mount(app: FastAPI, gateway: Gateway) -> None:
     @app.post("/v1/chat/completions")
     async def chat(req: ChatRequest):
         _validate_chat(req)
-        active = await _engine(gateway, req.model)
+        active, problem = await _engine(gateway, req.model)
+        if problem is not None:
+            return problem
         lease = Lease(lambda: gateway.release(active))
         streaming = False
         try:
@@ -163,14 +196,18 @@ def mount(app: FastAPI, gateway: Gateway) -> None:
                 kwargs["stream_options"] = {"include_usage": True}
 
             # Fit the request into the context the model was loaded with. A
-            # request that already fits is passed through untouched.
+            # request that already fits is passed through untouched. prepare()
+            # is off the event loop because it may measure with the engine's own
+            # tokenizer, which on the server backend is a blocking round trip.
             shaping = None
             if gateway.optimizer is not None:
-                shaping = gateway.optimizer.prepare(
-                    active,
-                    messages,
-                    max_tokens=int(kwargs.get("max_tokens") or 0),
-                    tools=kwargs.get("tools"),
+                shaping = await asyncio.to_thread(
+                    lambda: gateway.optimizer.prepare(
+                        active,
+                        messages,
+                        max_tokens=int(kwargs.get("max_tokens") or 0),
+                        tools=kwargs.get("tools"),
+                    )
                 )
                 messages = shaping.messages
 
@@ -231,6 +268,7 @@ def mount(app: FastAPI, gateway: Gateway) -> None:
                         # engine.chat() itself may raise before the first chunk;
                         # report that as an SSE error event instead of aborting
                         # the response body mid-stream.
+                        log_failure("chat.completions stream", exc)
                         err = {"error": {"message": str(exc)}}
                         yield f"data: {json.dumps(err, ensure_ascii=False)}\n\n"
                         # The upstream frames already carried their own DONE (or
@@ -264,7 +302,12 @@ def mount(app: FastAPI, gateway: Gateway) -> None:
                 streaming = True
                 return response
 
-            result = await run_leased(gateway.lock, lease, active.chat, messages, False, **kwargs)
+            try:
+                result = await run_leased(
+                    gateway.lock, lease, active.chat, messages, False, **kwargs
+                )
+            except Exception as exc:
+                return _backend_failure(exc, "chat.completions")
             if gateway.optimizer is not None:
                 gateway.optimizer.note(
                     messages, tools=kwargs.get("tools"), payload=result, shaping=shaping
@@ -281,7 +324,9 @@ def mount(app: FastAPI, gateway: Gateway) -> None:
     @app.post("/v1/embeddings")
     async def embeddings(req: EmbeddingRequest):
         texts = _embedding_texts(req)
-        active = await _engine(gateway, req.model)
+        active, problem = await _engine(gateway, req.model)
+        if problem is not None:
+            return problem
         lease = Lease(lambda: gateway.release(active))
         try:
             if not _supports_embeddings(active):
@@ -300,7 +345,10 @@ def mount(app: FastAPI, gateway: Gateway) -> None:
                 tokens = sum(len(active.tokenize(t)) for t in texts)
                 return vectors, tokens
 
-            vectors, tokens = await run_leased(gateway.lock, lease, _embed_and_count)
+            try:
+                vectors, tokens = await run_leased(gateway.lock, lease, _embed_and_count)
+            except Exception as exc:
+                return _backend_failure(exc, "embeddings")
             alias = req.model or gateway.default_model() or "vipera"
             return {
                 "object": "list",

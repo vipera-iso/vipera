@@ -9,6 +9,7 @@ that is what those clients read.
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import hashlib
 import json
@@ -21,9 +22,11 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel
 from starlette.background import BackgroundTask
 
+from vipera.errors import log_failure
 from vipera.keepalive import parse_keep_alive
 from vipera.pool import UnknownModelError
 from vipera.protocols.gateway import Gateway
+from vipera.protocols.limits import MAX_EMBED_CHARS, MAX_EMBED_INPUTS, MAX_PROMPT_CHARS
 from vipera.protocols.streaming import (
     Lease,
     iter_chunks,
@@ -37,8 +40,6 @@ NAME = "ollama"
 # The compatibility level this layer implements. Ollama clients parse the
 # version as semver, so build metadata is used instead of a made-up release.
 VERSION = "0.5.0+vipera"
-
-_MAX_PROMPT_CHARS = 500_000
 
 #: Ollama reports a model that is never unloaded with this timestamp.
 _NEVER = "9999-12-31T23:59:59Z"
@@ -129,6 +130,16 @@ def _error(status: int, message: str) -> JSONResponse:
     return JSONResponse(status_code=status, content={"error": message})
 
 
+def _backend_failure(exc: Exception, operation: str) -> JSONResponse:
+    """Report a failed engine call in Ollama's shape, and record why.
+
+    An escaped exception became a bodyless 500: Ollama clients read
+    ``{"error": "..."}`` and got neither the shape nor the cause.
+    """
+    log_failure(operation, exc)
+    return _error(502, str(exc) or exc.__class__.__name__)
+
+
 def _details(spec, meta: dict) -> dict:
     """The model-details block Ollama clients read from tags/ps/show."""
     return {
@@ -192,17 +203,31 @@ def _keep_alive(value) -> tuple[float | None, JSONResponse | None]:
         return None, _error(400, str(exc))
 
 
+def _load_failure(name: str, exc: Exception) -> JSONResponse:
+    """A load that did not finish is a 503 with its reason, not a bare 500."""
+    log_failure(f"model load ({name})", exc)
+    return _error(503, f"model failed to load: {exc}")
+
+
 async def _engine(gateway: Gateway, name: str) -> tuple[Any, JSONResponse | None]:
-    """Resolve a model name, accepting Ollama's ':latest' tag suffix."""
+    """Resolve a model name, accepting Ollama's ':latest' tag suffix.
+
+    In pool mode this is where a model is loaded, so a failing load belongs in
+    the response rather than escaping as an unhandled exception.
+    """
     try:
         return await gateway.engine_for(name), None
     except UnknownModelError:
         pass
+    except Exception as exc:
+        return None, _load_failure(name, exc)
     if name.endswith(":latest"):
         try:
             return await gateway.engine_for(name[: -len(":latest")]), None
         except UnknownModelError:
             pass
+        except Exception as exc:
+            return None, _load_failure(name, exc)
     available = ", ".join(gateway.ids()) or "none"
     return None, _error(404, f"model '{name}' not found (available: {available})")
 
@@ -282,15 +307,21 @@ def _supports_embeddings(engine) -> bool:
     return bool(getattr(engine, "supports_embeddings", False))
 
 
-def _shape(gateway: Gateway, active, messages: list[dict], kwargs: dict):
-    """Fit the request into the loaded context; None when the layer is off."""
+async def _shape(gateway: Gateway, active, messages: list[dict], kwargs: dict):
+    """Fit the request into the loaded context; None when the layer is off.
+
+    Off the event loop: prepare() may measure with the engine's own tokenizer,
+    which on the server backend is a blocking HTTP round trip.
+    """
     if gateway.optimizer is None:
         return None
-    return gateway.optimizer.prepare(
-        active,
-        messages,
-        max_tokens=int(kwargs.get("max_tokens") or 0),
-        tools=kwargs.get("tools"),
+    return await asyncio.to_thread(
+        lambda: gateway.optimizer.prepare(
+            active,
+            messages,
+            max_tokens=int(kwargs.get("max_tokens") or 0),
+            tools=kwargs.get("tools"),
+        )
     )
 
 
@@ -395,7 +426,7 @@ def mount(app: FastAPI, gateway: Gateway) -> None:
         # Prompt size is a property of the request, so it is settled before a
         # model load is paid for; only what needs the engine comes after.
         messages = _messages(req.messages)
-        if sum(len(m.get("content") or "") for m in messages) > _MAX_PROMPT_CHARS:
+        if sum(len(m.get("content") or "") for m in messages) > MAX_PROMPT_CHARS:
             return _error(400, "prompt too large")
 
         active, problem = await _engine(gateway, req.model)
@@ -410,15 +441,18 @@ def mount(app: FastAPI, gateway: Gateway) -> None:
                 kwargs["tools"] = req.tools
             if response_format is not None:
                 kwargs["response_format"] = response_format
-            shaping = _shape(gateway, active, messages, kwargs)
+            shaping = await _shape(gateway, active, messages, kwargs)
             if shaping is not None:
                 messages = shaping.messages
 
             started = time.perf_counter()
             if not req.stream:
-                result, counts = await run_leased(
-                    gateway.lock, lease, _nonstream_result, active, messages, kwargs
-                )
+                try:
+                    result, counts = await run_leased(
+                        gateway.lock, lease, _nonstream_result, active, messages, kwargs
+                    )
+                except Exception as exc:
+                    return _backend_failure(exc, "chat")
                 _count(gateway, messages, kwargs, result, shaping)
                 elapsed = time.perf_counter() - started
                 choice = (result.get("choices") or [{}])[0]
@@ -458,6 +492,10 @@ def mount(app: FastAPI, gateway: Gateway) -> None:
         ttl, problem = _keep_alive(req.keep_alive)
         if problem is not None:
             return problem
+        # Same bound as /api/chat, and for the same reason: a prompt the backend
+        # cannot swallow must not first pay for a model load.
+        if len(req.prompt) + len(req.system or "") > MAX_PROMPT_CHARS:
+            return _error(400, "prompt too large")
 
         active, problem = await _engine(gateway, req.model)
         if problem is not None:
@@ -470,15 +508,18 @@ def mount(app: FastAPI, gateway: Gateway) -> None:
             kwargs = _chat_kwargs(req.options)
             if response_format is not None:
                 kwargs["response_format"] = response_format
-            shaping = _shape(gateway, active, messages, kwargs)
+            shaping = await _shape(gateway, active, messages, kwargs)
             if shaping is not None:
                 messages = shaping.messages
 
             started = time.perf_counter()
             if not req.stream:
-                result, counts = await run_leased(
-                    gateway.lock, lease, _nonstream_result, active, messages, kwargs
-                )
+                try:
+                    result, counts = await run_leased(
+                        gateway.lock, lease, _nonstream_result, active, messages, kwargs
+                    )
+                except Exception as exc:
+                    return _backend_failure(exc, "chat")
                 _count(gateway, messages, kwargs, result, shaping)
                 elapsed = time.perf_counter() - started
                 choice = (result.get("choices") or [{}])[0]
@@ -515,6 +556,10 @@ def mount(app: FastAPI, gateway: Gateway) -> None:
         texts = [req.input] if isinstance(req.input, str) else list(req.input)
         if not texts:
             return _error(400, "input must not be empty")
+        if len(texts) > MAX_EMBED_INPUTS:
+            return _error(400, f"too many inputs (max {MAX_EMBED_INPUTS})")
+        if sum(len(text) for text in texts) > MAX_EMBED_CHARS:
+            return _error(400, "input too large")
         active, problem = await _engine(gateway, req.model)
         if problem is not None:
             return problem
@@ -523,7 +568,12 @@ def mount(app: FastAPI, gateway: Gateway) -> None:
             if not _supports_embeddings(active):
                 return _error(501, _EMBEDDINGS_OFF)
             started = time.perf_counter()
-            vectors, tokens = await run_leased(gateway.lock, lease, _embed_and_count, active, texts)
+            try:
+                vectors, tokens = await run_leased(
+                    gateway.lock, lease, _embed_and_count, active, texts
+                )
+            except Exception as exc:
+                return _backend_failure(exc, "embed")
             elapsed = time.perf_counter() - started
             return {
                 "model": req.model,
@@ -537,6 +587,8 @@ def mount(app: FastAPI, gateway: Gateway) -> None:
 
     @app.post("/api/embeddings")
     async def legacy_embeddings(req: OllamaLegacyEmbedRequest):
+        if len(req.prompt) > MAX_EMBED_CHARS:
+            return _error(400, "prompt too large")
         active, problem = await _engine(gateway, req.model)
         if problem is not None:
             return problem
@@ -544,7 +596,10 @@ def mount(app: FastAPI, gateway: Gateway) -> None:
         try:
             if not _supports_embeddings(active):
                 return _error(501, _EMBEDDINGS_OFF)
-            vectors = await run_leased(gateway.lock, lease, active.embed, [req.prompt])
+            try:
+                vectors = await run_leased(gateway.lock, lease, active.embed, [req.prompt])
+            except Exception as exc:
+                return _backend_failure(exc, "embeddings")
             return {"embedding": vectors[0]}
         finally:
             lease.release_if_unstarted()
@@ -628,6 +683,7 @@ async def _stream_chat(gateway, active, model, messages, kwargs, started, shapin
                     }
                 )
     except Exception as exc:
+        log_failure("chat stream", exc)
         yield _line({"error": str(exc)})
         return
 
@@ -688,6 +744,7 @@ async def _stream_generate(
                     }
                 )
     except Exception as exc:
+        log_failure("generate stream", exc)
         yield _line({"error": str(exc)})
         return
 

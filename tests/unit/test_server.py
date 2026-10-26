@@ -1,8 +1,10 @@
 import asyncio
 import contextlib
 import json
+import logging
 import threading
 import time
+import types
 
 import pytest
 from fastapi.testclient import TestClient
@@ -213,6 +215,68 @@ def test_stream_engine_error_becomes_sse_event():
     assert "[DONE]" in body
 
 
+def test_backend_failure_is_an_openai_shaped_502(caplog):
+    """A failed engine call used to reach the client as a bodyless 500.
+
+    The cause (the child's own 400, a socket error, a dead process) has to
+    survive to the client in OpenAI's error object, and it has to be logged:
+    the failure is raised from a worker thread, so nothing else records it.
+    """
+
+    class ExplodingEngine(FakeEngine):
+        def chat(self, messages, stream=False, **kw):
+            raise RuntimeError("llama-server returned 400: prompt too long")
+
+    client = TestClient(build_app(ExplodingEngine(), "test-model"))
+    with caplog.at_level(logging.ERROR, logger="vipera"):
+        r = client.post(
+            "/v1/chat/completions",
+            json={"messages": [{"role": "user", "content": "hi"}]},
+        )
+
+    assert r.status_code == 502
+    error = r.json()["error"]
+    assert error["message"] == "llama-server returned 400: prompt too long"
+    assert error["type"] == "backend_error"
+    assert "prompt too long" in caplog.text
+    assert caplog.records[-1].exc_info is not None, "the traceback was dropped"
+
+
+def test_embeddings_backend_failure_is_an_openai_shaped_502():
+    class ExplodingEngine(FakeEngine):
+        supports_embeddings = True
+
+        def embed(self, texts):
+            raise RuntimeError("child stopped answering")
+
+    client = TestClient(build_app(ExplodingEngine(), "test-model"))
+
+    r = client.post("/v1/embeddings", json={"input": ["a"]})
+
+    assert r.status_code == 502
+    assert "child stopped answering" in r.json()["error"]["message"]
+
+
+def test_a_model_that_fails_to_load_is_a_structured_503():
+    """A load failure in pool mode escaped as an unhandled exception."""
+    from vipera.pool import ModelPool
+
+    def factory(alias, path):
+        raise RuntimeError("Not enough RAM for this plan")
+
+    pool = ModelPool({"alpha": "/tmp/alpha.gguf"}, factory)
+    client = TestClient(build_app(pool=pool))
+    try:
+        r = client.post(
+            "/v1/chat/completions",
+            json={"messages": [{"role": "user", "content": "hi"}]},
+        )
+        assert r.status_code == 503
+        assert "Not enough RAM" in r.json()["error"]["message"]
+    finally:
+        pool.close()
+
+
 def test_lock_not_released_while_worker_is_still_generating():
     """Client disconnect must not let a second request race the engine.
 
@@ -338,6 +402,51 @@ def test_health_responsive_while_streaming():
 
         worker.join(timeout=5)
         assert finished.is_set()
+
+
+def test_shaping_tokenizer_runs_off_the_event_loop(monkeypatch, tmp_path):
+    """Measuring a near-limit prompt must not freeze the gateway.
+
+    Once the shaped estimate lands near the context limit, the optimizer asks
+    the engine's own tokenizer for an exact count. On the server backend that
+    is a blocking HTTP round trip, so running it inline stops /health and every
+    other request for its duration.
+    """
+    monkeypatch.setattr("vipera.config.CONFIG_FILE", tmp_path / "config.json")
+
+    class MeasuringEngine(FakeEngine):
+        plan = types.SimpleNamespace(context=2048)
+
+        def __init__(self):
+            super().__init__()
+            self.tokenize_calls = 0
+
+        def tokenize(self, text):
+            self.tokenize_calls += 1
+            time.sleep(0.5)  # stands in for llama-server's /tokenize
+            return [0] * 4000
+
+    async def scenario():
+        engine = MeasuringEngine()
+        app = build_app(engine, "test-model")
+        endpoint = next(
+            r.endpoint for r in app.routes if getattr(r, "path", None) == "/v1/chat/completions"
+        )
+        # 8k characters against a 2048-token window with 512 reserved for the
+        # answer: large enough that shaping measures instead of estimating.
+        request = ChatRequest(messages=[{"role": "user", "content": "x" * 8000}], max_tokens=512)
+
+        task = asyncio.create_task(endpoint(request))
+        t0 = time.perf_counter()
+        await asyncio.sleep(0.1)  # resumes at once only if the loop is free
+        elapsed = time.perf_counter() - t0
+        await task
+        return engine, elapsed
+
+    engine, elapsed = asyncio.run(scenario())
+
+    assert engine.tokenize_calls >= 1, "the exact-tokenizer path was never exercised"
+    assert elapsed < 0.3, f"event loop blocked for {elapsed:.2f}s by the shaping tokenizer"
 
 
 TOOLS = [

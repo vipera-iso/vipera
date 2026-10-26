@@ -1,4 +1,7 @@
+import asyncio
 import json
+import logging
+import time
 import types
 from datetime import UTC, datetime
 
@@ -7,7 +10,7 @@ from fastapi.testclient import TestClient
 
 from vipera.pool import ModelPool
 from vipera.protocols import mount
-from vipera.protocols.ollama import _ollama_tool_calls
+from vipera.protocols.ollama import OllamaChatRequest, OllamaMessage, _ollama_tool_calls
 from vipera.server import build_app
 
 
@@ -657,3 +660,122 @@ def test_show_rejects_an_unknown_model():
     assert response.status_code == 404
     assert "ghost" in response.json()["error"]
     pool.close()
+
+
+# -- backend failures and request bounds -------------------------------------
+
+
+def test_ollama_backend_failure_uses_its_error_shape(caplog):
+    """Ollama clients read {"error": "..."}; a bodyless 500 tells them nothing."""
+
+    class ExplodingEngine(FakeEngine):
+        def chat(self, messages, stream=False, **kw):
+            raise RuntimeError("child died mid-prefill")
+
+    client = _client(ExplodingEngine(), protocols=["ollama"])
+    with caplog.at_level(logging.ERROR, logger="vipera"):
+        r = client.post(
+            "/api/chat",
+            json={
+                "model": "test-model",
+                "messages": [{"role": "user", "content": "hi"}],
+                "stream": False,
+            },
+        )
+
+    assert r.status_code == 502
+    assert "child died mid-prefill" in r.json()["error"]
+    assert "child died mid-prefill" in caplog.text
+
+
+def test_ollama_shaping_tokenizer_runs_off_the_event_loop(monkeypatch, tmp_path):
+    """The /api/chat path must measure with the tokenizer off the event loop.
+
+    Same trigger as the OpenAI layer: a prompt near the context limit makes the
+    optimizer ask the engine for an exact count, which on the server backend is
+    a blocking HTTP round trip.
+    """
+    monkeypatch.setattr("vipera.config.CONFIG_FILE", tmp_path / "config.json")
+
+    class MeasuringEngine(FakeEngine):
+        plan = types.SimpleNamespace(context=2048)
+
+        def __init__(self):
+            super().__init__()
+            self.tokenize_calls = 0
+
+        def tokenize(self, text):
+            self.tokenize_calls += 1
+            time.sleep(0.5)
+            return [0] * 4000
+
+    async def scenario():
+        engine = MeasuringEngine()
+        app = build_app(engine, "test-model", protocols=["ollama"])
+        endpoint = next(r.endpoint for r in app.routes if getattr(r, "path", None) == "/api/chat")
+        request = OllamaChatRequest(
+            model="test-model",
+            messages=[OllamaMessage(role="user", content="x" * 8000)],
+            stream=False,
+            options={"num_predict": 512},
+        )
+
+        task = asyncio.create_task(endpoint(request))
+        t0 = time.perf_counter()
+        await asyncio.sleep(0.1)
+        elapsed = time.perf_counter() - t0
+        await task
+        return engine, elapsed
+
+    engine, elapsed = asyncio.run(scenario())
+
+    assert engine.tokenize_calls >= 1, "the exact-tokenizer path was never exercised"
+    assert elapsed < 0.3, f"event loop blocked for {elapsed:.2f}s by the shaping tokenizer"
+
+
+def test_ollama_generate_rejects_an_oversized_prompt_without_loading_the_model():
+    client, pool, engines = _pool_client()
+    try:
+        r = client.post(
+            "/api/generate",
+            json={"model": "test-model", "prompt": "x" * 500_001, "stream": False},
+        )
+        assert r.status_code == 400
+        assert engines == []
+    finally:
+        pool.close()
+
+
+def test_ollama_embed_rejects_too_many_inputs_without_loading_the_model():
+    client, pool, engines = _pool_client()
+    try:
+        r = client.post(
+            "/api/embed",
+            json={"model": "test-model", "input": ["x"] * 257},
+        )
+        assert r.status_code == 400
+        assert "too many inputs" in r.json()["error"]
+        assert engines == []
+    finally:
+        pool.close()
+
+
+def test_ollama_embed_rejects_an_oversized_input():
+    client = _client(FakeEngine(embeddings=True), protocols=["ollama"])
+
+    r = client.post("/api/embed", json={"model": "test-model", "input": ["x" * 1_000_001]})
+
+    assert r.status_code == 400
+    assert "too large" in r.json()["error"]
+
+
+def test_ollama_legacy_embeddings_rejects_an_oversized_prompt():
+    client = _client(FakeEngine(embeddings=True), protocols=["ollama"])
+
+    r = client.post(
+        "/api/embeddings",
+        json={"model": "test-model", "prompt": "x" * 1_000_001},
+    )
+
+    assert r.status_code == 400
+    assert "too large" in r.json()["error"]

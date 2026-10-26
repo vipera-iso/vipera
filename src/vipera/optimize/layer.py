@@ -47,7 +47,12 @@ class OptimizeLayer:
         max_tokens: int = 0,
         tools: list[dict] | None = None,
     ) -> Shaping:
-        """Trim ``messages`` to the engine's context; a no-op when it fits."""
+        """Trim ``messages`` to the engine's context; a no-op when it fits.
+
+        Blocking: the measurement loop may call ``engine.tokenize()``, which on
+        the server backend is an HTTP round trip. Callers on an event loop must
+        run this in a worker thread (the protocol layers use to_thread).
+        """
         if not self.shaping_enabled:
             return Shaping(messages=list(messages))
         context = int(getattr(getattr(engine, "plan", None), "context", 0) or 0)
