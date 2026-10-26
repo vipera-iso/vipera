@@ -236,8 +236,11 @@ Three corrections this bought: on *stationary* real routing **LFU beats `hot`**
 (aging only pays when the distribution moves — confirmed on real topic drift in
 §10), **per-layer allocation does not help** (§8), and expert pruning is **not
 free**: at the 5% sparsity the scheduler assumed, only 21–25% of routing mass
-survives, so ~53–71% of experts must be kept to hold 95% of the mass (§11).
-Details in [`docs/ROADMAP.md`](docs/ROADMAP.md) §8–§11.
+survives, so ~53–71% of experts must be kept to hold 95% of the mass (§11) — and
+that mass turned out not to predict quality at all: measured on OLMoE with the
+router masked, keeping 84% of the mass still costs **6.3× perplexity**, and
+keeping 60% costs **362×** (§13). Details in
+[`docs/ROADMAP.md`](docs/ROADMAP.md) §8–§13.
 
 Harness validation only — a 260K-parameter toy model, CPU-only, 4 threads:
 

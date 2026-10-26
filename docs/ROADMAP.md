@@ -588,7 +588,8 @@ not a quality result.** It bounds how much of the router's behaviour survives, b
 the real number (perplexity, task accuracy) needs the pruned weights to be built
 as a GGUF and run (S9 + S10). `vipera prune` says what a keep-set preserves; it
 does not say the model still works. Treat 95%-mass as a design constraint, not as
-"95% of quality".
+"95% of quality". *(Round 8 measured it: mass is not a quality forecast at all —
+see §13, where 84% of the mass still costs 6.3× perplexity.)*
 
 **Next sub-problem:** S9 (GGUF writer/packer) — it is now the blocking dependency
 for S10, and therefore for turning every pruning claim above into a quality number.
@@ -704,3 +705,83 @@ named above; the 8.64 baseline is what a pruned run would be compared against.
 
 **Next sub-problem:** S9 (GGUF writer) or the graph-level mask — whichever lands
 first converts every pruning number in §11 from a proxy into a measurement.
+*Round 8 took the mask route: the proxy is now measured, and it fails — see §13.*
+
+---
+
+## 13. Autonomous loop — round 8 log (pruning, measured against perplexity)
+
+§12 ended with the mass→quality proxy untested and named the graph-level expert
+mask as the sound way to test it. This round built it.
+
+### Method — a mask that is arithmetically identical to pruning
+`bench/llama-moe-prune.patch` adds a 1-D `f32` mask per MoE layer, added to the
+router logits **before** the softmax, and reads it from `LLAMA_MOE_PRUNE=<path>`
+(the same env-driven rule as the other fork patches). A pruned expert's logit
+becomes −1e30, so `expf(-1e30 - max) == 0.0f` exactly: it cannot enter the top-k
+and the surviving probabilities renormalise over the kept set. That is the same
+arithmetic as a model whose expert slabs were deleted, so it measures pruning
+without building a second GGUF first.
+
+`bench/prune_ppl.py` runs `llama-perplexity` on the baseline and then on one
+**frequency** arm (the keep-set `vipera prune` chooses) and one **uniform** arm
+(the same number of experts per layer, drawn at random) for each keep-fraction.
+
+```
+python3 -m bench.prune_ppl --model models/olmoe/olmoe-1b-7b-0924-q4_k_m.gguf \
+  --trace bench/results/olmoe-multitopic-545tok.jsonl \
+  --file $LLAMA_CPP/wikitext-2-raw/wiki.test.raw --arch arch/olmoe-1b-7b.toml \
+  --chunks 20 --fractions 0.125,0.25,0.5
+```
+
+**The patch's own control:** a mask that keeps all 64 experts reproduces the
+baseline exactly (7.6978 vs 7.6978, 2 chunks). It is a no-op when nothing is
+pruned, which is the property a mask with a −1e30 constant has to have and a
+hand-rolled router edit would not.
+
+### Result 1 — the measurement
+OLMoE-1B-7B Q4_K_M, wikitext-2 test, 20 chunks, ctx 512, 8 threads, CPU.
+Baseline **8.6426 ± 0.3037**.
+
+| experts kept per layer | mass kept (freq arm) | PPL (freq) | mass kept (uniform) | PPL (uniform) |
+|---|---|---|---|---|
+| 32 of 64 (50%) | 83.9% | **54.68 ± 2.16** (6.33×) | 50.0% | **56.27 ± 2.13** (6.51×) |
+| 16 of 64 (25%) | 60.4% | **3 128 ± 147** (362×) | 25.0% | **2 775 ± 114** (321×) |
+| 8 of 64 (12.5%) | 40.4% | **38 441 ± 1 857** (4 448×) | 12.5% | **16 099 ± 708** (1 863×) |
+
+### Result 2 — retained routing mass is not a proxy for quality
+Fitting §11's implicit claim — `log(ppl_ratio) = b · (1 − kept_mass)`, one
+parameter, forced through the baseline — gives **b = 9.21** and then misses every
+arm on leave-one-out: +195% at 32 experts, +32 979% at 16, +431 359% at 8. The
+other direction is just as bad. The *ranking* is roughly right (Spearman of mass
+vs PPL = −0.60) and the *magnitude* is off by orders of magnitude, which is the
+worst possible combination for a proxy: it tells you the shape of the cliff and
+none of its distance.
+
+### Result 3 — at equal size, choosing experts by the trace bought nothing
+Size-matched, the two arms are statistically indistinguishable at 32 experts
+(54.68 vs 56.27, 0.5σ) and the frequency arm is **worse** at 16 (+12.7%, 1.9σ) and
+at 8 (2.4×, 11σ) — while holding 3.2× more routing mass at the 8-expert size.
+Two candidate causes, and this round cannot separate them: the trace is
+**out of domain** for wikitext (five chat prompts), and what actually breaks under
+pruning is the **renormalisation scale**, not the routing mass — a softmax
+restricted to survivors divides by ~mass, so every layer's FFN output is scaled
+by `1/mass` (2.5× at 40% mass), and that compounds over 16 layers. If that is the
+mechanism, "keep the mass" protects exactly the wrong invariant.
+
+### What this settles, and what it does not
+* **Settled:** for this model, **pruning without healing is a cliff**: 32 of 64
+  experts costs 6× perplexity, 16 costs 320×, 8 costs 1 900–4 400×. §9's
+  "prune to 5–25% and fit the cache" rows are therefore not configurations at
+  any quality budget; the ×12 figure stays an upper bound that nothing reaches.
+* **Settled:** the number §11 reports is a routing statistic, and treating it as
+  a quality forecast is now falsified by measurement rather than merely untested.
+  §11's tables stand as mass, and must be quoted as mass.
+* **Not settled:** these are **prune-only** numbers. Prune-then-heal (the gate in
+  §5) is untested, and it is the only thing that could recover the lever.
+* **Not settled:** one corpus, one model, 20 chunks, CPU. The frequency arm's loss
+  may be the out-of-domain trace; an in-domain trace (wikitext text through the
+  same capture tool) is the obvious next arm, and cheap: one sweep.
+* The `keep == top_k` case is exact here (8 of 64 with `top_k = 8`); below that,
+  the extra top-k slots are filled with zero-weight experts, which is what a
+  pruned model with `top_k = min(8, kept)` would compute.

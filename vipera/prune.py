@@ -23,6 +23,8 @@ and run (S9 + S10).
 from __future__ import annotations
 
 import json
+import random
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 
 
@@ -39,6 +41,9 @@ class PrunePlan:
     target_mass: float
     n_experts: int
     layers: list[LayerKeep] = field(default_factory=list)
+    # Set when the keep-set was sized by *count* instead of by mass
+    # (`plan_at_fraction`), which is the arm a perplexity sweep compares.
+    fraction: float | None = None
 
     @property
     def total_keep(self) -> int:
@@ -59,7 +64,7 @@ class PrunePlan:
         return sum(l.kept_mass for l in self.layers) / len(self.layers)
 
     def as_dict(self) -> dict:
-        return {
+        out = {
             "target_mass": self.target_mass,
             "n_experts": self.n_experts,
             "keep_fraction": round(self.keep_fraction, 4),
@@ -76,6 +81,9 @@ class PrunePlan:
                 for l in self.layers
             ],
         }
+        if self.fraction is not None:
+            out["fraction"] = self.fraction
+        return out
 
 
 def _layer_counts(routing: list[list[list[int]]], n_experts: int) -> list[list[int]]:
@@ -110,6 +118,87 @@ def plan_from_trace(routing: list[list[list[int]]], *, n_experts: int,
         layers.append(LayerKeep(index=li, distinct=sum(1 for c in freq if c > 0),
                                 keep=keep, kept_mass=acc / total))
     return PrunePlan(target_mass=target_mass, n_experts=n_experts, layers=layers)
+
+
+def plan_at_fraction(routing: list[list[list[int]]], *, n_experts: int,
+                     fraction: float) -> PrunePlan:
+    """Keep a fixed *share* of each layer's experts, ranked by trace frequency.
+
+    `plan_from_trace` sizes the keep-set by the mass it has to retain; this sizes it
+    by count, which is the arm a quality sweep needs: a frequency keep-set and a
+    random one of the same size are what separate "pruning is free" from "pruning
+    is free only if you choose the experts by the trace".
+    """
+    if not 0.0 < fraction <= 1.0:
+        raise ValueError(f"fraction must be in (0, 1], got {fraction}")
+    keep = max(1, int(round(n_experts * fraction)))
+    counts = _layer_counts(routing, n_experts)
+    layers: list[LayerKeep] = []
+    for li, freq in enumerate(counts):
+        total = sum(freq) or 1
+        ranked = sorted(range(n_experts), key=lambda e: (-freq[e], e))
+        chosen = ranked[:keep]
+        layers.append(LayerKeep(index=li, distinct=sum(1 for c in freq if c > 0),
+                                keep=chosen,
+                                kept_mass=sum(freq[e] for e in chosen) / total))
+    return PrunePlan(target_mass=0.0, n_experts=n_experts, layers=layers, fraction=fraction)
+
+
+def keep_sets(plan: PrunePlan) -> dict[int, list[int]]:
+    """The plan's per-layer keep-sets, keyed by block index."""
+    return {l.index: list(l.keep) for l in plan.layers}
+
+
+def uniform_keep_sets(*, n_layers: int, n_experts: int, keep_per_layer: int,
+                      seed: int = 0) -> dict[int, list[int]]:
+    """The control arm: the same number of experts per layer, chosen without a trace.
+
+    A seeded sample is the honest stand-in for uniform pruning: it keeps the size
+    identical and destroys any trace-derived structure, so a measured quality gap
+    against `keep_sets` is what the trace is actually worth. Sorted, because the
+    mask file is a set and its order must not depend on the seed's luck twice.
+    """
+    if not 0 < keep_per_layer <= n_experts:
+        raise ValueError(
+            f"keep_per_layer must be in (0, {n_experts}], got {keep_per_layer}"
+        )
+    rng = random.Random(seed)
+    return {li: sorted(rng.sample(range(n_experts), keep_per_layer))
+            for li in range(n_layers)}
+
+
+#: First field is the block index, the rest are the expert ids to keep. Read by
+#: `bench/llama-moe-prune.patch` through LLAMA_MOE_PRUNE.
+MASK_ENV = "LLAMA_MOE_PRUNE"
+
+
+def mask_text(keep: Mapping[int, Sequence[int]]) -> str:
+    """Render keep-sets in the mask format the patched llama.cpp reads.
+
+    Keeping the format this small is deliberate: the reader is ~90 lines of C in a
+    patch, and every field it has to parse is a place a sweep can fail silently.
+    """
+    if not keep:
+        raise ValueError("a mask needs at least one layer; empty would mask nothing")
+    lines = ["# vipera expert mask: <layer> <expert ids to keep>"]
+    for layer in sorted(keep):
+        ids = list(keep[layer])
+        if not ids:
+            raise ValueError(f"layer {layer} keeps no experts")
+        if len(set(ids)) != len(ids):
+            raise ValueError(f"layer {layer} repeats an expert id: {ids}")
+        if min(ids) < 0:
+            raise ValueError(f"layer {layer} has a negative expert id: {ids}")
+        lines.append(f"{layer} " + ",".join(str(e) for e in sorted(ids)))
+    return "\n".join(lines) + "\n"
+
+
+def write_mask(path: str, keep: Mapping[int, Sequence[int]]) -> int:
+    """Write `keep` as a mask file; return the number of layers written."""
+    text = mask_text(keep)
+    with open(path, "w") as f:
+        f.write(text)
+    return len(keep)
 
 
 def mass_at_fraction(routing: list[list[list[int]]], *, n_experts: int,

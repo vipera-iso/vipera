@@ -13,6 +13,7 @@ bench/results/*
 !bench/results/moe-spill.json
 !bench/results/ppl-*.json
 !bench/results/ppl-*.log
+!bench/results/prune-ppl-*.json
 # The archive holds one artifact on purpose: the build whose two policies tied to five
 # digits, which is what exposed the accumulation bug (docs/REWRITE.md §E). A parent
 # directory has to be re-included before a file inside it can be.

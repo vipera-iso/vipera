@@ -1,12 +1,19 @@
 import json
 import os
+import tempfile
 import unittest
 
 from vipera.prune import (
+    MASK_ENV,
     gated_prune,
+    keep_sets,
+    mask_text,
     mass_at_fraction,
     mass_curve,
+    plan_at_fraction,
     plan_from_trace,
+    uniform_keep_sets,
+    write_mask,
 )
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -144,6 +151,89 @@ class TestGatedPruneOnRealRouting(unittest.TestCase):
                            max_keep_fraction=1.0)
         self.assertEqual(plan.rolled_back_layers, 0)
         self.assertGreater(plan.pruned_layers, 0)
+
+
+class TestPlanAtFraction(unittest.TestCase):
+    """The size-driven keep-set: same count per layer, chosen by the trace."""
+
+    def test_keeps_a_fixed_count_and_reports_the_mass_it_holds(self):
+        trace = [[[0, 1, 2, 3]] for _ in range(4)]
+        plan = plan_at_fraction(trace, n_experts=8, fraction=0.5)
+        self.assertEqual(plan.fraction, 0.5)
+        self.assertEqual([len(l.keep) for l in plan.layers], [4])
+        self.assertAlmostEqual(plan.layers[0].kept_mass, 1.0, places=6)
+
+    def test_the_kept_count_never_rounds_down_to_nothing(self):
+        plan = plan_at_fraction([[[0]]], n_experts=64, fraction=0.01)
+        self.assertEqual(len(plan.layers[0].keep), 1)
+
+    def test_fraction_out_of_range_is_refused(self):
+        for bad in (0.0, -0.5, 1.5):
+            with self.assertRaises(ValueError):
+                plan_at_fraction([[[0]]], n_experts=8, fraction=bad)
+
+    def test_the_fraction_shows_up_in_the_json(self):
+        plan = plan_at_fraction([[[0]]], n_experts=8, fraction=0.25)
+        self.assertEqual(plan.as_dict()["fraction"], 0.25)
+        # a mass-planned report keeps its old shape
+        self.assertNotIn("fraction", plan_from_trace([[[0]]], n_experts=8).as_dict())
+
+
+class TestKeepSets(unittest.TestCase):
+    def test_keep_sets_are_keyed_by_block_index(self):
+        plan = plan_at_fraction([[[0, 1], [2, 3]]], n_experts=4, fraction=0.5)
+        self.assertEqual(sorted(keep_sets(plan)), [0, 1])
+        self.assertTrue(all(len(ids) == 2 for ids in keep_sets(plan).values()))
+
+    def test_uniform_arms_have_the_same_size_and_no_trace_structure(self):
+        keep = uniform_keep_sets(n_layers=4, n_experts=64, keep_per_layer=8, seed=1)
+        self.assertEqual(len(keep), 4)
+        for ids in keep.values():
+            self.assertEqual(len(ids), 8)
+            self.assertEqual(len(set(ids)), 8)
+            self.assertTrue(all(0 <= e < 64 for e in ids))
+        # the same seed has to reproduce the control arm exactly
+        self.assertEqual(keep, uniform_keep_sets(n_layers=4, n_experts=64,
+                                                 keep_per_layer=8, seed=1))
+        self.assertNotEqual(keep, uniform_keep_sets(n_layers=4, n_experts=64,
+                                                    keep_per_layer=8, seed=2))
+
+    def test_a_uniform_arm_cannot_keep_more_than_the_pool(self):
+        with self.assertRaises(ValueError):
+            uniform_keep_sets(n_layers=1, n_experts=4, keep_per_layer=5)
+        with self.assertRaises(ValueError):
+            uniform_keep_sets(n_layers=1, n_experts=4, keep_per_layer=0)
+
+
+class TestMaskFile(unittest.TestCase):
+    def test_the_format_is_layer_then_expert_ids(self):
+        text = mask_text({1: [5, 3], 0: [0]})
+        lines = [l for l in text.splitlines() if not l.startswith("#")]
+        self.assertEqual(lines, ["0 0", "1 3,5"])
+
+    def test_the_written_file_parses_back_to_the_same_sets(self):
+        keep = {0: [7, 1, 2], 3: [4]}
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "mask.txt")
+            self.assertEqual(write_mask(path, keep), 2)
+            with open(path) as f:
+                parsed = {}
+                for line in f:
+                    line = line.split("#", 1)[0].strip()
+                    if not line:
+                        continue
+                    layer, ids = line.split(None, 1)
+                    parsed[int(layer)] = [int(e) for e in ids.split(",")]
+        self.assertEqual(parsed, {0: [1, 2, 7], 3: [4]})
+
+    def test_the_env_var_is_the_one_the_patch_reads(self):
+        # bench/llama-moe-prune.patch: getenv("LLAMA_MOE_PRUNE")
+        self.assertEqual(MASK_ENV, "LLAMA_MOE_PRUNE")
+
+    def test_refusals(self):
+        for bad in ({}, {0: []}, {0: [1, 1]}, {0: [-1]}):
+            with self.assertRaises(ValueError):
+                mask_text(bad)
 
 
 @unittest.skipUnless(os.path.exists(REAL), "real captured trace not present")

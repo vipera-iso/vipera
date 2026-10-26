@@ -1,8 +1,19 @@
 import unittest
 
-from bench.perplexity import (EVICTION_POLICIES, POLICY_ENV, build_command, compare_stream,
-                              difference_sigmas, format_comparison, format_table, parse_ppl,
-                              parse_stream_stats, run_perplexity)
+from bench.perplexity import (
+    EVICTION_POLICIES,
+    POLICY_ENV,
+    PRUNE_ENV,
+    build_command,
+    compare_stream,
+    difference_sigmas,
+    environment,
+    format_comparison,
+    format_table,
+    parse_ppl,
+    parse_stream_stats,
+    run_perplexity,
+)
 
 
 class TestParsePpl(unittest.TestCase):
@@ -83,6 +94,34 @@ class TestEvictionPolicy(unittest.TestCase):
         # and a report from before policies existed still renders
         report.pop("policy")
         self.assertIn("policy recency", format_table(report))
+
+
+class TestPruneMask(unittest.TestCase):
+    def test_the_mask_travels_by_environment_not_argv(self):
+        # bench/llama-moe-prune.patch reads LLAMA_MOE_PRUNE; putting it on argv
+        # would need a llama.cpp option that does not exist upstream.
+        self.assertEqual(PRUNE_ENV, "LLAMA_MOE_PRUNE")
+        cmd = build_command("ppl", "m.gguf", corpus="c.raw")
+        self.assertFalse(any("prune" in part for part in cmd))
+        self.assertEqual(environment(prune_mask="/tmp/mask.txt")[PRUNE_ENV],
+                         "/tmp/mask.txt")
+
+    def test_nothing_set_leaves_the_environment_alone(self):
+        self.assertIsNone(environment())
+
+    def test_the_mask_stacks_with_a_policy(self):
+        env = environment(policy="surprise", prune_mask="/tmp/mask.txt")
+        self.assertEqual(env[POLICY_ENV], "surprise")
+        self.assertEqual(env[PRUNE_ENV], "/tmp/mask.txt")
+
+    def test_the_table_names_the_mask(self):
+        report = {"ok": True, "exit_code": 0, "elapsed_s": 1.0, "corpus": "c.raw",
+                  "chunks": 20, "context": 512, "ppl": 45.2, "ppl_stderr": 5.7,
+                  "prune_mask": "freq-0.5.txt"}
+        self.assertIn("pruned by freq-0.5.txt", format_table(report))
+        # a report without a mask still renders
+        report.pop("prune_mask")
+        self.assertNotIn("pruned by", format_table(report))
 
 
 class TestCompareStream(unittest.TestCase):

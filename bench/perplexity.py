@@ -122,17 +122,20 @@ POLICY_ENV = "LLAMA_PPL_STREAM_POLICY"
 #: `surprise-local` protects this many of the newest tokens (env-driven, like the policy).
 MARGIN_ENV = "LLAMA_PPL_STREAM_MARGIN"
 DEFAULT_MARGIN = 128
+#: Expert keep-sets for a pruning measurement (bench/llama-moe-prune.patch). The
+#: router cannot select an expert the mask drops, which is the arithmetic of a
+#: model whose slabs were deleted - so this measures pruning without building it.
+PRUNE_ENV = "LLAMA_MOE_PRUNE"
 
 
-def run_perplexity(binary: str, model: str, *, corpus: str, chunks: int | None = None,
-                   context: int = 512, threads: int | None = None, ngl: int | None = 0,
-                   timeout: float | None = None, stride: int | None = None,
-                   keep: int | None = None, context_shift: bool = False,
-                   policy: str | None = None, margin: int | None = None) -> dict:
-    cmd = build_command(binary, model, corpus=corpus, chunks=chunks, context=context,
-                        threads=threads, ngl=ngl, stride=stride, keep=keep,
-                        context_shift=context_shift)
+def environment(*, policy: str | None = None, margin: int | None = None,
+                prune_mask: str | None = None) -> dict | None:
+    """The environment vipera's llama.cpp patches read, or None when nothing is set.
 
+    Kept apart from `run_perplexity` so the plumbing can be tested without spawning
+    a process: an unset knob must leave the child's environment untouched, and a
+    typo must raise instead of quietly measuring the stock model.
+    """
     env = None
     if policy is not None:
         if policy not in EVICTION_POLICIES:
@@ -140,6 +143,22 @@ def run_perplexity(binary: str, model: str, *, corpus: str, chunks: int | None =
         env = {**os.environ, POLICY_ENV: policy}
     if margin is not None:
         env = {**(env or os.environ), MARGIN_ENV: str(margin)}
+    if prune_mask is not None:
+        env = {**(env or os.environ), PRUNE_ENV: prune_mask}
+    return env
+
+
+def run_perplexity(binary: str, model: str, *, corpus: str, chunks: int | None = None,
+                   context: int = 512, threads: int | None = None, ngl: int | None = 0,
+                   timeout: float | None = None, stride: int | None = None,
+                   keep: int | None = None, context_shift: bool = False,
+                   policy: str | None = None, margin: int | None = None,
+                   prune_mask: str | None = None) -> dict:
+    cmd = build_command(binary, model, corpus=corpus, chunks=chunks, context=context,
+                        threads=threads, ngl=ngl, stride=stride, keep=keep,
+                        context_shift=context_shift)
+
+    env = environment(policy=policy, margin=margin, prune_mask=prune_mask)
 
     started = time.monotonic()
     try:
@@ -154,7 +173,8 @@ def run_perplexity(binary: str, model: str, *, corpus: str, chunks: int | None =
               "elapsed_s": round(elapsed, 3), "chunks": chunks,
               "context": context, "corpus": os.path.basename(corpus),
               "stride": stride, "keep": keep, "context_shift": context_shift,
-              "policy": policy, "margin": margin}
+              "policy": policy, "margin": margin,
+              "prune_mask": os.path.basename(prune_mask) if prune_mask else None}
     scored, shifts = parse_stream_stats(output)
     if scored is not None:
         report["scored_tokens"] = scored
@@ -218,6 +238,8 @@ def format_table(report: dict) -> str:
         if report.get("scored_tokens") is not None:
             lines.append(f"scored        {report['scored_tokens']} tokens, "
                          f"{report.get('context_shifts', 0)} context shifts")
+        if report.get("prune_mask"):
+            lines.append(f"experts       pruned by {report['prune_mask']}  (LLAMA_MOE_PRUNE)")
         lines.append(f"PPL           {report['ppl']:.4f} +/- {report['ppl_stderr']:.5f}")
     if report.get("error"):
         lines.append(f"error         {report['error']}")
@@ -286,6 +308,9 @@ def main(argv: list[str] | None = None) -> int:
                    help=f"tokens the `surprise-local` policy always keeps (default {DEFAULT_MARGIN})")
     p.add_argument("--compare-stream", action="store_true",
                    help="run the full window and sink + sliding on the same tokens")
+    p.add_argument("--prune-mask", default=None,
+                   help="expert keep-sets (vipera.prune.write_mask format) to measure "
+                        "pruning quality with, via LLAMA_MOE_PRUNE")
     p.add_argument("--threads", type=int, default=None)
     p.add_argument("--ngl", type=int, default=0)
     p.add_argument("--timeout", type=float, default=None)
@@ -308,7 +333,7 @@ def main(argv: list[str] | None = None) -> int:
                                 context=args.context, threads=args.threads, ngl=args.ngl,
                                 timeout=args.timeout, stride=args.stride, keep=args.keep,
                                 context_shift=args.context_shift, policy=args.policy,
-                                margin=args.margin)
+                                margin=args.margin, prune_mask=args.prune_mask)
         print(format_table(report))
 
     if args.json_path:
