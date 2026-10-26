@@ -636,6 +636,12 @@ def optimize_cmd(
         "--token-embedding",
         help="Mixed-precision type for token embeddings (e.g. q6_k)",
     ),
+    tensor_type: list[str] = typer.Option(
+        None,
+        "--tensor-type",
+        help="Per-tensor override PATTERN=TYPE, repeatable: 'ffn_.*_exps=Q3_K' "
+        "shrinks routed experts while attention stays at the base quant",
+    ),
     bin_dir: str = typer.Option(None, "--bin-dir"),
     dry_run: bool = typer.Option(False, "--dry-run"),
 ):
@@ -672,6 +678,7 @@ def optimize_cmd(
     try:
         quantize_bin = find_llama_tool("quantize", bin_dir)
         supports_prior = prior_weight != 1 and tool_supports_flag(quantize_bin, "--prior-weight")
+        supports_tensor = bool(tensor_type) and tool_supports_flag(quantize_bin, "--tensor-type")
     except OptimizerError as e:
         console.print(f"{e}")
         raise typer.Exit(1) from e
@@ -690,7 +697,14 @@ def optimize_cmd(
     plan.add_row("model", str(model))
     plan.add_row("current", f"{current_quant} · {_format_bytes(current_size)}")
     plan.add_row("target quant", quant)
-    plan.add_row("estimated size", _format_bytes(estimated))
+    # Per-tensor overrides move the real size away from the base quant's
+    # estimate, so the label says which one the number belongs to.
+    plan.add_row(
+        "estimated size",
+        _format_bytes(estimated) if not tensor_type else f"{_format_bytes(estimated)} (base quant)",
+    )
+    if tensor_type:
+        plan.add_row("per-tensor", ", ".join(tensor_type))
     if target_size is not None:
         plan.add_row("target size", f"{target_size:.2f} GB")
     plan.add_row("output", str(out))
@@ -724,6 +738,8 @@ def optimize_cmd(
             supports_prior_weight=supports_prior,
             output_tensor_type=output_tensor,
             token_embedding_type=token_embedding,
+            tensor_types=tensor_type,
+            supports_tensor_type=supports_tensor,
         )
     except OptimizerError as e:
         console.print(f"{e}")

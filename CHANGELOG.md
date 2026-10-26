@@ -7,7 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **`model optimize --tensor-type PATTERN=TYPE`** passes per-tensor quant
+  overrides to `llama-quantize`, which is how an MoE model is made to fit a
+  small card: LFM2.5-8B-A1B's routed experts are 4.45 GB of its 4.91 GB, and
+  `'ffn_.*_exps=Q3_K'` cut them to 3.33 GB with attention and KV untouched. The
+  planner then put 17/24 expert layers on a GTX 1650 instead of 12/24 and
+  decode went 65.76 → 78.05 t/s at the same VRAM and 64K context, while PPL
+  moved 29.56 → 28.69 inside its ±1.8 error. On a `llama-quantize` without
+  `--tensor-type` the command refuses rather than shipping a uniform quant.
+
 ### Fixed
+- **`bench` stored a CPU-only split as this machine's tuning profile.** With
+  `profile: lowmem` (or a binding that has no CUDA backend) the plan carries
+  `gpu_layers: 0`, and `bench` wrote that measurement to `tuning.json` — "0
+  layers, 37.29 t/s" for a box that serves 24/24 at 78 t/s. A profile with no
+  GPU layers is no longer recorded; it taught nothing the planner could reuse.
 - **A full plan left the output layer on the CPU.** `llama.cpp` counts the
   output layer as one group past the GGUF's `block_count`, so `-ngl n_layers`
   offloaded `n-1` of `n+1` groups while the banner still read `n/n`. Measured on

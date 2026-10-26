@@ -101,6 +101,22 @@ def _quant_bpw(quant: str) -> float:
     return 4.58
 
 
+def _tensor_type_patterns(value: str | Sequence[str] | None) -> list[str]:
+    """Validate ``pattern=type`` overrides, one per element."""
+    if value is None:
+        return []
+    parts: Sequence[str] = [value] if isinstance(value, str) else value
+    patterns: list[str] = []
+    for part in parts:
+        text = part.strip()
+        if not text:
+            continue
+        if "=" not in text:
+            raise OptimizerError(f"invalid --tensor-type (expected PATTERN=TYPE): {text}")
+        patterns.append(text)
+    return patterns
+
+
 def parse_prune_layers(value: str | Sequence[int] | None) -> list[int]:
     if value is None or value == "":
         return []
@@ -259,12 +275,28 @@ def build_quantize_command(
     supports_prior_weight: bool = False,
     output_tensor_type: str | None = None,
     token_embedding_type: str | None = None,
+    tensor_types: str | Sequence[str] | None = None,
+    supports_tensor_type: bool = False,
 ) -> list[str]:
     command = [binary]
     if allow_requantize:
         command.append("--allow-requantize")
     if imatrix:
         command.extend(["--imatrix", str(imatrix)])
+
+    # Mixed precision per tensor, the only lever that shrinks routed experts
+    # without touching the attention blocks they sit beside. Measured on
+    # LFM2.5-8B-A1B (GTX 1650, 64K): experts Q4_K -> Q3_K freed 1.2 GiB, which
+    # the planner spent on five more expert layers (12 -> 17 of 24) and bought
+    # +18.7% decode at the same VRAM (65.76 -> 78.05 t/s); PPL over a disjoint
+    # eval slice moved 29.56 -> 28.69, inside the +/-1.8 error.
+    for pattern in _tensor_type_patterns(tensor_types):
+        if not supports_tensor_type:
+            raise OptimizerError(
+                "--tensor-type is not supported by this llama-quantize build; "
+                "upgrade llama.cpp or omit the option."
+            )
+        command.extend(["--tensor-type", pattern])
 
     layers = parse_prune_layers(prune_layers)
     if layers:

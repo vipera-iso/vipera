@@ -205,7 +205,12 @@ def run(
                 note(f"ctx {c} failed during the run: {result['error']}", tone="error")
                 continue
 
-            if tuning is not None:
+            if tuning is not None and engine.plan.gpu_layers > 0:
+                # A CPU-only plan is not a split worth replaying. `profile: lowmem`
+                # or `cpu` in the config produces one deliberately, and an
+                # in-process binding without a CUDA backend produces one by
+                # accident; storing it wrote "0 layers, 37 t/s" into
+                # tuning.json for a machine that serves 24/24 at 78 t/s.
                 # engine.plan, not the requested plan: a failed GPU load falls
                 # back a rung, and that fallback is the split that ran.
                 stored |= tuning.record(

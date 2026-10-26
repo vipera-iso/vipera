@@ -270,3 +270,43 @@ def test_read_meta_propagates_hybrid_attention_split(tmp_path, monkeypatch):
     # 18 attention layers, not 72: the estimate must follow the split.
     expected = 2 * 18 * 8 * 128 * 8192 * 1.0 / 1024**3
     assert _estimate_kv_cache_gb(meta, 8192, "q8_0") == pytest.approx(expected)
+
+
+def test_optimize_cmd_passes_tensor_type_overrides(monkeypatch, tmp_path):
+    model = tmp_path / "m.gguf"
+    model.write_bytes(b"x")
+    monkeypatch.setattr(
+        model_cmd,
+        "analyze_gguf",
+        lambda path: {"metadata": {"file_size_bytes": 4_800_000_000, "quant": "Q4_K_M"}},
+    )
+    monkeypatch.setattr(
+        model_cmd, "find_llama_tool", lambda tool, bin_dir=None: "/bin/llama-quantize"
+    )
+    monkeypatch.setattr(model_cmd, "tool_supports_flag", lambda binary, flag: True)
+    monkeypatch.setattr(model_cmd, "_prepare_output", lambda value, fallback: fallback)
+    seen = {}
+
+    def fake_run(command, dry_run, cleanup=None):
+        seen["command"] = command
+        return True
+
+    monkeypatch.setattr(model_cmd, "_run_tool", fake_run)
+
+    model_cmd.optimize_cmd(
+        path=str(model),
+        target_size=None,
+        target_quant="Q4_K_M",
+        calibration_data=None,
+        output=None,
+        prune_layers=None,
+        prior_weight=1,
+        output_tensor=None,
+        token_embedding=None,
+        tensor_type=["ffn_.*_exps=Q3_K"],
+        bin_dir=None,
+        dry_run=True,
+    )
+
+    command = seen["command"]
+    assert command[command.index("--tensor-type") + 1] == "ffn_.*_exps=Q3_K"

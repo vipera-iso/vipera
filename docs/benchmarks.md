@@ -167,6 +167,54 @@ free VRAM. With 1.5 GB less free, the formula said 9 and `apply_tuning` kept 9:
 a split measured with more room is not replayed onto a card that no longer has
 it, because a failed load costs more than the extra layer.
 
+### Mixed-quant experts
+
+On an MoE model the routed experts are most of the file and most of the
+pressure on a small card. LFM2.5-8B-A1B Q4_K_M is 4.91 GB, of which 4.45 GB is
+`*_exps` weights. Quantizing **only** those tensors to Q3_K (imatrix built from
+6 chunks of `tools/eval/wikitext_sample.txt`) leaves attention, the KV cache
+and the routing layer at Q4_K_M:
+
+| Arm | File | Expert bytes | Expert layers on GPU | VRAM | Decode @64K |
+|---|---:|---:|---:|---:|---:|
+| Q4_K_M | 4.91 GB | 4.45 GB | 12/24 (`-ncmoe 12`) | 3494 MiB | 65.76 t/s |
+| `ffn_.*_exps=Q3_K` | 3.82 GB | 3.33 GB | 17/24 (`-ncmoe 7`) | 3504 MiB | **78.05 t/s** |
+
+**+18.7% decode at identical VRAM and context**, median of three requests on
+each arm, ranges that do not overlap (65.75–66.27 against 76.97–78.50). The
+planner needed no change: it read the smaller `expert_bytes` and spent the
+freed 1.2 GiB on five more expert layers.
+
+Quality is a wash, not a win: PPL 29.56 ± 1.88 → 28.69 ± 1.81 over 12 chunks of
+a slice of `wikitext_sample.txt` that the imatrix did not see. The imatrix is
+what makes that hold — without one, a Q3 requant of an already-Q4 model has
+measured worse on this project's L1a arms.
+
+```bash
+vipera model optimize LFM2.5-8B-A1B-Q4_K_M.gguf --target-quant Q4_K_M \
+  -f tools/eval/wikitext_sample.txt --tensor-type 'ffn_.*_exps=Q3_K'
+vipera model add LFM2.5-8B-A1B-Q4K-expQ3K.gguf --name lfm25-expq3
+vipera serve start -m lfm25-expq3 --profile auto --ctx 65536
+```
+
+### Rejected: per-tensor placement for dense models
+
+`llama-server` b11827 accepts `-ot/--override-tensor`, which would let a plan
+keep every attention block and the whole KV cache on the GPU while leaving
+some FFN blocks in system RAM — a finer axis than `-ngl`. Measured off the GGUF
+itself for Hermes-4-14B Q3_K_M (attention 1 192 MiB over 40 layers, FFN
+4 856 MiB), the arithmetic says not to:
+
+| Context | Attention + all KV | Left for FFN | FFN layers on GPU | Today (`-ngl`) |
+|---|---:|---:|---:|---:|
+| 8K, KV q8_0 | 1 856 MiB | 1 874 MiB | 15 | **18** |
+| 32K, KV q4_0 | 2 599 MiB | 1 131 MiB | 9 | 16 |
+| 64K, KV q4_0 | 3 984 MiB | — | 0 | 18 at 32K, none at 64K |
+
+It loses at every context this card can hold, so the axis was rejected before
+any code was written. What remains for a dense model at 64K is a smaller KV
+cache, not a cleverer placement.
+
 ### `auto` backend: the gateway vs its own child vs Ollama
 
 Same GGUF, same `ctx 4096`, same 226-token prompt, 128 max tokens, temperature

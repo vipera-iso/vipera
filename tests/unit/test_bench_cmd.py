@@ -320,3 +320,25 @@ def test_bench_stores_nothing_when_tuning_is_off(monkeypatch, tmp_path):
     bench_cmd.run(model="m", ctx="512", max_tokens=2)
 
     assert not (tmp_path / "tuning.json").exists()
+
+
+def test_bench_does_not_store_a_cpu_only_split(monkeypatch, tmp_path):
+    from vipera.optimize.tuning import TuningStore
+
+    store = TuningStore(tmp_path / "tuning.json")
+    hw = types.SimpleNamespace(
+        cpu_cores=4, ram_free_gb=8.0, gpu_name="GTX 1650", ram_total_gb=32.0, vram_total_gb=4.0
+    )
+    monkeypatch.setattr(bench_cmd, "TuningStore", lambda: store)
+    # `profile: lowmem` plans 0 GPU layers on purpose; recording that split would
+    # tell the next serve to run CPU-only on a machine that has a card.
+    monkeypatch.setattr(bench_cmd, "load_config", lambda: {**DEFAULT_CONFIG, "profile": "lowmem"})
+    monkeypatch.setattr(bench_cmd, "get_model", _spec)
+    monkeypatch.setattr(bench_cmd, "detect", lambda: hw)
+    monkeypatch.setattr(bench_cmd, "plan", lambda *a, **kw: _plan(gpu_layers=0, offload_kqv=False))
+    monkeypatch.setattr(bench_cmd, "create_engine", lambda p, path, backend: FakeEngine(p, path))
+    monkeypatch.setattr(bench_cmd, "animated_loading_bar", lambda *a, **kw: None)
+
+    bench_cmd.run(model="m", ctx="512", max_tokens=2)
+
+    assert store.get("m", hw) is None

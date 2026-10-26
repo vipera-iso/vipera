@@ -173,3 +173,56 @@ def test_estimate_quant_from_nvfp4_current_size():
     # the block-table bpw (4.5) rather than the generic Q4 fallback (4.58).
     assert choice.quant == "NVFP4"
     assert choice.target_bpw == pytest.approx(4.5)
+
+
+def test_build_quantize_command_passes_each_tensor_override():
+    command = build_quantize_command(
+        "llama-quantize",
+        "model.gguf",
+        "out.gguf",
+        "Q4_K_M",
+        tensor_types=["ffn_.*_exps=Q3_K", "attn_v=Q5_K"],
+        allow_requantize=True,
+        supports_tensor_type=True,
+    )
+
+    overrides = [command[i + 1] for i, part in enumerate(command) if part == "--tensor-type"]
+    assert overrides == ["ffn_.*_exps=Q3_K", "attn_v=Q5_K"]
+    assert command[-3:] == ["model.gguf", "out.gguf", "Q4_K_M"]
+
+
+def test_build_quantize_command_accepts_a_single_tensor_override():
+    command = build_quantize_command(
+        "llama-quantize",
+        "model.gguf",
+        "out.gguf",
+        "Q4_K_M",
+        tensor_types="ffn_.*_exps=Q3_K",
+        supports_tensor_type=True,
+    )
+
+    assert command[command.index("--tensor-type") + 1] == "ffn_.*_exps=Q3_K"
+
+
+def test_build_quantize_command_rejects_unsupported_tensor_override():
+    with pytest.raises(OptimizerError, match="--tensor-type is not supported"):
+        build_quantize_command(
+            "llama-quantize",
+            "model.gguf",
+            "out.gguf",
+            "Q4_K_M",
+            tensor_types=["ffn_.*_exps=Q3_K"],
+            supports_tensor_type=False,
+        )
+
+
+def test_build_quantize_command_rejects_a_malformed_tensor_override():
+    with pytest.raises(OptimizerError, match="expected PATTERN=TYPE"):
+        build_quantize_command(
+            "llama-quantize",
+            "model.gguf",
+            "out.gguf",
+            "Q4_K_M",
+            tensor_types=["ffn_exps"],
+            supports_tensor_type=True,
+        )

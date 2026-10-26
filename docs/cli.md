@@ -181,6 +181,7 @@ quantize. Requires `--target-size` (decimal GB) or `--target-quant`.
 | `-o`, `--output` | `<model>-vipera-<quant>.gguf` | Output path. |
 | `--prune-layers` | none | Passed through to `llama-quantize`. |
 | `--prior-weight` | `1` | MoE expert prior. |
+| `--tensor-type` | none | Per-tensor override `PATTERN=TYPE`, repeatable. `'ffn_.*_exps=Q3_K'` shrinks routed experts while attention stays at the base quant. |
 | `--bin-dir` | auto | Directory containing both tools. |
 | `--dry-run` | off | Print the full plan and both commands. |
 
@@ -189,6 +190,20 @@ Q3_K_M, Q2_K` whose estimated size fits the budget. The estimate scales the
 source file size by bits-per-weight ratios, so it is approximate for mixed-quant
 sources and models with large embeddings. `optimize` passes
 `--allow-requantize` because its source is often already quantized.
+
+`--tensor-type` is the lever for MoE models whose routed experts dominate the
+file. Shrinking only the experts frees VRAM the planner spends on more expert
+layers on the card, without touching the attention blocks or the KV cache. It
+requires a `llama-quantize` that advertises `--tensor-type`; on a build without
+it the command refuses instead of silently producing a uniform quant.
+
+```bash
+vipera model optimize model.gguf --target-quant Q4_K_M \
+  -f tools/eval/wikitext_sample.txt --tensor-type 'ffn_.*_exps=Q3_K'
+```
+
+The imatrix matters here: it is what keeps the smaller experts inside the
+quality of the base quant. See [benchmarks](benchmarks.md#mixed-quant-experts).
 
 ### `vipera model list`
 
