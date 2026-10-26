@@ -197,6 +197,34 @@ vipera model add LFM2.5-8B-A1B-Q4K-expQ3K.gguf --name lfm25-expq3
 vipera serve start -m lfm25-expq3 --profile auto --ctx 65536
 ```
 
+### `lowmem` on a MoE model: "no expert in VRAM" is not "no GPU"
+
+`profile: lowmem` means "do not put the weights in VRAM". On a MoE model that was
+being read as "do not use the card at all", which threw away more than half the
+decode rate: the routed experts are the bulk of the file, and the attention side
+fits beside a 4 GB card's reserve. Same model, same context, one request per arm,
+64 generated tokens:
+
+LFM2.5-8B-A1B (Q4_K weights, Q3_K experts, 3.82 GB, 3.33 GB of it experts), GTX
+1650 4 GB, `ctx 8192`, `-fa on`, q4_0 KV:
+
+| placement | flags | decode | prefill |
+|---|---|---:|---:|
+| CPU only (what `lowmem` used to plan) | `-ngl 0` | 37.06 t/s | 43.8 t/s |
+| experts in RAM, attention on GPU (what `lowmem` plans now) | `-ngl 24 -cmoe` | **49.88 t/s** (+35%) | 45.4 t/s |
+| the MoE split `auto` plans | `-ngl 21 -ncmoe 6` | **69.33 t/s** (+87%) | 65.6 t/s |
+
+Read the middle row as the profile's floor: it keeps every expert weight in system
+RAM — the promise — and is still a third faster than giving up the card. The last
+row is what `profile: auto` gets for the same model, and the reason `lowmem` should
+be a memory choice, not a speed one. It also caps context at 2048 where `auto`
+plans 8192, so the gap on a real workload is larger than the three columns say.
+
+Through the gateway the same change reads: `vipera bench run lfm25-expq3 --ctx 8192`
+went from **37.81 t/s at 0/24 layers** to **51.90 t/s at 24/24 layers** with the
+`lowmem` config unchanged (the small difference from the table is the gateway's
+measured ubatch and its own prefill).
+
 ### Rejected: per-tensor placement for dense models
 
 `llama-server` b11827 accepts `-ot/--override-tensor`, which would let a plan

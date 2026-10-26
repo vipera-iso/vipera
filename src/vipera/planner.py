@@ -175,6 +175,65 @@ _MOE_OVERHEAD_PER_UB_GB = 0.00022
 _MOE_VRAM_RESERVE_GB = 0.15
 
 
+def _lowmem_moe_plan(
+    meta: dict,
+    hw: HardwareInfo,
+    *,
+    n_layers: int,
+    kv_layers: int,
+    ctx: int,
+    n_batch: int,
+    cpu_threads: int,
+) -> Plan | None:
+    """`lowmem` for a MoE model: every routed expert in RAM, attention on the card.
+
+    "No expert on the GPU" is not the same as "no GPU". On a MoE model the routed
+    experts are the bulk of the file, and the attention side is small enough to fit
+    beside the reserve of a 4 GB card. Measured on LFM2.5-8B-A1B (Q4_K weights, Q3_K
+    experts, ctx 8192, GTX 1650): CPU-only **37.1 t/s**, experts-on-CPU **49.9 t/s**,
+    the full MoE split 69.3 t/s. So the profile can honour its promise - no expert
+    weight in VRAM - and still be 35% faster than the plan it used to return.
+
+    `-ncmoe n_layers` is exactly llama.cpp's `-cmoe`.
+
+    Returns None when the model has no routed experts, there is no GPU, or the dense
+    side does not fit; the caller then keeps the CPU-only plan.
+    """
+    if getattr(hw, "vram_total_gb", 0) <= 0:
+        return None
+
+    expert_bytes = int(meta.get("expert_bytes") or 0)
+    size_bytes = int(meta.get("size_bytes") or 0)
+    if expert_bytes <= 0 or size_bytes <= expert_bytes:
+        return None
+
+    lowmem_ctx = min(ctx, 2048)
+    ubatch = min(n_batch, 64)
+    dense_gb = (size_bytes - expert_bytes) / 1024**3
+    kv_gb = _estimate_kv_cache_gb(meta, lowmem_ctx, "f16")
+    overhead_gb = _MOE_OVERHEAD_BASE_GB + _MOE_OVERHEAD_PER_UB_GB * ubatch
+    if dense_gb + kv_gb + overhead_gb + _MOE_VRAM_RESERVE_GB > hw.vram_free_gb:
+        return None
+
+    return Plan(
+        gpu_layers=n_layers,
+        cpu_threads=cpu_threads,
+        context=lowmem_ctx,
+        kv_cache="f16",
+        # Attention now runs on the card, where flash attention is the fast path.
+        flash_attn=True,
+        n_batch=ubatch,
+        offload_kqv=True,
+        use_mlock=False,
+        note=f"MoE: experts on CPU, attention on GPU ({n_layers}/{n_layers} layers, Low Memory)",
+        kv_cache_gb=kv_gb,
+        kv_layers=kv_layers,
+        moe_cpu_layers=n_layers,
+        n_ubatch=ubatch,
+        n_layers=n_layers,
+    )
+
+
 def _moe_cpu_layers(
     meta: dict,
     hw: HardwareInfo,
@@ -249,8 +308,22 @@ def plan(
 
     model_size_gb = size_bytes / 1024**3
 
-    # Low-memory profile: never offload, small ctx, small batch.
+    # Low-memory profile: no routed expert in VRAM, small ctx, small batch. A MoE
+    # model can still put its attention on the card - that is a fraction of the
+    # file and measured +35% decode, so the CPU-only plan is the fallback, not the
+    # rule.
     if profile == "lowmem":
+        lowmem_moe = _lowmem_moe_plan(
+            meta,
+            hw,
+            n_layers=n_layers,
+            kv_layers=kv_layers,
+            ctx=ctx,
+            n_batch=n_batch,
+            cpu_threads=cpu_threads,
+        )
+        if lowmem_moe is not None:
+            return lowmem_moe
         return Plan(
             gpu_layers=0,
             cpu_threads=cpu_threads,

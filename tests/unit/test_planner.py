@@ -401,6 +401,37 @@ _LFM_MOE_META = {
 }
 
 
+def test_lowmem_moe_keeps_experts_in_ram_and_attention_on_the_gpu():
+    # The profile promises "no routed expert in VRAM"; it should not therefore
+    # give up the card as well. Measured 37.1 -> 49.9 t/s on the reference box.
+    hw = _hw(gpu_name="GTX 1650", vram_total_gb=4.0, vram_free_gb=3.64)
+    p = plan(_LFM_MOE_META, hw, profile="lowmem", ctx=8192, n_batch=512)
+
+    assert p.moe_cpu_layers == 24  # all experts in CPU RAM == llama.cpp -cmoe
+    assert p.requires_server is True
+    assert p.gpu_layers == 24
+    assert p.context <= 2048
+    assert p.n_batch <= 64
+    assert p.kv_cache == "f16"
+    assert p.offload_kqv is True
+    assert p.note.startswith("MoE: experts on CPU")
+
+
+def test_lowmem_moe_falls_back_to_cpu_only_when_the_dense_side_is_too_big():
+    hw = _hw(gpu_name="GTX 1650", vram_total_gb=4.0, vram_free_gb=0.30)
+    p = plan(_LFM_MOE_META, hw, profile="lowmem", ctx=8192, n_batch=512)
+
+    assert p.gpu_layers == 0
+    assert p.moe_cpu_layers == -1
+    assert "Low Memory" in p.note
+
+
+def test_lowmem_stays_cpu_only_without_a_gpu():
+    p = plan(_LFM_MOE_META, _hw(), profile="lowmem", ctx=8192)
+    assert p.gpu_layers == 0
+    assert p.moe_cpu_layers == -1
+
+
 def test_moe_plan_fits_last_expert_layers_and_keeps_classic_split():
     hw = _hw(gpu_name="GTX 1650", vram_total_gb=4.0, vram_free_gb=3.64)
     p = plan(_LFM_MOE_META, hw, ctx=65536, kv_cache="q4_0")
