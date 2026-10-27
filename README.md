@@ -55,6 +55,10 @@ vipera model search                          # fetch a GGUF from Hugging Face
 vipera serve start                           # → http://127.0.0.1:8686/v1
 ```
 
+CUDA, ROCm/HIP (AMD) and SYCL/Vulkan (Intel) builds all work; the `nvidia`
+extra is the only vendor-specific one, and it only saves a probe. See
+[GPU backends](docs/install.md#gpu-backends) for the wheel index per vendor.
+
 ```python
 from openai import OpenAI
 

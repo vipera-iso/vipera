@@ -24,7 +24,7 @@ All code lives in `src/vipera`.
 
 | Module | Responsibility | Depends on |
 |---|---|---|
-| `hardware.py` | Probe CPU topology, RAM, GPU name, VRAM. Returns `HardwareInfo`. No side effects beyond optional NVML init. | `psutil`, `pynvml` module (optional `nvidia` extra) |
+| `hardware.py` | Probe CPU topology, RAM, and a GPU from any vendor (NVML, amdgpu sysfs, `rocm-smi`, `xpu-smi`, then `llama-server --list-devices`). Returns `HardwareInfo`; the last probe starts a process. | `psutil`, `pynvml` (optional `nvidia` extra), vendor CLIs when present |
 | `planner.py` | Turn `(model metadata, HardwareInfo, overrides)` into a `Plan` dataclass. Pure function. | `hardware` |
 | `backends/inprocess.py` | Wrap `llama_cpp.Llama` from a `Plan`; perform the GPU→CPU and `mlock` retries; expose `chat()`/`tokenize()`/`health()`. | `llama-cpp-python` (optional extra), `planner` |
 | `backends/server.py` | Opt-in `llama-server` child process: translate a `Plan` into flags, wait for `/health`, proxy `chat()`/`tokenize()`, stop the child. | `planner`, `optimizer` (binary lookup) |
@@ -450,20 +450,33 @@ decoding, you need a different serving stack.
 
 ## Hardware probing
 
-`hardware.detect()` reports:
+`hardware.detect()` reports cores and RAM via `psutil`, then asks a chain of
+probes for the GPU, most precise first:
 
-- **CPU**: physical cores and logical threads via `psutil`.
-- **RAM**: total and available via `psutil.virtual_memory()`.
-- **Apple Silicon**: identified as macOS on `arm64`; VRAM is reported as unified
-  memory, with 70% of available RAM treated as usable VRAM.
-- **NVIDIA**: via the `pynvml` module, provided by the `nvidia` extra
-  (`pip install -e ".[nvidia]"`, which installs `nvidia-ml-py`). Without it,
-  GPU fields stay at their defaults
-  and the machine is planned as CPU-only. Detection alone does not add a GPU
-  backend: acceleration still requires a CUDA-enabled `llama-cpp-python` build.
+1. **NVML** (`pynvml`, from the `nvidia` extra) for NVIDIA cards.
+2. **amdgpu sysfs** (`/sys/class/drm/card*/device`) on Linux. An APU's GTT
+   window is folded in and reported as unified memory.
+3. **`rocm-smi --json`** for AMD cards whose sysfs is not readable.
+4. **`xpu-smi discovery --json`** for Intel GPUs. Discovery reports capacity,
+   not usage, so the free figure is 80% of it and `vram_free_is_estimate` is
+   set.
+5. **`llama-server --list-devices`** last: it starts a process, but it is the
+   only probe that reports what the installed runtime can actually allocate.
+   A build that prints capacity without free memory is scaled the same way and
+   marked as an estimate.
 
-Probing never raises: the NVML import and calls are wrapped in
-`contextlib.suppress(Exception)`.
+The first probe that finds a card wins. `HardwareInfo` carries the vendor
+(`gpu_vendor`), where the number came from (`vram_source`), whether the memory
+is shared with the CPU (`unified_memory`), and whether free memory was
+estimated (`vram_free_is_estimate`); `vipera system doctor` prints all of them.
+A failing probe means "ask the next one" and never raises.
+
+Apple Silicon is identified as macOS on `arm64` before this chain runs: VRAM is
+reported as unified memory, with 70% of available RAM treated as usable.
+
+Detection alone does not add a GPU backend: acceleration still requires a
+`llama-cpp-python`/`llama-server` build for that vendor (CUDA, HIP/ROCm,
+SYCL/Vulkan, or Metal).
 
 ## Known gaps
 

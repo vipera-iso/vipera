@@ -9,6 +9,8 @@ from __future__ import annotations
 
 from vipera.backends.server import (
     ServerEngine,
+    accelerator_device,
+    has_accelerator_device,
     has_cuda_device,
     probe_devices,
     server_command,
@@ -18,6 +20,8 @@ from vipera.backends.server import (
 
 __all__ = [
     "ServerEngine",
+    "accelerator_device",
+    "has_accelerator_device",
     "has_cuda_device",
     "probe_devices",
     "server_command",

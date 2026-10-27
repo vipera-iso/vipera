@@ -311,7 +311,7 @@ def test_resolve_backend_refuses_a_cpu_only_server(monkeypatch, capsys):
     assert plan.moe_cpu_layers == -1
     assert plan.n_ubatch == 0
     assert plan.gpu_layers == 14
-    assert "CUDA0" in out
+    assert "does not see a GPU device" in out
     assert "falling back" in out
     assert "LD_LIBRARY_PATH" in out
 

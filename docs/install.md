@@ -114,10 +114,32 @@ it in one step.
 |---|---|
 | `llama` | The inference runtime (`llama-cpp-python`). Without it Vipera cannot load a model. |
 | `gguf` | Reads layer count and parameter metadata from model files. |
-| `nvidia` | Installs `nvidia-ml-py` (the `pynvml` module) so Vipera can detect NVIDIA VRAM. Only useful with a CUDA-enabled `llama-cpp-python`; the standard package still runs on CPU. |
+| `nvidia` | Installs `nvidia-ml-py` (the `pynvml` module) so Vipera reads NVIDIA VRAM without spawning anything. Recommended for NVIDIA cards; AMD and Intel need no Python extra. |
 
 Installation can take several minutes because `llama-cpp-python` may compile
 code on your machine.
+
+### GPU backends
+
+Vipera plans for any card llama.cpp can use. What you install is the only part
+that differs:
+
+| Card | Install the runtime with | Vipera reads free VRAM from |
+|---|---|---|
+| NVIDIA | `pip install llama-cpp-python --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cu124` (match your CUDA version, or set `CMAKE_ARGS='-DGGML_CUDA=on'`) | NVML (the `nvidia` extra), then `llama-server --list-devices` |
+| AMD, Linux | `--extra-index-url https://abetlen.github.io/llama-cpp-python/whl/rocm72`, or `CMAKE_ARGS='-DGGML_HIP=on'` | amdgpu sysfs counters, `rocm-smi`, then `llama-server` |
+| AMD, Windows | `--extra-index-url https://abetlen.github.io/llama-cpp-python/whl/hip-radeon` | `rocm-smi`, then `llama-server` |
+| Intel Arc, Flex, Max | `--extra-index-url https://abetlen.github.io/llama-cpp-python/whl/vulkan`, or a SYCL build: `source /opt/intel/oneapi/setvars.sh` then `CMAKE_ARGS='-DGGML_SYCL=on -DCMAKE_C_COMPILER=icx -DCMAKE_CXX_COMPILER=icpx'` | `xpu-smi`, then `llama-server` |
+| CPU only | nothing extra | RAM budget |
+
+`vipera system doctor` prints the GPU it found, the `vram source` the number
+came from, and whether the installed runtime can actually see the card. A
+source that ends in an estimate (for example `xpu-smi` without free-memory
+reporting) means the planner is budgeting conservatively from capacity.
+
+An AMD APU (a Ryzen desktop or mobile chip with integrated graphics) reports
+shared system memory rather than dedicated VRAM; the planner treats it as
+unified memory, and `system doctor` labels it that way.
 
 ## Step 4 — Check the install
 

@@ -8,7 +8,7 @@ from pathlib import Path
 import typer
 from rich.text import Text
 
-from vipera.backends.server import has_cuda_device, probe_devices
+from vipera.backends.server import accelerator_device, probe_devices
 from vipera.config import CONFIG_FILE, DEFAULT_CONFIG, _coerce_strict, load_config, save_config
 from vipera.hardware import detect
 from vipera.optimizer import OptimizerError, find_llama_tool
@@ -25,6 +25,15 @@ from vipera.ui import (
 )
 
 app = typer.Typer()
+
+# How to rebuild llama-cpp-python for the card that was found. The binding is
+# the common case: the CLI backend already ships working binaries.
+_BACKEND_BUILD = {
+    "nvidia": "CMAKE_ARGS='-DGGML_CUDA=on'",
+    "amd": "CMAKE_ARGS='-DGGML_HIP=on'",
+    # SYCL needs the oneAPI compilers on PATH before the build starts.
+    "intel": "source /opt/intel/oneapi/setvars.sh\nCMAKE_ARGS='-DGGML_SYCL=on'",
+}
 
 
 def _short_path(path: str) -> str:
@@ -101,7 +110,7 @@ def doctor():
             gpu_offload = None
 
         if gpu_offload is True:
-            row("gpu offload", "compiled in (CUDA/Metal)", "ok", C_GREEN)
+            row("gpu offload", "compiled in (GPU backend)", "ok", C_GREEN)
         elif gpu_offload is False:
             row("gpu offload", "CPU-only build", "warn", C_YELLOW)
         else:
@@ -123,36 +132,32 @@ def doctor():
     hw = detect()
     row("cpu", f"{hw.cpu_cores}C / {hw.cpu_threads}T")
 
-    if hw.is_apple_silicon:
-        row("gpu", "Apple Silicon (Metal)", "ok", C_GREEN)
-        row("unified memory", f"{hw.ram_free_gb:.1f} GB free / {hw.ram_total_gb:.1f} GB total")
+    if hw.unified_memory:
+        label = "Apple Silicon (Metal)" if hw.is_apple_silicon else hw.gpu_name
+        row("gpu", label, "ok", C_GREEN)
+        row("unified memory", f"{hw.vram_free_gb:.1f} GB usable / {hw.ram_total_gb:.1f} GB total")
     elif hw.gpu_name != "None":
         row("gpu", hw.gpu_name, "ok", C_GREEN)
-        row("vram", f"{hw.vram_free_gb:.1f} GB free / {hw.vram_total_gb:.1f} GB total")
+        label = "vram (estimated)" if hw.vram_free_is_estimate else "vram"
+        row(label, f"{hw.vram_free_gb:.1f} GB free / {hw.vram_total_gb:.1f} GB total")
+        row("vram source", hw.vram_source)
     else:
         row("gpu", "None (CPU Only)", "warn", C_YELLOW)
         row("ram available", f"{hw.ram_free_gb:.1f} GB free / {hw.ram_total_gb:.1f} GB total")
 
     section("llama.cpp")
     server_bin: str | None = None
-    server_cuda = False
+    server_gpu = False
     with contextlib.suppress(OptimizerError):
         server_bin = find_llama_tool("server")
 
     if server_bin:
         row("server binary", _short_path(server_bin))
         devices = probe_devices(server_bin)
-        server_cuda = has_cuda_device(devices)
-        if server_cuda:
-            cuda_line = next(
-                (
-                    line.strip()
-                    for line in (devices or "").splitlines()
-                    if line.strip().startswith("CUDA0")
-                ),
-                "CUDA0",
-            )
-            row("server devices", cuda_line)
+        device_line = accelerator_device(devices)
+        server_gpu = device_line is not None
+        if device_line:
+            row("server devices", device_line)
         elif devices is None:
             row("server devices", "probe failed", "warn", C_YELLOW)
         else:
@@ -165,10 +170,10 @@ def doctor():
     row("LD_LIBRARY_PATH", ld_path)
 
     planner_gpu = hw.gpu_name != "None" and getattr(hw, "vram_total_gb", 0) > 0
-    if planner_gpu and server_cuda:
-        row("planner offload", "GPU (CUDA0 matches planner)")
+    if planner_gpu and server_gpu:
+        row("planner offload", "GPU (llama-server sees the card)")
     elif planner_gpu and server_bin:
-        row("planner offload", "GPU (server sees no CUDA0)", "warn", C_YELLOW)
+        row("planner offload", "GPU (server sees no GPU device)", "warn", C_YELLOW)
     elif planner_gpu:
         row("planner offload", "GPU (no server binary)", "warn", C_YELLOW)
     else:
@@ -194,31 +199,32 @@ def doctor():
         )
 
     if gpu_offload is False and hw.gpu_name != "None":
+        build = _BACKEND_BUILD.get(hw.gpu_vendor, "CMAKE_ARGS='-DGGML_CUDA=on'")
         note(
             "A GPU was detected but this llama-cpp-python build has no GPU backend.\n"
             "gpu_layers is planned but ignored: every layer runs on the CPU.\n"
-            "Reinstall with the matching extra:\n"
-            "CMAKE_ARGS='-DGGML_CUDA=on' pip install --force-reinstall llama-cpp-python\n"
+            "Reinstall with the backend for this card:\n"
+            f"{build} pip install --force-reinstall llama-cpp-python\n"
             "then re-run this command.",
             tone="warn",
         )
         alternate = _cuda_venv_hint()
         if alternate:
             note(
-                f"This Python environment is CPU-only, but {alternate} is CUDA-enabled.\n"
+                f"This Python environment is CPU-only, but {alternate} is GPU-enabled.\n"
                 f"Use {alternate}/bin/vipera (or activate that venv) to run on the GPU.",
                 tone="warn",
             )
 
-    if planner_gpu and server_bin and not server_cuda:
+    if planner_gpu and server_bin and not server_gpu:
         note(
             "The planner can offload layers, but the selected llama-server reports "
-            "no CUDA0.\n"
+            "no GPU device.\n"
             f"binary: {_short_path(server_bin)}\n"
             f"LD_LIBRARY_PATH={ld_path}\n"
-            "This server will ignore --gpu-layers and serve CPU-only. Use a CUDA "
-            "build, or point LD_LIBRARY_PATH at its libcudart/libcublas "
-            "directory, then re-run this command.",
+            "This server will ignore --gpu-layers and serve CPU-only. Use a build "
+            "for this card (CUDA, HIP/ROCm, SYCL or Vulkan), or point "
+            "LD_LIBRARY_PATH at its runtime libraries, then re-run this command.",
             tone="warn",
         )
 

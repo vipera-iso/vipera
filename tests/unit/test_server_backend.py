@@ -308,6 +308,30 @@ def test_probe_devices_reports_cpu_only_and_probe_failure(monkeypatch):
     assert sb.has_cuda_device(None) is False
 
 
+@pytest.mark.parametrize(
+    "device",
+    [
+        "CUDA0: NVIDIA GeForce GTX 1650 (3730 MiB, 3600 MiB free)",
+        "ROCm0: AMD Radeon RX 7900 XTX (24560 MiB, 24000 MiB free)",
+        "HIP0: AMD Radeon RX 6800 (16384 MiB, 16000 MiB free)",
+        "SYCL0: Intel(R) Arc(TM) A770 Graphics (16384 MiB, 16000 MiB free)",
+        "Vulkan0: Intel(R) Arc(TM) A750 Graphics (8192 MiB, 8000 MiB free)",
+        "MTL0: Apple M2 Pro (16384 MiB, 15000 MiB free)",
+    ],
+)
+def test_any_vendor_device_counts_as_an_accelerator(device):
+    devices = f"Available devices:\n  {device}\n"
+
+    assert sb.has_accelerator_device(devices) is True
+    assert sb.accelerator_device(devices) == device
+
+
+def test_cpu_only_and_empty_device_lists_have_no_accelerator():
+    assert sb.has_accelerator_device("Available devices:\n  (none)\n") is False
+    assert sb.accelerator_device("Available devices:\n  (none)\n") is None
+    assert sb.has_accelerator_device(None) is False
+
+
 def test_supports_n_cpu_moe_reads_the_binary_help(monkeypatch):
     class _Result:
         def __init__(self, text):

@@ -23,13 +23,15 @@ from vipera.planner import Plan
 _AUTO_BACKEND: str | None = None
 
 
-def _cuda_server_available() -> bool:
-    """Whether the llama-server here can actually run a plan on the GPU.
+def _gpu_server_available() -> bool:
+    """Whether the llama-server here can actually run a plan on a GPU.
 
     Probed once per process: two subprocess runs (~1 s on a self-contained
-    CUDA build) per mounted model would be pure startup cost. A build without
-    CUDA parses every flag and then ignores --gpu-layers, so `--list-devices`
-    rather than `--help` is the honest test.
+    GPU build) per mounted model would be pure startup cost. A build without a
+    GPU backend parses every flag and then ignores --gpu-layers, so
+    `--list-devices` rather than `--help` is the honest test. Any backend
+    counts: CUDA and HIP builds both report CUDA0, SYCL reports SYCL0, and a
+    Vulkan build reports Vulkan0.
     """
     if _AUTO_BACKEND is not None:
         return _AUTO_BACKEND == "server"
@@ -38,7 +40,7 @@ def _cuda_server_available() -> bool:
         devices = server_backend.probe_devices(binary)
     except (OptimizerError, OSError):
         devices = None
-    available = server_backend.has_cuda_device(devices)
+    available = server_backend.has_accelerator_device(devices)
     globals()["_AUTO_BACKEND"] = "server" if available else "inprocess"
     return available
 
@@ -50,8 +52,8 @@ def resolve_backend(plan: Plan, backend: str) -> tuple[str, Plan]:
     places weights by tensor type is silently ignored by the in-process engine
     (and its classic ``gpu_layers`` split is the only safe fallback). A
     llama-server with ``-ncmoe`` or ``-ncffn`` can run the plan, but only if its
-    CUDA backend can actually see a device. A CPU-only build (or a CUDA build
-    with an incomplete LD_LIBRARY_PATH) parses every flag and then ignores
+    GPU backend can actually see a device. A CPU-only build (or a GPU build with
+    an incomplete LD_LIBRARY_PATH) parses every flag and then ignores
     ``--gpu-layers``, which made the "upgrade" slower than the in-process split
     on the reference box. Probe devices before switching.
     """
@@ -59,7 +61,7 @@ def resolve_backend(plan: Plan, backend: str) -> tuple[str, Plan]:
     # card, the Python binding otherwise. Only probed when it is actually asked
     # for, so an explicit backend never pays the two subprocess runs.
     if backend == "auto":
-        backend = "server" if _cuda_server_available() else "inprocess"
+        backend = "server" if _gpu_server_available() else "inprocess"
     # The MoE upgrade below only makes sense for llama.cpp's two backends.
     if backend != "inprocess" or not plan.requires_server:
         return backend, plan
@@ -89,7 +91,7 @@ def resolve_backend(plan: Plan, backend: str) -> tuple[str, Plan]:
         supported = False
         devices = None
 
-    if supported and server_backend.has_cuda_device(devices):
+    if supported and server_backend.has_accelerator_device(devices):
         if tensor_split:
             print(
                 "[i] Tensor split: using llama-server for FFN placement "
@@ -111,15 +113,16 @@ def resolve_backend(plan: Plan, backend: str) -> tuple[str, Plan]:
         ld_path = os.environ.get("LD_LIBRARY_PATH") or "(unset)"
         bin_env = os.environ.get("VIPERA_LLAMA_BIN") or "(unset)"
         print(
-            f"[!] Warning: llama-server parsed {flag} but does not see a CUDA0 "
+            f"[!] Warning: llama-server parsed {flag} but does not see a GPU "
             f"device; refusing the {what} and falling back to the "
             "classic layer split.\n"
             f"    binary: {binary}\n"
             f"    --list-devices:\n{probe_lines}\n"
             f"    VIPERA_LLAMA_BIN={bin_env}\n"
             f"    LD_LIBRARY_PATH={ld_path}\n"
-            "    If this is a CUDA build, point LD_LIBRARY_PATH at its CUDA "
-            "runtime libraries (libcudart/libcublas) and re-run."
+            "    If this is a GPU build, point LD_LIBRARY_PATH at its runtime "
+            "libraries (libcudart/libcublas for CUDA, libamdhip64 for ROCm, "
+            "libsycl for Intel) and re-run."
         )
         return "inprocess", classic
 

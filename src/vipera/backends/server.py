@@ -17,6 +17,7 @@ import atexit
 import contextlib
 import json
 import os
+import re
 import socket
 import subprocess
 import time
@@ -137,7 +138,7 @@ def probe_devices(binary: str) -> str | None:
     """Return `<binary> --list-devices`, or None when the probe cannot run.
 
     Flag probes (`--help`) only prove what a build can parse. They do not prove
-    that its CUDA backend can see the card: a binary built without CUDA, or one
+    that its GPU backend can see the card: a binary built without one, or one
     whose runtime libraries are missing from LD_LIBRARY_PATH, starts normally
     and silently ignores --gpu-layers. This is the check that catches that.
     """
@@ -155,11 +156,30 @@ def probe_devices(binary: str) -> str | None:
     return output or None
 
 
+# Device ids llama.cpp prints in `--list-devices`, one per backend it was built
+# with. A HIP build on an AMD card still names the device CUDA0, because
+# ggml-cuda serves both; SYCL names Intel GPUs, Vulkan names whatever the
+# loader returned, and MTL names Metal devices.
+_DEVICE_PREFIX = re.compile(r"^(?:CUDA|ROCm|HIP|SYCL|Vulkan|MTL|Metal|OpenCL|OPENCL)\d+:")
+
+
+def accelerator_device(devices: str | None) -> str | None:
+    """The first GPU device line in `--list-devices`, or None for CPU-only."""
+    for line in (devices or "").splitlines():
+        stripped = line.strip()
+        if _DEVICE_PREFIX.match(stripped):
+            return stripped
+    return None
+
+
+def has_accelerator_device(devices: str | None) -> bool:
+    """Whether `--list-devices` found a GPU on any backend."""
+    return accelerator_device(devices) is not None
+
+
 def has_cuda_device(devices: str | None) -> bool:
-    """Whether a `--list-devices` output contains the first CUDA device."""
-    if not devices:
-        return False
-    return any(line.strip().startswith("CUDA0") for line in devices.splitlines())
+    """Deprecated name for `has_accelerator_device`, kept for plugins."""
+    return has_accelerator_device(devices)
 
 
 def supports_spec_type(binary: str) -> bool:
