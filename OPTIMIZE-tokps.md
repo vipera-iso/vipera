@@ -53,7 +53,7 @@ ngắn: cửa lớn nhất còn lại là **MoE expert offload** (`-ot exps=CPU`
 |---|---|
 | Code | `src/vipera/{planner,engine,config,hardware,server_backend,server}.py`, `commands/{bench,serve,system,model}_cmd.py` |
 | Docs | `README.md`, `docs/benchmarks.md`, `docs/architecture.md` (§Known gaps), `docs/design/llama-server-backend.md`, `docs/configuration.md` |
-| Backlog & số đo cũ | `OPTIMIZE-hermes4.md`, `fullcode.md` (đề xuất v2 + mục "Kết quả đo — 2026-10-21"), `tools/{layer_results,l1a2_results,l1a_results}/REPORT.md` |
+| Backlog & số đo cũ | `OPTIMIZE-hermes4.md`, bản dump cũ `fullcode.md` (đề xuất v2 + mục "Kết quả đo — 2026-10-21"; đã bỏ khỏi repo), `tools/{layer_results,l1a2_results,l1a_results}/REPORT.md` |
 | Tài liệu bên ngoài | `~/Downloads/vipera-tai-lieu-co-gia-tri/{A,B,S,S-mo-rong}` (AWQ/H2O/StreamingLLM, QMoE/HAWQ, SolidAttention/HeteroSpec/WhichQuantization, `S-mo-rong/INDEX.md` = open-problems pack), `docs/references/{papers,stack}` |
 | Hạng deploy thật | `~/.vipera/config.json`, `~/.vipera/registry.json`, `~/.hermes/config.yaml` (providers agnes / local-deepseek:8080 / vipera:8686), `~/.hermes/hermes-agent/agent/model_metadata.py` |
 
@@ -81,8 +81,8 @@ opt-in), L5 (bảng A–E) **đã làm và đã đo**. L1b **đóng theo gate** 
 | F11 | Số đã đo của các "lane" khác @64K: **LFM2.5-8B-A1B (hybrid KV) = 15.5 t/s**; **DeepSeek-V2-Lite @64K = 5.5 t/s** với prefix thật (13.85 t/s @20 tok) — MLA attention O(prefix); MoE + `mlock` **16.0 → 22.9 t/s**; Hermes-4 @64K = **0.13 t/s** (q4_0) / OOM (q8_0) | `OPTIMIZE-hermes4.md`, `docs/benchmarks.md`, comment `~/.hermes/config.yaml` |
 | F12 | Best Hermes-4 đã đo: **4.00 t/s @8K f16 FA-off** (10/40), 2.86 @8K q8_0, prefill 7.4–10.1 s / ~470 tok | `docs/benchmarks.md` |
 | F13 | Q3_K_M+imatrix đã có file thật `q8src-imbf-q3km.gguf` (7.32 GB): CPU-only **−25% load, −27% prefill, +3% decode (nhiễu), PPL không giảm** | `tools/layer_results/REPORT.md` §E |
-| F14 | Gate L1b = 0.4 PPL, đo được 0.3812 → **đóng**. Không mở lại bằng cách sửa ngưỡng | `fullcode.md` §L1a v3 |
-| F15 | 167 test pass, `ruff` clean; `fullcode.md` phải regen kèm phần đề xuất sau fence | `pytest -q` hôm nay |
+| F14 | Gate L1b = 0.4 PPL, đo được 0.3812 → **đóng**. Không mở lại bằng cách sửa ngưỡng | bản dump cũ §L1a v3 |
+| F15 | 167 test pass, `ruff` clean; bản dump cũ đã bỏ, không cần regen để commit | `pytest -q` hôm nay |
 | F16 | **`mlock` bị kernel chặn trên máy này.** `ulimit -l` = soft 8192 KB / hard 8192 KB, không nâng được khi không có root. Cả `-lm mlock` (llama-server 0.7.0-dev) lẫn `use_mlock=True` (llama-cpp-python) đều in `warning: failed to mlock … Cannot allocate memory` rồi **chạy tiếp như mmap thuần** | test thật với 0.5B, 2026-10-21 |
 | F17 | Vì F16: planner `use_mlock=True` ở 8K là **no-op lặng lẽ**, và hàng "CPU only, `-lm mlock` 22.9 t/s" trong `docs/benchmarks.md` **không thể** đến từ mlock đang hoạt động trên máy này — trừ khi lúc đo `RLIMIT_MEMLOCK` đã được nâng (cần root). Cần đối chiếu lại trước khi trích dẫn | `docs/benchmarks.md` §Results |
 
@@ -206,7 +206,7 @@ Sau đó
   5. P2.1 build CUDA → P2.2 cờ → P2.3 ngram spec → P2.4 draft
   6. P3.2 tách lane (nếu mục tiêu là agent loop — quyết ở bước 1)
 Luôn kèm
-  - pytest + ruff trước mỗi commit; regen fullcode.md (giữ đề xuất sau fence)
+  - pytest + ruff trước mỗi commit; `fullcode.md` là bản dump cục bộ, không tracked
   - mọi số mới vào tools/*_results/REPORT.md, có dòng `env:` + `median of 3`
 ```
 
@@ -251,5 +251,5 @@ của cùng phiên (MoE offload, cache-reuse, IQ3, prompt-lookup trong process) 
    `OPTIMIZE-hermes4.md` ghi rõ.
 5. Backend flip default → cần đường lui bằng config (`backend: inprocess`) và
    test cancel-giữa-stream trước.
-6. `fullcode.md`: regen mỗi lần đổi `src/`, **giữ nguyên phần đề xuất sau
-   closing fence**.
+6. `fullcode.md` đã bỏ khỏi repo (dump cục bộ, gitignored). Nếu cần bản mới
+   thì tự sinh, **không commit**.

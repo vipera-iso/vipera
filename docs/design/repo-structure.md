@@ -13,22 +13,20 @@ every move below breaks links in a commit whose purpose was presentation.
 
 Two things in one directory: a Python package (134 tracked files, ~4,000 lines
 of `src/`) and a research archive. 35 MB of `docs/` is mostly
-`docs/references/` — vendored HTML snapshots of llama.cpp and FastAPI pages —
-plus `fullcode.md`, a generated 4,796-line dump of `src/` that is 13% of the
-repository's text.
+`docs/references/` — vendored HTML snapshots of llama.cpp and FastAPI pages.
 
 That is a legitimate way to run a measurement-driven project: the runs and the
 sources stay next to the code. The problem is that **the two are sorted
 alphabetically together**, so the first thing a visitor sees in the file list
 is `OPTIMIZE-hermes4.md`, `OPTIMIZE-ollama.md`, `OPTIMIZE-techniques.md`,
-`OPTIMIZE-tokps.md`, `fullcode.md`, and then `README.md`.
+`OPTIMIZE-tokps.md`, and then `README.md`.
 
 ## Four concrete problems
 
 1. **The root is a junk drawer.** `OPTIMIZE-*.md` are research notebooks about
-   the runtime, not about Vipera's interface. `fullcode.md` is generated
-   output. Both belong under `docs/`, and the generated file belongs in
-   `.gitignore` with a `make fullcode` target, not in a review diff.
+   the runtime, not about Vipera's interface, and belong under `docs/`.
+   `fullcode.md` has since been removed and ignored; a `make fullcode` target
+   to regenerate it locally is still open.
 2. **`docs/` mixes product documentation with primary sources.** The nine
    guides at the top level are the product; `docs/references/` is an archive.
    Nothing in the docs says which is which, and link checking walks both.
@@ -63,7 +61,7 @@ CODE_OF_CONDUCT, pyproject.toml, Makefile, and the four package directories.
 | Move | References to update |
 |---|---|
 | `OPTIMIZE-*.md` → `docs/research/` | 7 (inside `docs/`, `README.md`, `OPTIMIZE-tokps.md`) |
-| `fullcode.md` → generated, ignored | 1 (`OPTIMIZE-tokps.md`), plus a `make fullcode` target and a `.gitignore` line |
+| `fullcode.md` → generated, ignored | **Done:** removed and ignored; the `make fullcode` target is still open |
 | `tools/*_results/` → `tools/results/` | 6 path strings in `tools/*.py` and 3 in `docs/benchmarks.md` |
 | `docs/references/` → `docs/references/` | none (already isolated), but exclude it from the link check or keep its links relative |
 

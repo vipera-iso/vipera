@@ -52,3 +52,13 @@ demo.cast
 docs/assets/demo-raw.mp4
 bench/results/
 .git.backup.*
+
+# Local agent tooling (not part of the package)
+.agents/
+.claude/
+.mcp.json
+skills-lock.json
+
+# Generated source dump and editor backups; see docs/design/repo-structure.md
+fullcode.md
+*.bak
