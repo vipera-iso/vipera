@@ -154,6 +154,13 @@ def _coerce(cfg: dict) -> dict:
         cfg["backend"] = DEFAULT_CONFIG["backend"]
     if cfg.get("profile") not in profile_names():
         cfg["profile"] = DEFAULT_CONFIG["profile"]
+    if cfg.get("port") is not None and not _valid_port(cfg["port"]):
+        print(
+            f"vipera: config port={cfg.get('port')!r} is not in 1-65535; "
+            f"using {DEFAULT_CONFIG['port']!r}",
+            file=sys.stderr,
+        )
+        cfg["port"] = DEFAULT_CONFIG["port"]
     if cfg.get("parallel", 1) < 1:
         cfg["parallel"] = DEFAULT_CONFIG["parallel"]
     try:
@@ -176,6 +183,11 @@ def _coerce(cfg: dict) -> dict:
             )
     cfg["protocols"] = ",".join(known) or DEFAULT_CONFIG["protocols"]
     return cfg
+
+
+def _valid_port(value) -> bool:
+    """Whether ``value`` can be passed to a socket bind (and is not a bool)."""
+    return isinstance(value, int) and not isinstance(value, bool) and 1 <= value <= 65535
 
 
 def _parse_bool(value) -> bool:
@@ -204,6 +216,8 @@ def _coerce_strict(cfg: dict) -> dict:
     if "kv_cache" in cfg and cfg["kv_cache"] not in _KV_CACHE_TYPES:
         valid = ", ".join(sorted(_KV_CACHE_TYPES))
         raise ValueError(f"kv_cache: must be one of {valid}")
+    if "port" in cfg and not _valid_port(cfg["port"]):
+        raise ValueError("port: must be an integer in 1-65535")
     if "parallel" in cfg and int(cfg["parallel"]) < 1:
         raise ValueError("parallel: must be at least 1")
     if "keep_alive" in cfg:

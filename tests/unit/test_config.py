@@ -46,6 +46,18 @@ def test_type_coercion(isolated_home):
     assert cfg["temperature"] == pytest.approx(0.3)
 
 
+def test_out_of_range_port_is_repaired_on_load(isolated_home, capsys):
+    (isolated_home / "config.json").write_text(json.dumps({"port": 99999}))
+
+    assert cfg_mod.load_config()["port"] == 8686
+    assert "port" in capsys.readouterr().err
+
+
+def test_out_of_range_port_is_rejected_by_write_validation():
+    with pytest.raises(ValueError, match="port"):
+        cfg_mod._coerce_strict({**cfg_mod.DEFAULT_CONFIG, "port": 99999})
+
+
 def test_corrupt_config_falls_back(isolated_home):
     (isolated_home / "config.json").write_text("not json {")
     assert cfg_mod.load_config()["port"] == 8686
