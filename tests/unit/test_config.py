@@ -291,3 +291,39 @@ def test_speculative_ngram_is_off_by_default():
     # +37% on rewrite prompts, -1% / -2.1% on fresh prose: a default has to
     # hold for both, so the win stays opt-in.
     assert cfg_mod.DEFAULT_CONFIG["spec_type"] == "none"
+
+
+@pytest.mark.parametrize("side", ["kv_cache_k", "kv_cache_v"])
+@pytest.mark.parametrize("kv", sorted(cfg_mod._KV_CACHE_TYPES))
+def test_every_declared_kv_cache_type_is_accepted_per_side(side, kv):
+    assert cfg_mod._coerce_strict({side: kv})[side] == kv
+
+
+def test_unknown_per_side_kv_type_is_ignored_on_load(isolated_home, capsys):
+    # None means "same as kv_cache", so a typo must fall back to it instead of
+    # reaching llama.cpp as a dtype it does not know.
+    (isolated_home / "config.json").write_text(json.dumps({"kv_cache_v": "q3_k"}))
+
+    cfg = cfg_mod.load_config()
+
+    assert cfg["kv_cache_v"] is None
+    assert cfg["kv_cache"] == cfg_mod.DEFAULT_CONFIG["kv_cache"]
+    assert "kv_cache_v" in capsys.readouterr().err
+
+
+def test_coerce_strict_rejects_unknown_per_side_kv_type():
+    with pytest.raises(ValueError, match="kv_cache_k"):
+        cfg_mod._coerce_strict({"kv_cache_k": "q9_z"})
+
+
+def test_kv_in_ram_is_off_by_default(isolated_home):
+    # It costs a PCIe read of the whole cache per token, so it is a deliberate
+    # choice at long context, not something the planner turns on for you.
+    assert cfg_mod.DEFAULT_CONFIG["no_kv_offload"] is False
+    assert cfg_mod.load_config()["no_kv_offload"] is False
+
+
+def test_no_kv_offload_is_coerced_like_other_flags(isolated_home):
+    (isolated_home / "config.json").write_text(json.dumps({"no_kv_offload": "on"}))
+
+    assert cfg_mod.load_config()["no_kv_offload"] is True

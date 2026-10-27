@@ -48,6 +48,16 @@ DEFAULT_CONFIG = {
     "profile": "auto",
     "ctx": 8192,
     "kv_cache": "q8_0",
+    # Per-side overrides for -ctk/-ctv; None means "same as kv_cache". llama.cpp
+    # takes the two halves separately, and they need not cost the same: K feeds
+    # both the attention scores and the softmax denominator, V only the output.
+    "kv_cache_k": None,
+    "kv_cache_v": None,
+    # `--no-kv-offload`: layer weights stay on the card while their KV cache
+    # lives in system RAM. On a 4 GB card at long context the cache is most of
+    # what keeps the layer count down, so this buys offload depth; it pays with
+    # a PCIe read of the whole cache per token, which is why it is opt-in.
+    "no_kv_offload": False,
     # flash_attn is deliberately absent: the planner derives it from kv_cache
     # (quantized KV requires it), so a config key would only look effective.
     "n_batch": 512,
@@ -93,6 +103,7 @@ _FALSE_STRINGS = {"0", "false", "no", "off", ""}
 _TYPE_MAP = {
     "port": int,
     "embeddings": bool,
+    "no_kv_offload": bool,
     "moe_probe": bool,
     "ctx": int,
     "n_batch": int,
@@ -150,6 +161,17 @@ def _coerce(cfg: dict) -> dict:
                 cfg[k] = DEFAULT_CONFIG[k]
     if cfg.get("kv_cache") not in _KV_CACHE_TYPES:
         cfg["kv_cache"] = DEFAULT_CONFIG["kv_cache"]
+    for side in ("kv_cache_k", "kv_cache_v"):
+        # Unlike kv_cache there is no default to fall back to: dropping a typo
+        # to None hands the side back to kv_cache, and saying so is the only way
+        # the user learns the flag was not applied.
+        if cfg.get(side) is not None and cfg[side] not in _KV_CACHE_TYPES:
+            print(
+                f"vipera: config {side}={cfg[side]!r} is not a known KV cache type; "
+                f"ignoring it (kv_cache={cfg['kv_cache']} still applies)",
+                file=sys.stderr,
+            )
+            cfg[side] = None
     if not _is_known_backend(cfg.get("backend")):
         cfg["backend"] = DEFAULT_CONFIG["backend"]
     if cfg.get("profile") not in profile_names():
@@ -216,6 +238,10 @@ def _coerce_strict(cfg: dict) -> dict:
     if "kv_cache" in cfg and cfg["kv_cache"] not in _KV_CACHE_TYPES:
         valid = ", ".join(sorted(_KV_CACHE_TYPES))
         raise ValueError(f"kv_cache: must be one of {valid}")
+    for side in ("kv_cache_k", "kv_cache_v"):
+        if cfg.get(side) is not None and cfg[side] not in _KV_CACHE_TYPES:
+            valid = ", ".join(sorted(_KV_CACHE_TYPES))
+            raise ValueError(f"{side}: must be one of {valid}")
     if "port" in cfg and not _valid_port(cfg["port"]):
         raise ValueError("port: must be an integer in 1-65535")
     if "parallel" in cfg and int(cfg["parallel"]) < 1:

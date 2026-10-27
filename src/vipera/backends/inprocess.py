@@ -84,7 +84,9 @@ class Engine:
         raise BackendError(f"Failed to initialize model even on CPU: {last_exc}") from last_exc
 
     def _load(self, p: Plan):
-        kv = _KV_TYPES.get(p.kv_cache)
+        cache_k, cache_v = p.kv_types
+        kv_k = _KV_TYPES.get(cache_k)
+        kv_v = _KV_TYPES.get(cache_v)
 
         def _do(use_mlock: bool):
             return self._Llama(
@@ -100,8 +102,8 @@ class Engine:
                 pooling_type=self._mean_pooling if self.supports_embeddings else -1,
                 flash_attn=p.flash_attn,
                 offload_kqv=p.offload_kqv,
-                type_k=kv,
-                type_v=kv,
+                type_k=kv_k,
+                type_v=kv_v,
                 use_mmap=True,
                 use_mlock=use_mlock,
                 verbose=False,

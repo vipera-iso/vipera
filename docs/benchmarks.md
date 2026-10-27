@@ -271,14 +271,14 @@ the classic split is the better bet, and from 4K up the tensor split won every
 run. `--load-mode none` (a hint the loader prints for tensor overrides) is
 slower here — 4.37 against 4.89 t/s — so mmap stays. Graphs: 4.97 t/s with
 capture on against 4.89 with it off, i.e. noise, so a tensor split gives up
-capture (a plan that fills the budget cannot promise the 780 MiB of headroom
-that measurement had).
+capture like every other hybrid plan (a plan that fills the budget cannot
+promise the 780 MiB of headroom that measurement had).
 
 ### Placement strategy on a 4 GB card: what actually buys tokens per second
 
 Every number here is the reference GTX 1650 with the same harness (one request,
 48-96 generated tokens, `GGML_CUDA_DISABLE_GRAPHS=1` for hybrid splits), so the
-rows are comparable to each other.
+rows are comparable to the frontier table above.
 
 **1. Split by tensor type (dense).** +42 to +56% at a filled window, and it buys
 context as well: see the section above. This is what the planner now emits for a
@@ -347,6 +347,7 @@ prefix shifts instead of repeating.
   (5.90 GB) at the largest split that loads (`-ngl 21`) decodes 2.92 t/s against
   3.96 for the larger Q3_K_M at 18/40: CPU-side dequantization costs more than
   the bytes saved. `-ngl 24` fails to load.
+- **`-ub` is a prefill knob, not a decode knob** (frontier section above).
 - **CUDA graphs are worth nothing here** and can kill a hybrid plan mid-request;
   the server backend turns them off for exactly that case.
 
@@ -467,6 +468,70 @@ same memory bandwidth, so four streams together decode at about a quarter of
 one stream's rate each. Slots also cost KV memory (`-c ctx × parallel`), which
 is why the default stays at 1 on a 4 GB card: four slots of a hybrid 14B do not
 fit, and the load would fall back a rung.
+
+### Layers vs context on a 4 GB card: the frontier, and where it breaks
+
+Hermes-4-14B-Q3_K_M-imatrix (7.32 GB of weights, 40 layers, 8 KV heads × 128,
+so 2 048 K+V elements per token per layer) on the reference GTX 1650. Each row
+is the largest `-ngl` that loads, found by probing up and down from a
+calibrated estimate and confirmed against the next layer up; decode is the
+median of two runs of a 48-token completion, after a ~50-token prompt so the
+numbers isolate weight streaming rather than attention over history.
+
+| ctx | KV | KV in VRAM | `-nkvo` (KV in RAM) |
+|---|---|---|---|
+| 8 192 | q8_0 | 18/40 — 5.72 t/s | 20/40 — 6.13 t/s |
+| 8 192 | q4_0 | 18/40 — 5.58 t/s | 20/40 — 6.04 t/s |
+| 32 768 | q8_0 | 13/40 — 5.05 t/s | 19/40 — 5.76 t/s |
+| 32 768 | q4_0 | 15/40 — 5.30 t/s | 19/40 — 5.88 t/s |
+| 65 536 | q8_0 | 9/40 — 4.56 t/s | 17/40 — 5.23 t/s |
+| 65 536 | q4_0 | 12/40 — 4.64 t/s | 18/40 — 5.46 t/s |
+
+CPU-only is 4.23 t/s, so the whole offload range on this card is **4.2 → 6.1
+t/s**: +45% at best. Two things explain the flat curve.
+
+**The weights are the wall, not the cache.** 4 GB of card minus the CUDA
+context and compute buffers leaves ~3.45 GiB, and one layer costs 0.17 GiB of
+weights against 0.017 GiB of q8_0 KV at 8K. KV only becomes the leading term
+past ~16K: dropping it to q4_0 buys no layer at 8K, two at 32K and three at
+64K. Offloading a layer is worth ~3.5 ms/token here (CPU layer 5.9 ms, GPU
+layer 2.4 ms), so six layers of headroom is ~13% — real, but the remaining
+22–26 CPU layers set the pace.
+
+**KV in RAM wins on both axes.** `--no-kv-offload` (`no_kv_offload: true`) keeps
+the cache in system RAM and offloads attention to the CPU, which frees the
+entire cache's worth of VRAM for weights: +2 layers at 8K, +6 at 32K, +8 at
+64K, and faster in every row. Those rows were measured with a *short* prompt,
+though, so CPU attention cost nothing in them. Filling the window (2 971-token
+prompt, `ctx 8192`) drops 18/40 from 5.72 to 3.52 t/s, while 17/40 with KV in
+VRAM measures 3.51 t/s on the same prompt: the two placements converge exactly
+when the history is actually long. Use
+`no_kv_offload` for a large window that stays mostly empty (an agent holding
+tools and a system prompt); leave KV on the card when the window fills.
+
+`-ub` moves nothing here: at 32K/q4_0, `ub 256` loaded 16 layers at 5.24 t/s
+and `ub 1024` loaded 15 at 5.06 t/s, i.e. the prefill lever trades one layer
+for prefill speed and does not change the decode ceiling.
+
+### The VRAM ceiling is a prompt-length cliff, not a load cliff
+
+Those 18 layers load and pass `/health`, then die on the first long request:
+
+| Config, `ctx 8192`, 2 971-token prompt | Result |
+|---|---|
+| 18/40, CUDA graphs on | child aborted: `cudaGraphInstantiate` OOM |
+| 18/40, `GGML_CUDA_DISABLE_GRAPHS=1` | 37.9 t/s prefill, 3.52 t/s decode |
+| 17/40, graphs on | 37.9 t/s prefill, 3.51 t/s decode |
+| 16/40, graphs on | 37.8 t/s prefill, 3.17 t/s decode |
+| 20/40 `-nkvo`, graphs on | child aborted: `cudaGraphInstantiate` OOM |
+
+Graph capture reserves device memory per shape on top of weights and cache, so
+a plan chosen from "does it load" is one layer too optimistic for real
+prompts. Dropping the layer and turning graphs off cost the same (3.51 vs 3.52
+t/s), which is why the server backend now sets `GGML_CUDA_DISABLE_GRAPHS=1` for
+hybrid splits instead of the planner surrendering a layer: same speed, no
+mid-request crash. Full offload and `-ncmoe` plans keep graphs. An explicit
+`GGML_CUDA_DISABLE_GRAPHS` in the environment wins over the default.
 
 ### Long prompts on a hybrid split
 

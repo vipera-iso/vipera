@@ -651,6 +651,64 @@ def test_chat_sse_forwards_the_child_frames_unchanged(monkeypatch):
     assert raw.closed is True
 
 
+def test_server_command_takes_k_and_v_cache_types_separately():
+    command = sb.server_command(
+        "/bin/llama-server",
+        "/m.gguf",
+        _plan(kv_cache="q8_0", kv_cache_k="q8_0", kv_cache_v="q4_0"),
+        1,
+    )
+
+    assert command[command.index("-ctk") + 1] == "q8_0"
+    assert command[command.index("-ctv") + 1] == "q4_0"
+
+
+def test_server_command_parks_kv_in_ram_only_with_layers_on_the_gpu():
+    # offload_kqv=False with gpu_layers>0 is the KV-in-RAM axis
+    # (`--no-kv-offload`). A CPU-only plan keeps the command line it had.
+    parked = sb.server_command("/bin/llama-server", "/m.gguf", _plan(offload_kqv=False), 1)
+    assert "--no-kv-offload" in parked
+
+    cpu_only = sb.server_command(
+        "/bin/llama-server", "/m.gguf", _plan(gpu_layers=0, offload_kqv=False), 1
+    )
+    assert "--no-kv-offload" not in cpu_only
+
+    assert "--no-kv-offload" not in sb.server_command("/bin/llama-server", "/m.gguf", _plan(), 1)
+
+
+def test_hybrid_split_disables_cuda_graphs():
+    """A hybrid plan already spent the VRAM budget, so graphs can OOM a prompt.
+
+    Measured on a 4 GB card: 18/40 layers loaded, served short prompts, then
+    died in cudaGraphInstantiate on the first ~3k-token prompt.
+    """
+    env = sb.server_env(_plan(gpu_layers=7, n_layers=40), base={})
+    assert env["GGML_CUDA_DISABLE_GRAPHS"] == "1"
+
+
+def test_full_offload_and_cpu_only_keep_cuda_graphs():
+    assert "GGML_CUDA_DISABLE_GRAPHS" not in sb.server_env(
+        _plan(gpu_layers=40, n_layers=40), base={}
+    )
+    # A hand-built plan with no layer count is not a hybrid split either.
+    assert "GGML_CUDA_DISABLE_GRAPHS" not in sb.server_env(_plan(gpu_layers=7), base={})
+    assert "GGML_CUDA_DISABLE_GRAPHS" not in sb.server_env(
+        _plan(gpu_layers=0, n_layers=40), base={}
+    )
+
+
+def test_moe_plan_keeps_cuda_graphs():
+    """-ncmoe keeps every attention layer on the card: nothing sits at the edge."""
+    plan = _plan(gpu_layers=3, n_layers=40, moe_cpu_layers=20)
+    assert "GGML_CUDA_DISABLE_GRAPHS" not in sb.server_env(plan, base={})
+
+
+def test_a_caller_graph_setting_wins():
+    env = sb.server_env(_plan(gpu_layers=7, n_layers=40), base={"GGML_CUDA_DISABLE_GRAPHS": "0"})
+    assert env["GGML_CUDA_DISABLE_GRAPHS"] == "0"
+
+
 def test_start_passes_the_environment_to_the_child(monkeypatch, tmp_path):
     captured = {}
 
@@ -673,7 +731,7 @@ def test_start_passes_the_environment_to_the_child(monkeypatch, tmp_path):
     engine._spec_type_supported = False
     engine.supports_embeddings = False
     engine.parallel = 1
-    engine._start(_plan(gpu_layers=17, n_layers=40, n_cpu_ffn=36))
+    engine._start(_plan(gpu_layers=7, n_layers=40))
 
     assert captured["env"]["GGML_CUDA_DISABLE_GRAPHS"] == "1"
     # The rest of the environment still reaches the child.

@@ -112,13 +112,22 @@ def _announce_plan(label: str, info: ModelSpec, p, backend: str) -> None:
     n_layers_total = int(info.meta.get("n_layers") or 0) or max(p.gpu_layers, 1)
     offload_layers = p.n_layers if p.requires_server else p.gpu_layers
 
+    # Each half is named when the two differ, and the row says when the cache
+    # is not on the card at all — both are decisions the plan made for the user.
+    cache_k, cache_v = p.kv_types
+    kv_label = cache_k if cache_k == cache_v else f"K {cache_k} / V {cache_v}"
+    if p.kv_cache_gb > 0:
+        kv_label = f"{kv_label}  {p.kv_cache_gb:.2f} GB"
+    if not p.offload_kqv and offload_layers > 0:
+        kv_label = f"{kv_label}  (system RAM)"
+
     section("plan")
     rows = [
         ("model", label),
         ("quant", info.meta.get("quant") or "?"),
         ("backend", backend),
         ("layers", f"{offload_layers}/{n_layers_total}"),
-        ("kv cache", f"{p.kv_cache}  {p.kv_cache_gb:.2f} GB" if p.kv_cache_gb > 0 else p.kv_cache),
+        ("kv cache", kv_label),
         ("flash attn", "on" if p.flash_attn else "off"),
     ]
     if p.n_cpu_ffn >= 0:
@@ -295,6 +304,9 @@ def start(
                 profile=profile,
                 ctx=ctx,
                 kv_cache=cfg.get("kv_cache", "q8_0"),
+                kv_cache_k=cfg.get("kv_cache_k"),
+                kv_cache_v=cfg.get("kv_cache_v"),
+                no_kv_offload=cfg.get("no_kv_offload", False),
                 n_batch=cfg.get("n_batch", 512),
                 n_ubatch=cfg.get("n_ubatch", 0),
             )

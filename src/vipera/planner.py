@@ -23,6 +23,9 @@ class Plan:
     # 0.0 / 0 mean "not estimated" (hand-built Plans in tests stay valid).
     kv_cache_gb: float = 0.0
     kv_layers: int = 0
+    # -ctk/-ctv when a side is overridden; "" means "same as kv_cache".
+    kv_cache_k: str = ""
+    kv_cache_v: str = ""
     # --n-cpu-moe value: the first N layers keep their routed experts on the
     # CPU. -1 means "no MoE plan"; 0 means every expert stays on the GPU.
     # The classic gpu_layers field stays untouched so an in-process fallback
@@ -42,6 +45,11 @@ class Plan:
     def requires_server(self) -> bool:
         """True when the plan needs llama-server flags the binding lacks."""
         return self.moe_cpu_layers >= 0 or self.n_cpu_ffn >= 0
+
+    @property
+    def kv_types(self) -> tuple[str, str]:
+        """The (K, V) cache dtypes to request, each falling back to kv_cache."""
+        return self.kv_cache_k or self.kv_cache, self.kv_cache_v or self.kv_cache
 
 
 _VALID_PROFILES = ("auto", "cpu", "gpu", "lowmem")
@@ -91,7 +99,7 @@ _KV_BYTES_PER_ELEM = {
     "q5_1": 0.75,  # 24 B / 32 elems
     "q4_0": 0.5,
     "q4_1": 0.5,
-    "iq4_nl": 0.5,
+    "iq4_nl": 0.5625,  # 18 B / 32 elems
 }
 
 # llama.cpp can only create a context with these cache types when flash
@@ -244,7 +252,7 @@ def _moe_cpu_layers(
     hw: HardwareInfo,
     n_layers: int,
     ctx: int,
-    kv_cache: str,
+    kv_gb: float,
     n_ubatch: int,
 ) -> int | None:
     """Pick the --n-cpu-moe value that fits, or None when MoE placement is unsafe.
@@ -265,7 +273,6 @@ def _moe_cpu_layers(
 
     size_bytes = int(meta.get("size_bytes") or 4_000_000_000)
     non_expert_gb = max(0.0, (size_bytes - expert_bytes) / 1024**3)
-    kv_gb = _estimate_kv_cache_gb(meta, ctx, kv_cache)
     overhead_gb = _MOE_OVERHEAD_BASE_GB + _MOE_OVERHEAD_PER_UB_GB * n_ubatch
     budget_gb = hw.vram_free_gb - _MOE_VRAM_RESERVE_GB - non_expert_gb - kv_gb - overhead_gb
     if budget_gb <= 0:
@@ -375,9 +382,18 @@ def plan(
     kv_cache: str = "q8_0",
     n_batch: int = 512,
     n_ubatch: int = 0,
+    kv_cache_k: str | None = None,
+    kv_cache_v: str | None = None,
+    no_kv_offload: bool = False,
 ) -> Plan:
     if profile not in _VALID_PROFILES:
         raise PlannerError(f"unknown profile '{profile}' (valid: {', '.join(_VALID_PROFILES)})")
+
+    # -ctk and -ctv are independent flags; each side falls back to the combined
+    # kv_cache, so a config that only sets kv_cache plans exactly as before.
+    kv_k = kv_cache_k or kv_cache
+    kv_v = kv_cache_v or kv_cache
+    quantized_kv = kv_k in _FA_REQUIRED_KV or kv_v in _FA_REQUIRED_KV
 
     n_layers = int(meta.get("n_layers") or 32)
     kv_layers = _kv_layer_count(meta) or n_layers
@@ -419,13 +435,15 @@ def plan(
             use_mlock=False,
             note="CPU ONLY (Low Memory Profile)",
             kv_layers=kv_layers,
+            kv_cache_k="f16",
+            kv_cache_v="f16",
         )
 
     want_gpu = has_gpu and profile != "cpu"
     # Flash attention is required by quantized KV, and on the GPU it is also the
     # fast path. Decided before the VRAM budget because it changes how much
     # scratch space llama.cpp needs on the card.
-    flash_attn_on_gpu = kv_cache in _FA_REQUIRED_KV or hw.vram_total_gb > 4
+    flash_attn_on_gpu = quantized_kv or hw.vram_total_gb > 4
     reserve_gb = max(_VRAM_RESERVE_BASE_GB, min(1.0, _VRAM_RESERVE_FRACTION * hw.vram_total_gb))
     # Micro-batch first: the prefill compute buffer has to fit beside the
     # weights, and that is what a long prompt runs out of room on.
@@ -443,10 +461,17 @@ def plan(
     # Subtracting the FULL cache from VRAM before offloading anything made a
     # 14B/Q4 model on a 4 GB card look like it had 0.2 GB free (0 layers) even
     # though ~9 layers actually fit. Budget both weights and KV per layer.
-    kv_cache_gb = _estimate_kv_cache_gb(meta, ctx, kv_cache)
+    kv_cache_gb = (
+        _estimate_kv_cache_gb(meta, ctx, kv_k) + _estimate_kv_cache_gb(meta, ctx, kv_v)
+    ) / 2
     # Charge each KV-bearing layer, not each layer: on a hybrid stack most
-    # layers hold a fixed recurrent state and never pay for context.
-    per_layer_kv_gb = kv_cache_gb / kv_layers if kv_layers else 0.0
+    # layers hold a fixed recurrent state and never pay for context. With
+    # `--no-kv-offload` the whole cache stays in system RAM, so the card is
+    # charged nothing for it and the freed room buys offload depth; the
+    # host-side cost is added back when RAM is estimated below.
+    per_layer_kv_gb = 0.0
+    if not no_kv_offload and kv_layers:
+        per_layer_kv_gb = kv_cache_gb / kv_layers
 
     # Charge every layer the mean weight size (size_bytes / n_layers). An
     # earlier version preferred meta["layer_bytes"] (the mean size of one
@@ -480,7 +505,14 @@ def plan(
     moe_ubatch = 0
     if want_gpu and gpu_layers > 0:
         candidate_ubatch = n_ubatch if n_ubatch > 0 else _MOE_UBATCH
-        candidate = _moe_cpu_layers(meta, hw, n_layers, ctx, kv_cache, candidate_ubatch)
+        candidate = _moe_cpu_layers(
+            meta,
+            hw,
+            n_layers,
+            ctx,
+            0.0 if no_kv_offload else kv_cache_gb,
+            candidate_ubatch,
+        )
         if candidate is not None:
             moe_cpu_layers = candidate
             moe_ubatch = candidate_ubatch
@@ -496,7 +528,7 @@ def plan(
             safe_vram,
             n_layers=n_layers,
             ctx=ctx,
-            kv_gb=kv_cache_gb,
+            kv_gb=0.0 if no_kv_offload else kv_cache_gb,
         )
         if candidate_ffn is not None:
             n_cpu_ffn = candidate_ffn
@@ -510,7 +542,7 @@ def plan(
         # does not fit beside this gateway on a 15 GiB / no-swap box.
         # flash_attn is required for KV quantization, so enable it only for the
         # dtypes that need it (bf16/f16/f32 stay on the fast default path).
-        flash_attn = kv_cache in _FA_REQUIRED_KV
+        flash_attn = quantized_kv
 
         if profile == "gpu":
             note = "CPU ONLY (GPU profile requested, no usable GPU)"
@@ -522,7 +554,7 @@ def plan(
     else:
         # Quantized KV requires flash attention, regardless of VRAM size.
         flash_attn = flash_attn_on_gpu
-        offload_kqv = True
+        offload_kqv = not no_kv_offload
         n_batch = min(n_batch, 512)
         note = "Full GPU" if gpu_layers == n_layers else f"Hybrid: {gpu_layers}/{n_layers} layers"
         if moe_cpu_layers >= 0:
@@ -543,17 +575,19 @@ def plan(
         # prefix.
         sizes = _ffn_layer_sizes(meta, n_layers) or []
         cpu_weights_gb = sum(sizes[:n_cpu_ffn]) / 1024**3
-        cpu_kv_gb = 0.0
+        cpu_kv_gb = kv_cache_gb if no_kv_offload else 0.0
     elif moe_cpu_layers >= 0:
         # A MoE plan offloads every layer for its dense tensors, so all KV
-        # lives on the GPU; only the routed experts of the CPU prefix remain
-        # in system RAM.
+        # lives on the GPU (unless it was parked in RAM); only the routed
+        # experts of the CPU prefix remain in system RAM.
         layer_experts = meta.get("expert_layer_bytes") or []
         cpu_weights_gb = sum(int(value) for value in layer_experts[:moe_cpu_layers]) / 1024**3
-        cpu_kv_gb = 0.0
+        cpu_kv_gb = kv_cache_gb if no_kv_offload else 0.0
     else:
         cpu_weights_gb = max(0.0, model_size_gb - layer_gb * gpu_layers)
-        cpu_kv_gb = per_layer_kv_gb * max(0, kv_layers - gpu_layers)
+        cpu_kv_gb = (
+            kv_cache_gb if no_kv_offload else per_layer_kv_gb * max(0, kv_layers - gpu_layers)
+        )
     host_headroom_gb = hw.ram_free_gb - cpu_weights_gb - cpu_kv_gb
     # 3 GB of headroom leaves room for llama.cpp compute buffers; pinning with
     # less has OOM-killed this class of machine mid-load (no swap).
@@ -575,6 +609,8 @@ def plan(
         ram_estimate_gb=ram_estimate_gb,
         kv_cache_gb=kv_cache_gb,
         kv_layers=kv_layers,
+        kv_cache_k=kv_k,
+        kv_cache_v=kv_v,
         moe_cpu_layers=moe_cpu_layers,
         # A MoE plan has its own -ub (it is the expert-placement lever); a dense
         # plan keeps the prefill batch it was budgeted for.

@@ -322,8 +322,15 @@ def server_command(
         )
         if supported:
             command.extend(["--spec-type", spec_type])
-    if plan.kv_cache != "f16":
-        command.extend(["-ctk", plan.kv_cache, "-ctv", plan.kv_cache])
+    cache_k, cache_v = plan.kv_types
+    if cache_k != "f16" or cache_v != "f16":
+        # Both halves are named once either differs, so the command line says
+        # what the banner showed instead of leaning on llama.cpp's defaults.
+        command.extend(["-ctk", cache_k, "-ctv", cache_v])
+    # Only when something is offloaded: with no layers on the card there is no
+    # KV there to keep off.
+    if gpu_layers > 0 and not plan.offload_kqv:
+        command.append("--no-kv-offload")
     if plan.use_mlock:
         supported = (
             _supports_load_mode(binary) if load_mode_supported is None else load_mode_supported
@@ -351,20 +358,30 @@ def server_env(plan: Plan, base: Mapping[str, str] | None = None) -> dict[str, s
     the KV cache, and it does so per shape: a plan picked from "did it load"
     passes health checks at a few hundred tokens of context and then takes the
     whole server down with `cudaGraphInstantiate` OOM as soon as a long prompt
-    arrives.
+    arrives. Measured on a GTX 1650 4 GB, dense 14B Q3_K_M, 8192 ctx, q8_0 KV:
+    18/40 layers loaded, served short prompts at 5.72 t/s, and died with
+    "CUDA error: out of memory ... in function ggml_cuda_graph_evaluate_and_capture"
+    on the first ~3k-token prompt; the same plan with graphs off served that
+    prompt at 37.9 t/s prefill and 3.52 t/s decode. A hybrid split means the
+    plan already spent the budget (that is why layers were left on the CPU), so
+    it is exactly the case at risk of that cliff; full offload keeps graphs.    Graphs are worth nothing measurable here: 17/40 with graphs on decoded
+    3.51 t/s against 3.52 t/s for 18/40 with graphs off, i.e. the flag keeps a
+    layer instead of costing one. An explicit value from the caller wins.
 
-    A tensor split (--n-cpu-ffn) is exactly that kind of plan: the budget went
-    to placing every attention block, so what is left for capture is whatever
-    the FFN blocks did not take. Measured on the reference 4 GB card, a tensor
-    split at 3750 tokens decoded 4.97 t/s with capture on against 4.89 t/s with
-    it off — capture won there because that plan happened to leave 780 MiB free,
-    which a plan that fills the budget cannot promise. Since the flag is worth
-    noise either way, a tensor split gives it up. An explicit value from the
-    caller wins.
+    A tensor split (--n-cpu-ffn) is the same kind of plan by that test: the
+    budget went to placing every attention block, so what is left for capture is
+    whatever the FFN blocks did not take. Measured on the reference 4 GB card, a
+    tensor split at 3750 tokens decoded 4.97 t/s with capture on against 4.89
+    t/s with it off — capture won there because that plan happened to leave
+    780 MiB free, which a plan that fills the budget cannot promise. Since the
+    flag is worth noise either way, hybrid plans of both kinds give it up.
     """
     env = dict(os.environ if base is None else base)
+    classic_hybrid = (
+        plan.moe_cpu_layers < 0 and plan.n_cpu_ffn < 0 and 0 < plan.gpu_layers < plan.n_layers
+    )
     tensor_hybrid = plan.n_cpu_ffn >= 0 and 0 < plan.n_cpu_ffn < plan.n_layers
-    if tensor_hybrid:
+    if classic_hybrid or tensor_hybrid:
         env.setdefault(_GRAPHS_ENV, "1")
     return env
 

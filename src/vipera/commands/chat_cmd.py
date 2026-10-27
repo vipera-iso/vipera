@@ -41,6 +41,9 @@ def _build(model: str) -> ChatEngine:
         profile=cfg.get("profile", "auto"),
         ctx=cfg.get("ctx", 8192),
         kv_cache=cfg.get("kv_cache", "q8_0"),
+        kv_cache_k=cfg.get("kv_cache_k"),
+        kv_cache_v=cfg.get("kv_cache_v"),
+        no_kv_offload=cfg.get("no_kv_offload", False),
         n_batch=cfg.get("n_batch", 512),
         n_ubatch=cfg.get("n_ubatch", 0),
     )

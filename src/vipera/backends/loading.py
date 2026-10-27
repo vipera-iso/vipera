@@ -180,7 +180,11 @@ def load_attempts(plan: Plan, *, probe: bool = False) -> list[tuple[Plan, str]]:
         n_cpu_ffn=-1,
     )
     reduced_plan = replace(cpu_plan, context=min(plan.context, 2048))
-    safe_plan = replace(reduced_plan, kv_cache="f16", flash_attn=False)
+    # The per-side overrides go with it: a q4_0 V left behind would be rejected
+    # by the f16 plan the rung is actually asking for.
+    safe_plan = replace(
+        reduced_plan, kv_cache="f16", kv_cache_k="", kv_cache_v="", flash_attn=False
+    )
     attempts.append((cpu_plan, f"CPU, ctx={cpu_plan.context}, kv={cpu_plan.kv_cache}"))
     attempts.append((reduced_plan, f"CPU, ctx={reduced_plan.context}, kv={reduced_plan.kv_cache}"))
     attempts.append((safe_plan, f"CPU safe mode, ctx={safe_plan.context}, kv={safe_plan.kv_cache}"))

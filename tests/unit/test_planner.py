@@ -1,7 +1,7 @@
 import pytest
 
 from vipera.hardware import HardwareInfo
-from vipera.planner import _estimate_kv_cache_gb, plan
+from vipera.planner import _KV_BYTES_PER_ELEM, _estimate_kv_cache_gb, plan
 
 _GIB = 1024**3
 
@@ -343,6 +343,12 @@ def test_new_kv_dtypes_are_sized_by_their_block_size():
     assert bf16 == pytest.approx(_estimate_kv_cache_gb(meta, 8192, "f16"))
 
 
+def test_iq4_nl_is_priced_at_its_ggml_block_size():
+    # 18 bytes per 32 weights. Rounding down to 0.5 under-reserves 11% of the
+    # KV cache, which is the direction that offloads one layer too many.
+    assert _KV_BYTES_PER_ELEM["iq4_nl"] == pytest.approx(18 / 32)
+
+
 def test_cpu_plan_requires_flash_attention_only_for_quantized_kv():
     meta = {"n_layers": 32, "size_bytes": 4 * _GIB}
 
@@ -482,6 +488,47 @@ def test_moe_plan_falls_back_when_non_expert_weights_do_not_fit():
     assert p.gpu_layers > 0
     assert p.moe_cpu_layers == -1
     assert p.requires_server is False
+
+
+# --- per-side KV dtype, and KV parked in system RAM --------------------------
+
+
+def test_kv_sides_are_priced_separately():
+    # -ctk and -ctv are independent in llama.cpp, so the planner prices K and V
+    # separately instead of assuming one dtype for both halves.
+    meta = {"n_layers": 40, "n_kv_heads": 8, "head_dim": 128, "size_bytes": 9 * _GIB}
+    hw = _hw(gpu_name="X", vram_total_gb=4.0, vram_free_gb=4.0)
+
+    both = plan(meta, hw, ctx=8192, kv_cache="q8_0", kv_cache_k="q8_0", kv_cache_v="q4_0")
+    same = plan(meta, hw, ctx=8192, kv_cache="q8_0")
+
+    assert both.kv_cache_k == "q8_0"
+    assert both.kv_cache_v == "q4_0"
+    assert both.kv_cache_gb == pytest.approx(
+        (_estimate_kv_cache_gb(meta, 8192, "q8_0") + _estimate_kv_cache_gb(meta, 8192, "q4_0")) / 2
+    )
+    assert both.kv_cache_gb < same.kv_cache_gb
+
+
+def test_kv_in_ram_trades_vram_for_layers():
+    # 64K on the reference 4 GB card: the KV cache is what holds the layer count
+    # down, so parking it in system RAM lets more layers fit. Opt-in, because it
+    # pays with a PCIe read of the whole cache on every token.
+    meta = {"n_layers": 40, "n_kv_heads": 8, "head_dim": 128, "size_bytes": 7 * _GIB}
+    hw = _hw(gpu_name="GTX 1650", vram_total_gb=4.0, vram_free_gb=3.64)
+
+    classic = plan(meta, hw, ctx=65536, kv_cache="q4_0")
+    parked = plan(meta, hw, ctx=65536, kv_cache="q4_0", no_kv_offload=True)
+
+    assert parked.gpu_layers > classic.gpu_layers
+    assert classic.offload_kqv is True
+    assert parked.offload_kqv is False
+    # The card's budget did not grow, it is now spent on weights instead of on
+    # weights+KV, so the host side holds roughly the same total: the cache that
+    # arrives (2.5 GB, all of it) roughly matches the weights that leave. What
+    # changed is that the estimate must carry the whole cache, not the slice
+    # left over after the offloaded layers took theirs.
+    assert parked.ram_estimate_gb == pytest.approx(classic.ram_estimate_gb, rel=0.02)
 
 
 # --- tensor-type split: attention on the GPU, dense FFN on the CPU ----------
