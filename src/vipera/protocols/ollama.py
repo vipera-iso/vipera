@@ -14,6 +14,7 @@ import contextlib
 import hashlib
 import json
 import time
+from collections.abc import AsyncIterator
 from datetime import UTC, datetime
 from typing import Any
 
@@ -24,6 +25,7 @@ from starlette.background import BackgroundTask
 
 from vipera.errors import log_failure
 from vipera.keepalive import parse_keep_alive
+from vipera.optimize.shaping import Shaping
 from vipera.pool import UnknownModelError
 from vipera.protocols.gateway import Gateway
 from vipera.protocols.limits import MAX_EMBED_CHARS, MAX_EMBED_INPUTS, MAX_PROMPT_CHARS
@@ -650,7 +652,16 @@ def _parameter_size(n_params) -> str:
     return f"{value / 1e9:.1f}B"
 
 
-async def _stream_chat(gateway, active, model, messages, kwargs, started, shaping=None, lease=None):
+async def _stream_chat(
+    gateway: Gateway,
+    active: Any,
+    model: str,
+    messages: list[dict],
+    kwargs: dict[str, Any],
+    started: float,
+    shaping: Shaping | None = None,
+    lease: Lease | None = None,
+) -> AsyncIterator[str]:
     text = ""
     usage = None
     finish_reason = None
@@ -714,8 +725,15 @@ async def _stream_chat(gateway, active, model, messages, kwargs, started, shapin
 
 
 async def _stream_generate(
-    gateway, active, model, messages, kwargs, started, shaping=None, lease=None
-):
+    gateway: Gateway,
+    active: Any,
+    model: str,
+    messages: list[dict],
+    kwargs: dict[str, Any],
+    started: float,
+    shaping: Shaping | None = None,
+    lease: Lease | None = None,
+) -> AsyncIterator[str]:
     text = ""
     usage = None
     finish_reason = None
