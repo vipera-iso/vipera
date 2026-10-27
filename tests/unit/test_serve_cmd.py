@@ -182,6 +182,37 @@ def test_start_serves_without_running_the_benchmark(monkeypatch, isolated_home):
     assert not (isolated_home / "serve-8686.pid").exists()
 
 
+def test_failed_start_keeps_the_running_gateways_pid_file(monkeypatch, isolated_home):
+    # A second `serve start` that cannot bind must not erase the file of the
+    # gateway that is already serving: `serve stop` would then report OFFLINE.
+    monkeypatch.setattr(serve_cmd, "load_config", lambda: _cfg())
+    monkeypatch.setattr(serve_cmd, "get_model", lambda name: _model())
+    monkeypatch.setattr(serve_cmd, "detect", lambda: types.SimpleNamespace())
+    monkeypatch.setattr(serve_cmd, "plan", lambda *a, **kw: _plan())
+    monkeypatch.setattr(
+        serve_cmd,
+        "create_engine",
+        lambda plan, path, backend="inprocess": FakeEngine(plan, path),
+    )
+    monkeypatch.setattr("vipera.server.build_app", lambda engine, model, **kw: object())
+
+    def _port_in_use(app, **kw):
+        # What uvicorn really does when the port is taken: it logs the OSError
+        # and calls sys.exit(STARTUP_FAILURE), so start() sees a SystemExit.
+        raise SystemExit(3)
+
+    monkeypatch.setitem(sys.modules, "uvicorn", types.SimpleNamespace(run=_port_in_use))
+    pid_file = isolated_home / "serve-8686.pid"
+    pid_file.write_text("4242")
+
+    with pytest.raises(SystemExit):
+        serve_cmd.start(
+            model="m", host="127.0.0.1", port=8686, profile="auto", ctx=1024, bench=False
+        )
+
+    assert pid_file.read_text() == "4242"
+
+
 def _start(monkeypatch, *, cfg=None, **kwargs):
     """Run serve start with everything below the HTTP layer stubbed out."""
     seen = {}

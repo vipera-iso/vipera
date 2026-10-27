@@ -78,6 +78,26 @@ def _pid_file(port: int) -> Path:
     return VIPERA_HOME / f"serve-{port}.pid"
 
 
+def _release_pid_file(port: int, previous: str | None = None) -> None:
+    """Release our pid file, or put back the running gateway's.
+
+    A second `serve start` that fails to bind used to write its own pid and then
+    unlink the file of the gateway that was already running: `serve stop` then
+    reported OFFLINE and the real server could no longer be stopped. On a failed
+    start the previous content is restored; on a clean shutdown ours is removed.
+    """
+    path = _pid_file(port)
+    try:
+        if path.read_text().strip() != str(os.getpid()):
+            return
+        if previous is not None:
+            path.write_text(previous)
+        else:
+            path.unlink(missing_ok=True)
+    except OSError:
+        return
+
+
 def _model_aliases(option, cfg: dict) -> list[str]:
     """Aliases to serve together: --models, else cfg["models"], else none."""
     if isinstance(option, typer.models.OptionInfo):
@@ -336,6 +356,11 @@ def start(
     if bench and engine is not None:
         _quick_bench(engine)
 
+    # Only touch the pid file once this process owns it, and restore a running
+    # gateway's file if this start fails before uvicorn ever binds.
+    pid_written = False
+    previous_pid: str | None = None
+    clean_shutdown = False
     try:
         import uvicorn
 
@@ -368,8 +393,24 @@ def start(
         catalog(routes)
         note("ctrl-c stops the server.", tone="ok")
 
-        _pid_file(port).write_text(str(os.getpid()))
-        _run_server(uvicorn, fastapi_app, host, port)
+        pid_path = _pid_file(port)
+        try:
+            previous_pid = pid_path.read_text()
+        except OSError:
+            previous_pid = None
+        pid_path.write_text(str(os.getpid()))
+        pid_written = True
+        try:
+            _run_server(uvicorn, fastapi_app, host, port)
+        except SystemExit as exc:
+            # SIGTERM unwinds through SystemExit(0) (see _run_server) and that
+            # is a normal stop, so this process's pid file must go. uvicorn
+            # also exits with SystemExit(STARTUP_FAILURE=3) when it cannot
+            # bind, which is a failed start: the running gateway keeps its
+            # file. So the exit code decides, not the exception type.
+            clean_shutdown = exc.code in (0, None)
+            raise
+        clean_shutdown = True
 
     except ImportError:
         console.print(f"[{C_YELLOW}] ⚠ FastAPI is not installed. Falling back to Chat REPL.[/]\n")
@@ -383,7 +424,8 @@ def start(
             active, _ = pool.get(None)
         repl_loop(active, chat_kwargs=_chat_kwargs(cfg))
     finally:
-        _pid_file(port).unlink(missing_ok=True)
+        if pid_written:
+            _release_pid_file(port, None if clean_shutdown else previous_pid)
         if pool is not None:
             pool.close()
         if engine is not None:
