@@ -578,11 +578,12 @@ length, so the same server reports 1.8–2.1 t/s for a 112-token prompt and
 6.4 t/s for a 341-token one. Only compare numbers taken at the same cache
 state.
 
-The card does not enter into it: the `auto` plan's own flags (`-ngl 2`,
+The card barely enters into it: the `auto` plan's own flags (`-ngl 2`,
 `-ctk/-ctv q4_0`, `-fa on`, `-b/-ub 512`) measure 6.45 t/s, against 6.42 for
-`-ngl 0` with f16 KV and `-fa off`. The bundled `llama-server` here has no GPU
-backend (`--list-devices` prints nothing), so `-ngl` is inert and the expert
-pool is never planned: `--moe-cache-mib` would need ≥ 8 GB of spare VRAM after
+`-ngl 0` with f16 KV and `-fa off` — the same within noise, which is what two
+offloaded layers of thirty-six should buy (5% of the weights, with the other
+thirty-four still streamed from RAM). The expert pool is never planned for this
+model either: `--moe-cache-mib` would need ≥ 8 GB of spare VRAM after
 placement, and this 4 GB card has none.
 
 ## Method
