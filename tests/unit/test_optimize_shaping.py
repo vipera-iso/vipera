@@ -52,6 +52,34 @@ def test_oldest_history_is_dropped_before_anything_is_truncated():
     assert estimate_tokens(out.messages) <= out.budget_tokens
 
 
+def test_dropping_history_never_orphans_a_tool_result():
+    messages = [
+        SYSTEM,
+        {"role": "user", "content": "q0 " + "x" * 300},
+        {
+            "role": "assistant",
+            "content": None,
+            "tool_calls": [
+                {"id": "c1", "type": "function", "function": {"name": "f", "arguments": "{}"}}
+            ],
+        },
+        {"role": "tool", "tool_call_id": "c1", "content": "t0 " + "z" * 300},
+        {"role": "assistant", "content": "a0 " + "y" * 300},
+        {"role": "user", "content": "final"},
+    ]
+
+    for budget in range(80, estimate_tokens(messages)):
+        out = shape(messages, budget_tokens=budget, max_tokens=0).messages
+        pending_calls = False
+        for message in out:
+            if message.get("role") == "assistant":
+                pending_calls = bool(message.get("tool_calls"))
+            elif message.get("role") == "tool":
+                assert pending_calls, f"orphaned tool result at budget {budget}: {out}"
+            elif message.get("role") == "user":
+                pending_calls = False
+
+
 def test_a_huge_tool_result_is_truncated_in_the_middle_not_dropped():
     messages = [
         SYSTEM,

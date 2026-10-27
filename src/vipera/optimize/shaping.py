@@ -190,9 +190,16 @@ def shape(
     # system block and the current turn stay: losing either changes the answer,
     # not just its length.
     while estimate_tokens(shaped) > message_budget and turn_start > head_end:
-        del shaped[head_end]
-        turn_start -= 1
-        dropped += 1
+        # Drop a whole exchange: an assistant turn that called tools plus the
+        # tool messages that answer it. Deleting them one at a time can leave a
+        # `tool` message whose `assistant(tool_calls)` is gone, and the chat
+        # template then rejects the request (or drops the result silently).
+        end = head_end + 1
+        while end < turn_start and shaped[end].get("role") == "tool":
+            end += 1
+        dropped += end - head_end
+        del shaped[head_end:end]
+        turn_start -= end - head_end
 
     # 3. Last resort: the current turn itself is too large (a pasted file). Keep
     # its head and tail so the instructions and the actual question survive, and
