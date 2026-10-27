@@ -17,7 +17,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   moved 29.56 → 28.69 inside its ±1.8 error. On a `llama-quantize` without
   `--tensor-type` the command refuses rather than shipping a uniform quant.
 
+- **AMD and Intel GPUs are planned for instead of being served as CPU-only.**
+  `hardware.py` asked NVML and Apple Silicon and then gave up, so a ROCm or
+  SYCL build planned `gpu_layers: 0` on hardware `llama.cpp` could use. The
+  probe chain now walks amdgpu's sysfs counters, `rocm-smi`, `xpu-smi`, and
+  finally `llama-server --list-devices`, which reports what the built backend
+  can actually allocate. It records the vendor and the `vram source`, folds an
+  APU's GTT window into unified memory, and labels a capacity-only reading as
+  an estimate instead of passing it off as free VRAM. Layer placement is
+  unchanged: the planner still spends whatever `vram_free_gb` was measured.
+  `system doctor` matches any backend's device line (CUDA, ROCm/HIP, SYCL,
+  Vulkan, Metal) and prints the rebuild command for the card it found.
+
 ### Fixed
+- **Shaping could orphan a tool result.** When history had to be dropped, the
+  oldest messages were deleted one at a time, so an `assistant(tool_calls)`
+  turn could go while its `tool` replies stayed behind; Hermes/Qwen chat
+  templates then reject the request. History is now dropped as whole
+  exchanges.
+- **A failed `serve start` erased the running gateway's pid file.** A second
+  start that could not bind wrote its own pid and then unlinked the file in
+  `finally`, after which `serve stop` reported OFFLINE. The previous contents
+  are restored when the start fails; a clean shutdown removes only this
+  process's file.
+- **`port` was not range-checked.** `vipera system config port 99999` wrote a
+  value no socket can bind. `_coerce_strict` now rejects anything outside
+  1–65535 and `_coerce` repairs it with a warning.
+- **`iq4_nl` under-reserved its KV cache.** The estimate used 0.5 B/element
+  instead of ggml's 18 B/32 (0.5625), which could offload one layer too many
+  on a card at the limit.
 - **`bench` stored a CPU-only split as this machine's tuning profile.** With
   `profile: lowmem` (or a binding that has no CUDA backend) the plan carries
   `gpu_layers: 0`, and `bench` wrote that measurement to `tuning.json` — "0
