@@ -15,23 +15,39 @@ from fastapi.responses import JSONResponse
 from vipera import __version__
 from vipera.optimize.layer import OptimizeLayer
 from vipera.pool import UnknownModelError, engine_health
-from vipera.protocols import mount
+from vipera.protocols import mount, security
 from vipera.protocols.gateway import Gateway
 from vipera.protocols.openai import ChatRequest  # noqa: F401 - re-exported for callers
 
 
-def build_app(engine=None, model_name: str | None = None, *, pool=None, protocols=None) -> FastAPI:
+def build_app(
+    engine=None,
+    model_name: str | None = None,
+    *,
+    pool=None,
+    protocols=None,
+    api_key: str | None = None,
+    cors=None,
+) -> FastAPI:
     """Build the gateway.
 
     Single-model mode passes `engine` + `model_name`. Multi-model mode passes
     `pool` instead: engines are planned and mounted on first request, and
     `model` on the request selects which one to use. `protocols` selects the
     HTTP layers (default: openai).
+
+    `api_key` and `cors` are the hardening options, passed in rather than read
+    from the config here: a caller that embeds the gateway (tests, another
+    program) should get exactly what it asked for, not whatever happens to be
+    in the user's `config.json`. `vipera serve` threads both from the config.
     """
     if engine is None and pool is None:
         raise ValueError("build_app needs an engine or a pool")
 
     app = FastAPI(title="Vipera Gateway", version=__version__)
+    # Before the routes are mounted: middleware wraps everything added after it,
+    # so a protocol that grows a new route cannot bypass the key check.
+    security.install(app, api_key=api_key, cors=cors)
     # The server backend can run N requests at once (llama.cpp slots), so the
     # gateway admits N instead of serialising. One shared context still means
     # one at a time for the in-process engine and for a pool.

@@ -227,8 +227,10 @@ def _start(monkeypatch, *, cfg=None, **kwargs):
     )
     monkeypatch.setitem(sys.modules, "uvicorn", types.SimpleNamespace(run=lambda app, **kw: None))
 
-    def _build_app(engine, model, *, pool=None, protocols=None):
+    def _build_app(engine, model, *, pool=None, protocols=None, api_key=None, cors=None):
         seen["protocols"] = protocols
+        seen["api_key"] = api_key
+        seen["cors"] = cors
         return object()
 
     monkeypatch.setattr("vipera.server.build_app", _build_app)
@@ -250,6 +252,31 @@ def test_start_mounts_the_protocols_from_the_config(monkeypatch, isolated_home):
 def test_start_protocol_option_overrides_the_config(monkeypatch, isolated_home):
     seen = _start(monkeypatch, cfg=_cfg(protocols="openai"), protocol="ollama")
     assert seen["protocols"] == ["ollama"]
+
+
+def test_start_passes_the_hardening_options_to_the_gateway(monkeypatch, isolated_home):
+    # The flags and the config reach build_app, which is what turns them into
+    # middleware; a value that stops here would leave the gateway open.
+    seen = _start(monkeypatch, api_key="k", cors="*")
+    assert seen["api_key"] == "k"
+    assert seen["cors"] == "*"
+
+
+def test_start_takes_the_key_from_the_config_when_no_flag_is_given(monkeypatch, isolated_home):
+    seen = _start(monkeypatch, cfg=_cfg(api_key="from-config", cors="http://a"))
+    assert seen["api_key"] == "from-config"
+    assert seen["cors"] == "http://a"
+
+
+def test_binding_off_loopback_with_a_key_does_not_warn_about_open_access(
+    monkeypatch, isolated_home, capsys
+):
+    # Only the unauthenticated case is worth a 5s abort window.
+    _start(monkeypatch, host="0.0.0.0", api_key="k")
+
+    out = capsys.readouterr().out
+    assert "no authentication" not in out
+    assert "needs the API key" in out
 
 
 def test_start_rejects_an_unknown_protocol_before_loading(monkeypatch, isolated_home):
@@ -594,7 +621,7 @@ def test_start_with_models_builds_a_lazy_pool(monkeypatch, isolated_home):
     )
     monkeypatch.setitem(sys.modules, "uvicorn", types.SimpleNamespace(run=lambda app, **kw: None))
 
-    def _build_app(engine, model, *, pool=None, protocols=None):
+    def _build_app(engine, model, *, pool=None, protocols=None, api_key=None, cors=None):
         seen["engine"] = engine
         seen["pool"] = pool
         seen["protocols"] = protocols

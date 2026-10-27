@@ -41,6 +41,15 @@ DEFAULT_CONFIG = {
     "parallel": 1,
     # HTTP layers to mount: `openai` for /v1/*, `ollama` for /api/*.
     "protocols": "openai",
+    # Shared key every request must carry once set (`Authorization: Bearer` or
+    # `x-api-key`); /health stays open for probes. None means no check, which is
+    # what a loopback-only install wants and what every install did before this
+    # key existed. Set it before binding to anything but 127.0.0.1.
+    "api_key": None,
+    # Browser origins allowed to call the gateway, as a comma-separated string
+    # or a JSON list; "*" allows any. None installs no CORS middleware, so a
+    # browser on another origin is refused by the browser, as documented.
+    "cors": None,
     # Load the model with embedding support. Off by default: llama.cpp needs
     # the whole context built for it (--embeddings + pooling on the server
     # backend), which a chat-only run should not pay for.
@@ -185,6 +194,10 @@ def _coerce(cfg: dict) -> dict:
         cfg["port"] = DEFAULT_CONFIG["port"]
     if cfg.get("parallel", 1) < 1:
         cfg["parallel"] = DEFAULT_CONFIG["parallel"]
+    if cfg.get("api_key") is not None:
+        # An empty string in the file is a half-configured key, not "open":
+        # treating it as off is the only reading that cannot lock the owner out.
+        cfg["api_key"] = str(cfg["api_key"]).strip() or None
     try:
         parse_keep_alive(cfg.get("keep_alive"))
     except ValueError as exc:
@@ -265,6 +278,16 @@ def _coerce_strict(cfg: dict) -> dict:
             found = ", ".join(unknown) or "(empty)"
             raise ValueError(f"protocols: unknown {found}; must be one of {valid}")
         cfg["protocols"] = ",".join(requested)
+    if "api_key" in cfg and cfg["api_key"] is not None:
+        if not isinstance(cfg["api_key"], str) or not cfg["api_key"].strip():
+            raise ValueError("api_key: must be a non-empty string, or null to disable")
+        cfg["api_key"] = cfg["api_key"].strip()
+    if (
+        cfg.get("cors") is not None
+        and not isinstance(cfg["cors"], str)
+        and not isinstance(cfg["cors"], (list, tuple))
+    ):
+        raise ValueError("cors: use a comma-separated string or a JSON list of origins")
     return cfg
 
 
@@ -310,4 +333,8 @@ def save_config(cfg: dict) -> None:
     # that load_config() would silently replace with defaults.
     tmp = CONFIG_FILE.with_suffix(CONFIG_FILE.suffix + ".tmp")
     tmp.write_text(json.dumps(cfg, indent=2))
+    # The file can hold an API key, so it must not be world-readable. Written
+    # before the rename: a crash leaves a tmp file nobody should read either.
+    with contextlib.suppress(OSError):
+        os.chmod(tmp, 0o600)
     os.replace(tmp, CONFIG_FILE)

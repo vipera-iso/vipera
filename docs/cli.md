@@ -235,6 +235,8 @@ Load a model and run the OpenAI-compatible HTTP server.
 | `--profile` | `auto` | Planner profile (`auto`, `cpu`, `gpu`, `lowmem`). Defaults to the `profile` config key; chat and bench read that key too. |
 | `--ctx` | `config.ctx` (`8192`) | Context size passed to the planner. |
 | `--bench` | off | Run the 20-token speed check **before** serving. This delays readiness, so it is opt-in. |
+| `--api-key` | `config.api_key` (`null`) | Require this key on every route except `/health`. Prefer the config key: a key given here is visible in `ps`. |
+| `--cors` | `config.cors` (`null`) | Browser origins allowed to call the gateway, comma-separated, or `*`. |
 
 Startup sequence: resolve model → print plan → construct `Engine` →
 `uvicorn.run(log_level="warning")`. The gateway is ready as soon as uvicorn

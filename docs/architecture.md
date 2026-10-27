@@ -490,8 +490,10 @@ These are observable in the current code and worth knowing before filing a bug:
   backend, when the installed binary advertises the flag. There is no
   draft-model (`-md`) path, and the in-process backend has none. See
   [design/llama-server-backend.md](design/llama-server-backend.md).
-- No authentication, TLS, CORS, or rate limiting. The default bind address is
-  loopback; do not expose the port directly.
+- No TLS and no rate limiting. Authentication and CORS are opt-in
+  (`api_key`, `cors`); with `api_key` set, every route except `/health` needs a
+  bearer key. The default bind address is still loopback — reachable from the
+  network only when you ask for it, and then only with a key.
 - VRAM detection does not guarantee GPU acceleration: a CPU-only
   `llama-cpp-python` build still ignores the planned layers. `vipera system
   doctor` reports the mismatch, and the placement ladder recovers from a load

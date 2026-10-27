@@ -8,6 +8,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **The gateway can require an API key, and can answer CORS.** Both are opt-in
+  (`api_key`, `cors`), so an upgrade keeps serving exactly as before. With a key
+  set, every route except `/health` needs `Authorization: Bearer <key>` (or a
+  bare `Authorization`, or `x-api-key`), compared with `hmac.compare_digest`; a
+  rejected request gets `401` + `WWW-Authenticate: Bearer` in the envelope of
+  the protocol it spoke, and an allowed CORS origin gets its headers on that
+  `401` too. `config.json` is now written `0600`, because it can hold the key.
+  Verified against a live gateway: no key → 401, wrong key → 401, right key →
+  200 chat completion, `/health` open, no key configured → unchanged open API.
 - **`model optimize --tensor-type PATTERN=TYPE`** passes per-tensor quant
   overrides to `llama-quantize`, which is how an MoE model is made to fit a
   small card: LFM2.5-8B-A1B's routed experts are 4.45 GB of its 4.91 GB, and

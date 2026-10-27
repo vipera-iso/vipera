@@ -478,6 +478,113 @@ def _tensor_split_ffn_layers(
     return n_layers - gpu_ffn
 
 
+@dataclass(frozen=True)
+class _HostFootprint:
+    """What a plan leaves in system RAM, split by what can be paged out.
+
+    `weights_gb` is mmap'd and may live on disk (see
+    `loading.check_host_ram`); `kv_gb` is malloc'd by llama.cpp and must be
+    resident, together with the compute buffers charged into `resident_gb`.
+    `ram_estimate_gb` is the whole footprint, which is the number to quote when
+    explaining why a model will stream from disk.
+    """
+
+    weights_gb: float
+    kv_gb: float
+    use_mlock: bool
+    ram_estimate_gb: float
+    resident_gb: float
+
+
+def _host_footprint(
+    meta: dict,
+    hw: HardwareInfo,
+    *,
+    n_layers: int,
+    kv_layers: int,
+    model_size_gb: float,
+    layer_gb: float,
+    kv_cache_gb: float,
+    per_layer_kv_gb: float,
+    gpu_layers: int,
+    moe_cpu_layers: int,
+    n_cpu_ffn: int,
+    no_kv_offload: bool,
+) -> _HostFootprint:
+    """Add up the host side of a placement, and decide whether mlock is safe.
+
+    mlock pins weights in RAM, so it is only safe when the machine can hold the
+    host-side weights AND the host-side KV cache with headroom. Checking against
+    model size alone ignores a 5 GB KV cache (Q8_0 at 64K), which turns an mlock
+    into an OOM on a 15 GB / no-swap box.
+
+    Which tensors stay on the host follows from the placement kind: a tensor
+    split keeps the CPU prefix's FFN blocks, a MoE plan keeps the routed experts
+    of its CPU prefix while every attention block (and with it the KV cache)
+    rides on the card, and a classic split keeps one whole layer per un-offloaded
+    index.
+    """
+    if n_cpu_ffn >= 0:
+        sizes = _ffn_layer_sizes(meta, n_layers) or []
+        cpu_weights_gb = sum(sizes[:n_cpu_ffn]) / 1024**3
+        cpu_kv_gb = kv_cache_gb if no_kv_offload else 0.0
+    elif moe_cpu_layers >= 0:
+        layer_experts = meta.get("expert_layer_bytes") or []
+        cpu_weights_gb = sum(int(value) for value in layer_experts[:moe_cpu_layers]) / 1024**3
+        cpu_kv_gb = kv_cache_gb if no_kv_offload else 0.0
+    else:
+        cpu_weights_gb = max(0.0, model_size_gb - layer_gb * gpu_layers)
+        cpu_kv_gb = (
+            kv_cache_gb if no_kv_offload else per_layer_kv_gb * max(0, kv_layers - gpu_layers)
+        )
+
+    host_headroom_gb = hw.ram_free_gb - cpu_weights_gb - cpu_kv_gb
+    # 3 GB of headroom leaves room for llama.cpp compute buffers; pinning with
+    # less has OOM-killed this class of machine mid-load (no swap).
+    return _HostFootprint(
+        weights_gb=cpu_weights_gb,
+        kv_gb=cpu_kv_gb,
+        use_mlock=host_headroom_gb > 3.0,
+        # llama.cpp needs more than weights+KV for compute buffers; 2 GB is a
+        # conservative placeholder, calibrated against a 14B/Q8_0/64K load.
+        ram_estimate_gb=cpu_weights_gb + cpu_kv_gb + _HOST_COMPUTE_GB,
+        resident_gb=cpu_kv_gb + _HOST_COMPUTE_GB,
+    )
+
+
+def _placement_note(
+    *,
+    gpu_layers: int,
+    n_layers: int,
+    profile: str,
+    ram_total_gb: float,
+    moe_cpu_layers: int,
+    n_cpu_ffn: int,
+) -> str:
+    """The one-line description of a placement the banner and `Plan.note` use.
+
+    The order is deliberate: the most specific placement wins, so a plan that
+    keeps every attention block on the card is not described as a layer count it
+    does not use.
+    """
+    if gpu_layers == 0:
+        if profile == "gpu":
+            return "CPU ONLY (GPU profile requested, no usable GPU)"
+        if ram_total_gb < 8:
+            return "CPU ONLY (Low RAM Safe Mode)"
+        return "CPU ONLY"
+
+    note = "Full GPU" if gpu_layers == n_layers else f"Hybrid: {gpu_layers}/{n_layers} layers"
+    if moe_cpu_layers >= 0:
+        note = f"MoE: {n_layers - moe_cpu_layers}/{n_layers} expert layers on GPU"
+    if n_cpu_ffn >= 0:
+        note = (
+            f"Tensor split: {n_layers - n_cpu_ffn}/{n_layers} dense FFN layers "
+            "on GPU, attention on GPU"
+        )
+    return note
+
+
 def plan(
     meta: dict,
     hw: HardwareInfo,
@@ -673,61 +780,38 @@ def plan(
         # flash_attn is required for KV quantization, so enable it only for the
         # dtypes that need it (bf16/f16/f32 stay on the fast default path).
         flash_attn = quantized_kv
-
-        if profile == "gpu":
-            note = "CPU ONLY (GPU profile requested, no usable GPU)"
-        elif hw.ram_total_gb < 8:
+        if hw.ram_total_gb < 8 and profile != "gpu":
+            # Below 8 GB of RAM a full-size context is the thing that OOMs, so
+            # the note has to carry that fact rather than the plain "CPU ONLY".
             ctx = min(ctx, 2048)
-            note = "CPU ONLY (Low RAM Safe Mode)"
-        else:
-            note = "CPU ONLY"
     else:
         # Quantized KV requires flash attention, regardless of VRAM size.
         flash_attn = flash_attn_on_gpu
         offload_kqv = not no_kv_offload
         n_batch = min(n_batch, 512)
-        note = "Full GPU" if gpu_layers == n_layers else f"Hybrid: {gpu_layers}/{n_layers} layers"
-        if moe_cpu_layers >= 0:
-            note = f"MoE: {n_layers - moe_cpu_layers}/{n_layers} expert layers on GPU"
-        if n_cpu_ffn >= 0:
-            note = (
-                f"Tensor split: {n_layers - n_cpu_ffn}/{n_layers} dense FFN layers "
-                "on GPU, attention on GPU"
-            )
 
-    # mlock pins weights in RAM, so it is only safe when the machine can hold
-    # the host-side weights AND the host-side KV cache with headroom. Checking
-    # against model size alone ignores a 5 GB KV cache (Q8_0 at 64K), which
-    # turns an mlock into an OOM on a 15 GB / no-swap box.
-    if n_cpu_ffn >= 0:
-        # Same shape of plan as the MoE one: attention (and with it the whole KV
-        # cache) is on the card, and the host keeps the FFN blocks of the CPU
-        # prefix.
-        sizes = _ffn_layer_sizes(meta, n_layers) or []
-        cpu_weights_gb = sum(sizes[:n_cpu_ffn]) / 1024**3
-        cpu_kv_gb = kv_cache_gb if no_kv_offload else 0.0
-    elif moe_cpu_layers >= 0:
-        # A MoE plan offloads every layer for its dense tensors, so all KV
-        # lives on the GPU (unless it was parked in RAM); only the routed
-        # experts of the CPU prefix remain in system RAM.
-        layer_experts = meta.get("expert_layer_bytes") or []
-        cpu_weights_gb = sum(int(value) for value in layer_experts[:moe_cpu_layers]) / 1024**3
-        cpu_kv_gb = kv_cache_gb if no_kv_offload else 0.0
-    else:
-        cpu_weights_gb = max(0.0, model_size_gb - layer_gb * gpu_layers)
-        cpu_kv_gb = (
-            kv_cache_gb if no_kv_offload else per_layer_kv_gb * max(0, kv_layers - gpu_layers)
-        )
-    host_headroom_gb = hw.ram_free_gb - cpu_weights_gb - cpu_kv_gb
-    # 3 GB of headroom leaves room for llama.cpp compute buffers; pinning with
-    # less has OOM-killed this class of machine mid-load (no swap).
-    use_mlock = host_headroom_gb > 3.0
-    # llama.cpp needs more than weights+KV for compute buffers; 2 GB is a
-    # conservative placeholder, calibrated against a 14B/Q8_0/64K load. Only
-    # the KV cache and those buffers have to be resident, since the weights are
-    # mmap'd and the kernel can page them (see loading.check_host_ram).
-    ram_estimate_gb = cpu_weights_gb + cpu_kv_gb + _HOST_COMPUTE_GB
-    host_resident_gb = cpu_kv_gb + _HOST_COMPUTE_GB
+    note = _placement_note(
+        gpu_layers=gpu_layers,
+        n_layers=n_layers,
+        profile=profile,
+        ram_total_gb=hw.ram_total_gb,
+        moe_cpu_layers=moe_cpu_layers,
+        n_cpu_ffn=n_cpu_ffn,
+    )
+    footprint = _host_footprint(
+        meta,
+        hw,
+        n_layers=n_layers,
+        kv_layers=kv_layers,
+        model_size_gb=model_size_gb,
+        layer_gb=layer_gb,
+        kv_cache_gb=kv_cache_gb,
+        per_layer_kv_gb=per_layer_kv_gb,
+        gpu_layers=gpu_layers,
+        moe_cpu_layers=moe_cpu_layers,
+        n_cpu_ffn=n_cpu_ffn,
+        no_kv_offload=no_kv_offload,
+    )
 
     return Plan(
         gpu_layers=gpu_layers,
@@ -737,10 +821,10 @@ def plan(
         flash_attn=flash_attn,
         n_batch=n_batch,
         offload_kqv=offload_kqv,
-        use_mlock=use_mlock,
+        use_mlock=footprint.use_mlock,
         note=note,
-        ram_estimate_gb=ram_estimate_gb,
-        host_resident_gb=host_resident_gb,
+        ram_estimate_gb=footprint.ram_estimate_gb,
+        host_resident_gb=footprint.resident_gb,
         kv_cache_gb=kv_cache_gb,
         kv_layers=kv_layers,
         kv_cache_k=kv_k,

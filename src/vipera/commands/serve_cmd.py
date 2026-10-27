@@ -230,6 +230,17 @@ def start(
     protocol: str = typer.Option(
         None, "--protocol", help="HTTP layers to mount: openai, ollama, or openai,ollama"
     ),
+    api_key: str = typer.Option(
+        None,
+        "--api-key",
+        help="Require this key on every request (Authorization: Bearer). A key on "
+        "the command line is visible in `ps`; prefer `api_key` in the config.",
+    ),
+    cors: str = typer.Option(
+        None,
+        "--cors",
+        help="Browser origins allowed to call the gateway, comma-separated, or * for any",
+    ),
 ):
     """Start the HTTP Gateway."""
     cfg = load_config()
@@ -242,6 +253,8 @@ def start(
     backend = cfg.get("backend", "inprocess")
     max_loaded = int(_resolve_option(max_loaded, cfg.get("max_loaded", 2)))
     keep_alive = _resolve_option(keep_alive, cfg.get("keep_alive", "5m"))
+    api_key = _resolve_option(api_key, cfg.get("api_key"))
+    cors = _resolve_option(cors, cfg.get("cors"))
     try:
         keep_alive_seconds = parse_keep_alive(keep_alive)
     except ValueError as e:
@@ -283,15 +296,23 @@ def start(
     m = metas[model]
 
     if not _is_loopback(host):
-        console.print(
-            f"[{C_RED}] ⚠ WARNING: binding to {host} exposes the model to the "
-            f"network with no authentication.[/]"
-        )
-        console.print(f"[{C_DIM}]  Serving in 5s — press Ctrl+C to abort now.[/]")
-        try:
-            time.sleep(5)
-        except KeyboardInterrupt:
-            raise typer.Exit(1) from None
+        if str(api_key or "").strip():
+            # Reachable from the network, but every request needs the key; the
+            # client-side reminder is what stops "it 401s from my phone".
+            console.print(
+                f"[{C_YELLOW}] ⚠ Binding to {host}: every request needs the API "
+                f"key (Authorization: Bearer).[/]"
+            )
+        else:
+            console.print(
+                f"[{C_RED}] ⚠ WARNING: binding to {host} exposes the model to the "
+                f"network with no authentication. Set `api_key` or pass --api-key.[/]"
+            )
+            console.print(f"[{C_DIM}]  Serving in 5s — press Ctrl+C to abort now.[/]")
+            try:
+                time.sleep(5)
+            except KeyboardInterrupt:
+                raise typer.Exit(1) from None
 
     hw = detect()
 
@@ -378,7 +399,9 @@ def start(
 
         from vipera.server import build_app
 
-        fastapi_app = build_app(engine, model, pool=pool, protocols=protocols)
+        fastapi_app = build_app(
+            engine, model, pool=pool, protocols=protocols, api_key=api_key, cors=cors
+        )
 
         section("ready")
         ledger(
@@ -401,8 +424,10 @@ def start(
                 ("POST /api/embed", "vectors (needs embeddings enabled)"),
                 ("GET  /api/tags", "every served alias"),
             ]
-        routes.append(("GET  /health", "liveness"))
+        routes.append(("GET  /health", "liveness (no key needed)" if api_key else "liveness"))
         catalog(routes)
+        if api_key:
+            note("auth: every route needs `Authorization: Bearer <api_key>`.", tone="ok")
         note("ctrl-c stops the server.", tone="ok")
 
         pid_path = _pid_file(port)

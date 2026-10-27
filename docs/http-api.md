@@ -24,9 +24,29 @@ vipera serve start --model <alias>
 # → http://127.0.0.1:8686
 ```
 
-The API has no authentication. Any `Authorization`/`api_key` value is accepted
-and ignored. Bind to `127.0.0.1` (the default) unless you put a reverse proxy in
-front of it.
+## Authentication and CORS
+
+Authentication is **off by default**: any `Authorization`/`api_key` value is
+accepted and ignored, and the gateway binds to `127.0.0.1`. Set a key before the
+port is reachable from anywhere else:
+
+```bash
+vipera serve start --model <alias> --api-key "$(openssl rand -hex 24)"
+vipera system config set api_key <key>   # or keep it out of `ps`
+```
+
+With `api_key` set, every route except `/health` requires it, carried as
+`Authorization: Bearer <key>`, a bare `Authorization: <key>`, or
+`x-api-key: <key>`. Keys are compared with `hmac.compare_digest`. A rejected
+request gets `401` with `WWW-Authenticate: Bearer` and the envelope of the
+protocol it spoke — `{"error": {"message": …, "type": "invalid_request_error",
+"code": "missing_api_key"|"invalid_api_key"}}` under `/v1/*`, `{"error": "…"}`
+under `/api/*`. `/health` stays open for container probes and `vipera system
+doctor`.
+
+CORS is off unless `cors` is configured (`"http://localhost:3000,https://app…"`
+or `*`). An allowed origin gets its headers on a `401` too, so the browser can
+read the error instead of reporting a network failure.
 
 ## Endpoints
 
@@ -394,8 +414,9 @@ rejected with `400`.
   until the first finishes, including while it is streaming.
 - There is no request timeout, queue limit, token limit beyond `max_tokens`, or
   rate limiting.
-- No CORS middleware is installed. Browser clients on another origin will be
-  blocked unless you proxy through the same origin or add middleware.
+- No CORS middleware is installed unless `cors` names an origin. Browser clients
+  on another origin are blocked by the browser unless you set `cors` or proxy
+  through the same origin.
 - Request bodies are validated only for the fields listed above; unknown fields
   are dropped silently rather than rejected.
 
@@ -416,8 +437,8 @@ rejected with `400`.
 | Multimodal content parts | Not supported (the Ollama `images` field is rejected, not dropped) |
 | `POST /v1/completions` | Not implemented |
 | OpenAI-style error envelope | Not implemented |
-| API key auth | Not implemented |
-| CORS | Not implemented |
+| API key auth | Opt-in via `api_key` (`401` in the caller's envelope; `/health` open) |
+| CORS | Opt-in via `cors` (origins list or `*`) |
 
 ### Ollama layer
 
