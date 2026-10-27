@@ -184,6 +184,66 @@ def test_server_command_emits_moe_flags_and_uses_full_ngl():
     assert command[command.index("-b") + 1] == "896"
 
 
+def test_server_command_passes_the_expert_pool_when_the_planner_asked_for_one():
+    command = sb.server_command(
+        "/bin/llama-server",
+        "/m.gguf",
+        _plan(gpu_layers=24, n_layers=24, moe_cpu_layers=24, moe_cache_mib=2048),
+        1,
+        moe_cache_supported=True,
+    )
+
+    assert command[command.index("--moe-cache-mib") + 1] == "2048"
+
+
+def test_server_command_drops_the_expert_pool_on_builds_without_the_flag():
+    command = sb.server_command(
+        "/bin/llama-server",
+        "/m.gguf",
+        _plan(gpu_layers=24, n_layers=24, moe_cpu_layers=24, moe_cache_mib=2048),
+        1,
+        moe_cache_supported=False,
+    )
+
+    assert "--moe-cache-mib" not in command
+
+
+def test_server_command_ignores_the_pool_without_cpu_experts():
+    # Nothing lives in RAM for a dense plan, so a pool would only take VRAM.
+    command = sb.server_command(
+        "/bin/llama-server",
+        "/m.gguf",
+        _plan(moe_cache_mib=2048),
+        1,
+        moe_cache_supported=True,
+    )
+
+    assert "--moe-cache-mib" not in command
+
+
+def test_supports_moe_cache_reads_the_binary_help(monkeypatch):
+    class _Result:
+        def __init__(self, text):
+            self.stdout = text
+            self.stderr = ""
+
+    monkeypatch.setattr(
+        sb.subprocess,
+        "run",
+        lambda *a, **kw: _Result("  --moe-cache-mib N  GPU cache size in MiB"),
+    )
+    assert sb.supports_moe_cache("/bin/llama-server") is True
+
+    monkeypatch.setattr(sb.subprocess, "run", lambda *a, **kw: _Result("no such option here"))
+    assert sb.supports_moe_cache("/bin/llama-server") is False
+
+    def _boom(*a, **kw):
+        raise OSError("no such file")
+
+    monkeypatch.setattr(sb.subprocess, "run", _boom)
+    assert sb.supports_moe_cache("/bin/llama-server") is False
+
+
 def test_server_command_offloads_the_output_layer_with_a_full_plan():
     # A full plan means every block, so ask for the extra group llama.cpp uses
     # for the output layer: -ngl 24 on a 24-block model offloads 24 of 25 and
@@ -729,6 +789,7 @@ def test_start_passes_the_environment_to_the_child(monkeypatch, tmp_path):
     engine._fit_supported = False
     engine._spec_type = "none"
     engine._spec_type_supported = False
+    engine._moe_cache_supported = False
     engine.supports_embeddings = False
     engine.parallel = 1
     engine._start(_plan(gpu_layers=7, n_layers=40))

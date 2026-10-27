@@ -77,6 +77,28 @@ def test_insufficient_ram_is_refused_before_loading(fake_llama):
     assert fake_llama.calls == []
 
 
+def test_model_larger_than_ram_is_streamed_instead_of_refused(fake_llama, capsys):
+    # 58 GB of mmap'd weights on a 15 GiB box is exactly what mmap is for: the
+    # kernel pages them in on demand. Only the KV cache and compute buffers have
+    # to be resident, so this plan must load — with a warning — rather than
+    # sending the caller to `profile: lowmem` and its 64-token batch.
+    plan = _plan(ram_estimate_gb=60.0, host_resident_gb=2.5)
+
+    Engine(plan, "model.gguf")
+
+    out = capsys.readouterr().out
+    assert "paged in from disk" in out
+    assert fake_llama.calls
+
+
+def test_resident_kv_that_does_not_fit_is_still_refused(fake_llama):
+    # A KV cache cannot be paged out: llama.cpp mallocs it.
+    plan = _plan(ram_estimate_gb=20.0, host_resident_gb=999.0)
+    with pytest.raises(RuntimeError, match="stay resident"):
+        Engine(plan, "model.gguf")
+    assert fake_llama.calls == []
+
+
 def test_gpu_fallback_walks_the_offload_down_before_cpu(fake_llama):
     # 9 layers planned, only 6 fit: the ladder is 9, 8, 7, then a quarter (2).
     # Measured on the reference box, asking for 15 layers loads 13 instead of

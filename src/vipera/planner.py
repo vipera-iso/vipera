@@ -19,6 +19,11 @@ class Plan:
     # room for compute buffers. 0.0 means "not estimated" (callers skip the
     # preflight check), which keeps hand-built Plans in tests working.
     ram_estimate_gb: float = 0.0
+    # The share of ram_estimate_gb that cannot be paged out: the host-side KV
+    # cache plus compute buffers. Weights are mmap'd and may live on disk, so
+    # only this part has to be resident. 0.0 means "not estimated", and callers
+    # then treat the whole footprint as resident.
+    host_resident_gb: float = 0.0
     # KV cache size this plan expects, and how many layers actually keep KV.
     # 0.0 / 0 mean "not estimated" (hand-built Plans in tests stay valid).
     kv_cache_gb: float = 0.0
@@ -34,6 +39,9 @@ class Plan:
     # llama.cpp ubatch for the server backend. 0 keeps the historical
     # min(n_batch, 512) behaviour.
     n_ubatch: int = 0
+    # MiB of VRAM llama.cpp may use as a cache of the CPU-resident expert
+    # tensors (--moe-cache-mib). 0 means off; see _moe_cache_mib for the gate.
+    moe_cache_mib: int = 0
     n_layers: int = 0
     # --n-cpu-ffn value: the first N layers keep their dense FFN on the CPU
     # while every attention block (and the KV cache with it) stays on the card.
@@ -81,6 +89,20 @@ _RESERVE_PER_UBATCH_GB = 0.00022
 # server_command caps it, so the reserve below charges the buffer the child will
 # actually allocate.
 _DENSE_UBATCH = 512
+# Prefill micro-batch for a plan whose weights stay in RAM. Nothing on the card
+# has to hold these buffers, and prefill is where such a plan spends its life.
+# Measured on gpt-oss-120b Q2_K (58.3 GB, 4 cores, 15 GiB RAM, ctx 4096, -t 4,
+# 341-token prompt, second request after a warm-up so the page cache is not
+# part of the number): ub 128 -> 2.96 t/s, ub 512 -> 6.50, ub 2048 -> 6.57.
+# Flat from 512 up, so 512 is the knee: it buys the whole 2.2x over 128 without
+# the larger compute buffers (in RAM on this path) that 2048 asks for. Below it
+# the CPU GEMMs are too short to pay for themselves. `lowmem` capped the batch
+# at 64, which is how the same model ended up planned at 2 t/s prefill.
+_HOST_UBATCH = 512
+# Below this much free RAM the old conservative cap stays: the prefill buffers
+# of a 100B-class CPU-only plan live in RAM, and no machine that small was part
+# of the measurement above, so it is not the place to spend the gains.
+_HOST_UBATCH_MIN_FREE_RAM_GB = 8.0
 # Extra reserve when the plan cannot use flash attention. Without FA llama.cpp
 # allocates a full KQ matrix per batch instead of streaming it, which on the same
 # 4 GB card cuts the offload from 14 layers to 10 (0.9 GB of weights).
@@ -187,6 +209,36 @@ _MOE_OVERHEAD_PER_UB_GB = 0.00022
 # compute buffer, so charging it again here would drop one expert layer.
 _MOE_VRAM_RESERVE_GB = 0.15
 
+# `--moe-cache-mib N` keeps a pool of the CPU-resident expert tensors in VRAM so
+# a decode step does not have to pull every selected expert over the bus. The
+# win depends on the pool being large enough for the working set: on a 24 GB
+# card it took decode from 11.55 to 21.21 t/s (+84%), while on a 4 GB card the
+# same flag made the plan three times slower — the pool evicted itself on every
+# step and the copy was paid twice. So the pool is only requested when the card
+# has room left after placement for one worth having, and it is sized as half
+# of that room: the other half has to hold the next prefill's compute buffers.
+_MOE_CACHE_MIN_SPARE_GB = 8.0
+_MOE_CACHE_FRACTION = 0.5
+_MOE_CACHE_MAX_MIB = 4096
+_MOE_CACHE_STEP_MIB = 128
+
+# Host-side allowance for llama.cpp compute buffers, charged on top of the
+# resident KV cache. Part of ram_estimate_gb since it was calibrated against a
+# 14B/Q8_0/64K load, and the only part of that estimate a mmap'd model must keep
+# in RAM.
+_HOST_COMPUTE_GB = 2.0
+
+
+def _host_ubatch(hw: HardwareInfo, small_box: int) -> int:
+    """Prefill micro-batch for a plan that keeps its weights in RAM.
+
+    `small_box` is the cap to keep on a machine with too little RAM to hold the
+    larger compute buffers; see `_HOST_UBATCH_MIN_FREE_RAM_GB`.
+    """
+    if hw.ram_free_gb < _HOST_UBATCH_MIN_FREE_RAM_GB:
+        return small_box
+    return _HOST_UBATCH
+
 
 def _lowmem_moe_plan(
     meta: dict,
@@ -225,7 +277,8 @@ def _lowmem_moe_plan(
     dense_gb = (size_bytes - expert_bytes) / 1024**3
     kv_gb = _estimate_kv_cache_gb(meta, lowmem_ctx, "f16")
     overhead_gb = _MOE_OVERHEAD_BASE_GB + _MOE_OVERHEAD_PER_UB_GB * ubatch
-    if dense_gb + kv_gb + overhead_gb + _MOE_VRAM_RESERVE_GB > hw.vram_free_gb:
+    spare_gb = hw.vram_free_gb - dense_gb - kv_gb - overhead_gb - _MOE_VRAM_RESERVE_GB
+    if spare_gb < 0:
         return None
 
     return Plan(
@@ -243,8 +296,59 @@ def _lowmem_moe_plan(
         kv_layers=kv_layers,
         moe_cpu_layers=n_layers,
         n_ubatch=ubatch,
+        # This is the configuration the expert pool is for: every routed expert
+        # is in RAM and the card has room left over after attention. On the
+        # reference 4 GB card the spare is ~0 and the pool stays off.
+        moe_cache_mib=_moe_cache_mib(spare_gb),
         n_layers=n_layers,
     )
+
+
+def _moe_spare_vram_gb(
+    meta: dict,
+    hw: HardwareInfo,
+    *,
+    n_layers: int,
+    moe_cpu_layers: int,
+    kv_gb: float,
+    n_ubatch: int,
+) -> float | None:
+    """VRAM left over once the planned expert placement is loaded.
+
+    Mirrors the budget in `_moe_cpu_layers` from the other side: that function
+    fills the card with expert layers, this one reports what is still free
+    afterwards, which is what a `--moe-cache-mib` pool would live in.
+    """
+    expert_bytes = int(meta.get("expert_bytes") or 0)
+    layer_experts = meta.get("expert_layer_bytes")
+    if expert_bytes <= 0 or not isinstance(layer_experts, list) or len(layer_experts) != n_layers:
+        return None
+    sizes = [int(value or 0) for value in layer_experts]
+    gpu_experts_gb = sum(sizes[moe_cpu_layers:]) / 1024**3
+    size_bytes = int(meta.get("size_bytes") or 0)
+    non_expert_gb = max(0.0, (size_bytes - expert_bytes) / 1024**3)
+    overhead_gb = _MOE_OVERHEAD_BASE_GB + _MOE_OVERHEAD_PER_UB_GB * n_ubatch
+    return (
+        hw.vram_free_gb
+        - _MOE_VRAM_RESERVE_GB
+        - non_expert_gb
+        - kv_gb
+        - overhead_gb
+        - gpu_experts_gb
+    )
+
+
+def _moe_cache_mib(spare_gb: float | None) -> int:
+    """Pool size for `--moe-cache-mib`, or 0 when the spare VRAM is too small.
+
+    Below `_MOE_CACHE_MIN_SPARE_GB` the pool cannot hold enough experts to cover
+    a decode step, and llama.cpp spends the step copying experts in and out
+    instead of computing with them (see the constant's comment).
+    """
+    if spare_gb is None or spare_gb < _MOE_CACHE_MIN_SPARE_GB:
+        return 0
+    mib = min(int(spare_gb * _MOE_CACHE_FRACTION * 1024), _MOE_CACHE_MAX_MIB)
+    return (mib // _MOE_CACHE_STEP_MIB) * _MOE_CACHE_STEP_MIB
 
 
 def _moe_cpu_layers(
@@ -430,7 +534,12 @@ def plan(
             context=min(ctx, 2048),
             kv_cache="f16",
             flash_attn=False,
-            n_batch=min(n_batch, 64),
+            # The profile's promise is "small context, no weights in VRAM". It
+            # never promised a 64-token batch: that cap cost a 58 GB model most
+            # of its prefill throughput (see _HOST_UBATCH), and a CPU-only plan
+            # allocates nothing from it on the card.
+            n_batch=min(n_batch, _host_ubatch(hw, 64)),
+            n_ubatch=min(n_batch, _host_ubatch(hw, 64)),
             offload_kqv=False,
             use_mlock=False,
             note="CPU ONLY (Low Memory Profile)",
@@ -517,6 +626,21 @@ def plan(
             moe_cpu_layers = candidate
             moe_ubatch = candidate_ubatch
 
+    # What is left on the card after that placement buys a pool of the experts
+    # that stayed in RAM; see _MOE_CACHE_MIN_SPARE_GB.
+    moe_cache_mib = 0
+    if moe_cpu_layers >= 0:
+        moe_cache_mib = _moe_cache_mib(
+            _moe_spare_vram_gb(
+                meta,
+                hw,
+                n_layers=n_layers,
+                moe_cpu_layers=moe_cpu_layers,
+                kv_gb=0.0 if no_kv_offload else kv_cache_gb,
+                n_ubatch=moe_ubatch,
+            )
+        )
+
     # A dense model that does not fit can still keep every attention block (and
     # therefore the whole KV cache) on the card and stream only FFN weights.
     # Only when the classic split is already partial: a full offload has nothing
@@ -535,7 +659,13 @@ def plan(
 
     if gpu_layers == 0:
         offload_kqv = False
-        n_batch = min(n_batch, 128)
+        # A CPU-only plan is a prefill machine: every token of the prompt runs
+        # through weights that live in RAM, so -ub is the throughput lever and
+        # there is no video memory to charge for it. The old cap of 128 (64
+        # under `lowmem`) measured 1.8 t/s on gpt-oss-120b Q2_K, where a larger
+        # physical batch is what makes the CPU GEMMs worth vectorising.
+        n_batch = min(n_batch, _host_ubatch(hw, 128))
+        dense_ubatch = min(n_batch, _host_ubatch(hw, 128))
         # An explicit quantized KV request survives the CPU-only path:
         # llama.cpp runs flash attention on the CPU backend too, and forcing
         # f16 here would make a 64K-context KV for a 14B model ~10 GiB, which
@@ -593,8 +723,11 @@ def plan(
     # less has OOM-killed this class of machine mid-load (no swap).
     use_mlock = host_headroom_gb > 3.0
     # llama.cpp needs more than weights+KV for compute buffers; 2 GB is a
-    # conservative placeholder, calibrated against a 14B/Q8_0/64K load.
-    ram_estimate_gb = cpu_weights_gb + cpu_kv_gb + 2.0
+    # conservative placeholder, calibrated against a 14B/Q8_0/64K load. Only
+    # the KV cache and those buffers have to be resident, since the weights are
+    # mmap'd and the kernel can page them (see loading.check_host_ram).
+    ram_estimate_gb = cpu_weights_gb + cpu_kv_gb + _HOST_COMPUTE_GB
+    host_resident_gb = cpu_kv_gb + _HOST_COMPUTE_GB
 
     return Plan(
         gpu_layers=gpu_layers,
@@ -607,11 +740,13 @@ def plan(
         use_mlock=use_mlock,
         note=note,
         ram_estimate_gb=ram_estimate_gb,
+        host_resident_gb=host_resident_gb,
         kv_cache_gb=kv_cache_gb,
         kv_layers=kv_layers,
         kv_cache_k=kv_k,
         kv_cache_v=kv_v,
         moe_cpu_layers=moe_cpu_layers,
+        moe_cache_mib=moe_cache_mib,
         # A MoE plan has its own -ub (it is the expert-placement lever); a dense
         # plan keeps the prefill batch it was budgeted for.
         n_ubatch=moe_ubatch if moe_cpu_layers >= 0 else dense_ubatch,

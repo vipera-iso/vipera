@@ -34,6 +34,26 @@ def test_cpu_only_plan():
     assert p.cpu_threads == 8
 
 
+def test_cpu_only_plan_prefills_at_the_swept_batch():
+    # Measured on gpt-oss-120b Q2_K: ub 128 -> 2.90 t/s, 512 -> 6.38, 2048 ->
+    # 6.42. The knee is 512, and a CPU-only plan has no card to charge for it.
+    p = plan({"n_layers": 36, "size_bytes": 58 * _GIB}, _hw())
+    assert p.gpu_layers == 0
+    assert p.n_batch == 512
+    assert p.n_ubatch == 512
+
+
+def test_cpu_only_plan_separates_streamed_weights_from_resident_footprint():
+    # 58 GB of mmap'd weights on a 12 GB box. The whole footprint cannot be
+    # resident, but the KV cache and compute buffers can, and that is all the
+    # preflight may require (see loading.check_host_ram).
+    p = plan({"n_layers": 36, "size_bytes": 58 * _GIB}, _hw())
+
+    assert p.ram_estimate_gb > 55
+    assert p.host_resident_gb < p.ram_estimate_gb / 10
+    assert p.use_mlock is False
+
+
 def test_cpu_only_plan_keeps_f16_without_flash_attention():
     p = plan({"n_layers": 32, "size_bytes": 4 * 1024**3}, _hw(), kv_cache="f16")
     assert p.gpu_layers == 0
@@ -207,7 +227,12 @@ def test_lowmem_profile_caps_context_and_batch():
     )
     assert p.gpu_layers == 0
     assert p.context <= 2048
-    assert p.n_batch <= 64
+    # The profile's promise is a small context with no weights in VRAM; the
+    # 64-token batch it used to cap on top of that cost a 58 GB model 2.2x its
+    # prefill throughput (see _HOST_UBATCH), and a CPU-only plan allocates no
+    # prefill buffer on the card.
+    assert p.n_batch == 512
+    assert p.n_ubatch == 512
     assert p.kv_cache == "f16"
     assert "Low Memory" in p.note
 
@@ -423,6 +448,39 @@ def test_lowmem_moe_keeps_experts_in_ram_and_attention_on_the_gpu():
     assert p.note.startswith("MoE: experts on CPU")
 
 
+def test_lowmem_keeps_the_small_batch_on_a_low_ram_box():
+    # The prefill buffers of a CPU-only plan are system RAM, and nothing below
+    # 8 GB free was measured; keep the old cap there.
+    hw = _hw(ram_total_gb=4, ram_free_gb=3.5)
+    p = plan({"n_layers": 32, "size_bytes": 4 * _GIB}, hw, profile="lowmem", ctx=8192)
+
+    assert p.gpu_layers == 0
+    assert p.n_batch == 64
+
+
+def test_lowmem_moe_only_asks_for_an_expert_pool_when_the_card_has_spare():
+    # `--moe-cache-mib` needs a pool large enough to hold the working set: on a
+    # 4 GB card the spare after attention is ~0 and the flag made a plan three
+    # times slower, so it must stay off there.
+    small = plan(
+        _LFM_MOE_META,
+        _hw(gpu_name="GTX 1650", vram_total_gb=4.0, vram_free_gb=3.64),
+        profile="lowmem",
+        ctx=8192,
+    )
+    assert small.moe_cache_mib == 0
+
+    big = plan(
+        _LFM_MOE_META,
+        _hw(gpu_name="RTX 4090", vram_total_gb=24.0, vram_free_gb=23.5),
+        profile="lowmem",
+        ctx=8192,
+    )
+    assert big.moe_cache_mib > 0
+    assert big.moe_cache_mib % 128 == 0
+    assert big.moe_cache_mib <= 4096
+
+
 def test_lowmem_moe_falls_back_to_cpu_only_when_the_dense_side_is_too_big():
     hw = _hw(gpu_name="GTX 1650", vram_total_gb=4.0, vram_free_gb=0.30)
     p = plan(_LFM_MOE_META, hw, profile="lowmem", ctx=8192, n_batch=512)
@@ -449,6 +507,16 @@ def test_moe_plan_fits_last_expert_layers_and_keeps_classic_split():
     # the 24 layers the server uses.
     assert p.gpu_layers == 14
     assert p.note.startswith("MoE:")
+
+
+def test_moe_plan_leaves_the_expert_pool_off_when_the_card_is_full():
+    # The greedy placement fills the card with expert layers, so the plan that
+    # needs a pool (spare VRAM beside CPU-resident experts) is the `-cmoe` one
+    # above; here the spare is smaller than the pool threshold.
+    hw = _hw(gpu_name="GTX 1650", vram_total_gb=4.0, vram_free_gb=3.64)
+    p = plan(_LFM_MOE_META, hw, ctx=65536, kv_cache="q4_0")
+    assert p.moe_cpu_layers >= 0
+    assert p.moe_cache_mib == 0
 
 
 def test_moe_plan_honours_explicit_ubatch():

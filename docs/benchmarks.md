@@ -547,6 +547,44 @@ Decode after the load sits at 5.90 t/s (18/40 layers) against Ollama's 5.56 t/s
 (14/40), each measured alone on the same card — see the section above for why
 those two must not be run at the same time.
 
+### A model bigger than RAM: what mmap costs, and what `-ub` buys
+
+gpt-oss-120b Q2_K (58.3 GB across two shards, 36 layers, 8 KV heads × 64) on the
+15 GiB / 4-core reference box, `-ngl 0`, `-t 4`, `ctx` 2048–4096. No plan can
+hold this model: ~46 GB of it is read from the page cache or the disk on
+demand. The host preflight used to compare that whole footprint against free
+RAM and refuse the plan, which left `profile: lowmem` as the only way to run
+it; it now refuses only what cannot be paged (KV cache + compute buffers) and
+warns about the rest.
+
+Prefill is the whole story. 341-token prompt, second request after a warm-up so
+the page cache is not part of the number:
+
+| `-ub` | prefill | TTFT | decode |
+|---|---|---|---|
+| 64 (`lowmem` before) | 2.26 t/s | 150.6 s | 1.17 t/s |
+| 128 | 2.96 t/s | 115.2 s | 1.38 t/s |
+| 512 (both CPU paths now) | 6.42–6.50 t/s | 52.4 s | 1.15 t/s |
+| 2 048 | 6.57 t/s | 51.9 s | 1.28 t/s |
+
+Flat from 512 up, so 512 is the knee: it buys the whole 2.8× over the 64-token
+batch `lowmem` used to cap at, without the larger buffers (in system RAM on
+this path) that 2 048 needs. Decode does not move, which is what a prefill knob
+should look like.
+
+**One `vipera bench run` on this model measures the disk.** The first request
+after a load reads enough of the 58 GB file to take ~50 s whatever the prompt
+length, so the same server reports 1.8–2.1 t/s for a 112-token prompt and
+6.4 t/s for a 341-token one. Only compare numbers taken at the same cache
+state.
+
+The card does not enter into it: the `auto` plan's own flags (`-ngl 2`,
+`-ctk/-ctv q4_0`, `-fa on`, `-b/-ub 512`) measure 6.45 t/s, against 6.42 for
+`-ngl 0` with f16 KV and `-fa off`. The bundled `llama-server` here has no GPU
+backend (`--list-devices` prints nothing), so `-ngl` is inert and the expert
+pool is never planned: `--moe-cache-mib` would need ≥ 8 GB of spare VRAM after
+placement, and this 4 GB card has none.
+
 ## Method
 
 ```bash

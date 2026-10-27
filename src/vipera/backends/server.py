@@ -182,6 +182,20 @@ def has_cuda_device(devices: str | None) -> bool:
     return has_accelerator_device(devices)
 
 
+def supports_moe_cache(binary: str) -> bool:
+    """Whether this llama-server knows `--moe-cache-mib`.
+
+    The flag arrived with the expert pool in the llama.cpp tree; a build without
+    it exits on an unknown option, and the pool is only an optimisation, so the
+    planner sets `Plan.moe_cache_mib` either way and the flag is dropped here.
+    """
+    try:
+        probe = subprocess.run([binary, "--help"], capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return "--moe-cache-mib" in f"{probe.stdout}{probe.stderr}"
+
+
 def supports_spec_type(binary: str) -> bool:
     """Whether this llama-server knows `--spec-type` (the n-gram drafters).
 
@@ -237,6 +251,7 @@ def server_command(
     fit_supported: bool | None = None,
     spec_type: str | None = None,
     spec_type_supported: bool | None = None,
+    moe_cache_supported: bool | None = None,
     embeddings: bool = False,
     embeddings_supported: bool | None = None,
     parallel: int = 1,
@@ -316,6 +331,14 @@ def server_command(
     # is not probed again per spawn.
     if plan.n_cpu_ffn >= 0:
         command.extend(["-ncffn", str(plan.n_cpu_ffn)])
+    # Only a tensor-placement plan has CPU-resident experts to cache, and the
+    # planner only asks for a pool when the card has room for one that helps.
+    if plan.moe_cache_mib > 0 and plan.moe_cpu_layers >= 0:
+        supported = (
+            supports_moe_cache(binary) if moe_cache_supported is None else moe_cache_supported
+        )
+        if supported:
+            command.extend(["--moe-cache-mib", str(plan.moe_cache_mib)])
     if spec_type and spec_type != "none":
         supported = (
             supports_spec_type(binary) if spec_type_supported is None else spec_type_supported
@@ -453,6 +476,8 @@ class ServerEngine:
         # Probe once per engine: the load ladder may spawn the child several
         # times, and each extra --help run is wasted startup time.
         self._fit_supported = _supports_fit(self._binary)
+        # Probed once: the ladder may spawn several children with the same plan.
+        self._moe_cache_supported = supports_moe_cache(self._binary)
         cfg = config.load_config()
         # Slots: >1 lets the gateway run that many requests at once through
         # llama.cpp's continuous batching (see build_app's semaphore).
@@ -514,6 +539,7 @@ class ServerEngine:
             fit_supported=self._fit_supported,
             spec_type=self._spec_type,
             spec_type_supported=self._spec_type_supported,
+            moe_cache_supported=self._moe_cache_supported,
             embeddings=self.supports_embeddings,
             embeddings_supported=self.supports_embeddings,
             parallel=self.parallel,

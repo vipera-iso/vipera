@@ -15,20 +15,42 @@ from vipera.planner import Plan
 
 
 def check_host_ram(plan: Plan) -> None:
-    """Refuse a plan whose host-side footprint clearly exceeds free RAM.
+    """Refuse a plan whose *resident* host footprint exceeds free RAM.
 
     An OOM here is an uncatchable SIGKILL, not a Python exception, so the
     GPU->CPU fallback never gets a chance to run. Shared by both backends: the
     llama-server child dies the same way.
+
+    Weights are mmap'd, so they do not have to be resident: the kernel pages
+    them in and out against the page cache, and a model larger than RAM still
+    runs (slowly) instead of dying. Only the host KV cache and the compute
+    buffers must fit. The old check compared the whole footprint against free
+    RAM and refused a 58 GB model on a 15 GiB box outright, which is exactly
+    the case mmap exists for — it forced callers onto `profile: lowmem`, whose
+    tiny batch is the slowest way to run such a model. A footprint larger than
+    RAM is now a warning, not a refusal.
     """
     if plan.ram_estimate_gb <= 0:
         return
     available_gb = psutil.virtual_memory().available / 1024**3
-    if plan.ram_estimate_gb > available_gb + 0.5:
+    # A hand-built plan (tests, plugins) may carry no split, so fall back to the
+    # whole estimate: refusing is the safe direction when nothing says how much
+    # of it can be paged out.
+    resident_gb = plan.host_resident_gb or plan.ram_estimate_gb
+    if resident_gb > available_gb + 0.5:
         raise BackendError(
-            f"Not enough RAM for this plan: ~{plan.ram_estimate_gb:.1f} GB "
-            f"needed on the host, {available_gb:.1f} GB available. "
-            f"Lower --ctx, use kv_cache=q4_0, or close other applications."
+            f"Not enough RAM for this plan: ~{resident_gb:.1f} GB has to stay "
+            f"resident (host KV cache + compute buffers), {available_gb:.1f} GB "
+            f"available. Lower --ctx, use kv_cache=q4_0, or close other "
+            f"applications."
+        )
+    if plan.ram_estimate_gb > available_gb + 0.5:
+        streamed_gb = plan.ram_estimate_gb - available_gb
+        print(
+            f"\n[!] Warning: this plan keeps ~{plan.ram_estimate_gb:.1f} GB of "
+            f"weights on the host and {available_gb:.1f} GB is available, so "
+            f"~{streamed_gb:.1f} GB will be paged in from disk on demand (mmap). "
+            "Loading and the first pass over the prompt are disk-bound."
         )
 
 
