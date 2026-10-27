@@ -482,21 +482,24 @@ SYCL/Vulkan, or Metal).
 
 These are observable in the current code and worth knowing before filing a bug:
 
-- Tool/function calling, multimodal message content (arrays of parts), and the
-  remaining OpenAI endpoints (`/v1/completions`, `/v1/embeddings`) are not
-  implemented.
-- Speculative decoding is unavailable. A `llama-server` backend now exists
-  (`backend: "server"`), but it does not pass `--spec-type` or `-md` yet, and
-  the in-process `llama_cpp.Llama` backend cannot enable DFlash at all;
-  `draft_model=` would be classic speculative decoding, not DFlash. See
+- Tool calling (`tools`, `tool_choice`, streamed `tool_calls` deltas) is
+  implemented and depends on the model's chat template. Still missing:
+  multimodal content (arrays of text/image parts are rejected), the legacy
+  `/v1/completions`, and `/v1/responses`.
+- Speculative decoding is limited to `--spec-type ngram-*` on the `server`
+  backend, when the installed binary advertises the flag. There is no
+  draft-model (`-md`) path, and the in-process backend has none. See
   [design/llama-server-backend.md](design/llama-server-backend.md).
-- The `model` field of a chat request is accepted and ignored; the response
-  `model` field comes from `llama.cpp`, not from the gateway alias.
 - No authentication, TLS, CORS, or rate limiting. The default bind address is
   loopback; do not expose the port directly.
-- VRAM detection does not guarantee GPU acceleration. With the `nvidia` extra
-  and a CPU-only `llama-cpp-python` build, the planner can report GPU layers
-  that the runtime cannot actually use.
+- VRAM detection does not guarantee GPU acceleration: a CPU-only
+  `llama-cpp-python` build still ignores the planned layers. `vipera system
+  doctor` reports the mismatch, and the placement ladder recovers from a load
+  that fails.
+- On a hybrid laptop the probe chain can pick the integrated GPU. Without the
+  `nvidia` extra, amdgpu sysfs answers before `llama-server`, so an AMD APU's
+  carve-out is budgeted instead of a discrete NVIDIA card. Installing
+  `nvidia-ml-py` moves NVML to the front of the chain.
 - `flash_attn` is deliberately not a config key: the planner derives it from
   `kv_cache`. Sampling keys (`temperature`, `max_tokens`, `top_p`,
   `repeat_penalty`) feed `chat`, while HTTP requests default to the values in
@@ -506,8 +509,6 @@ These are observable in the current code and worth knowing before filing a bug:
   15 fail) and 16K/`q8_0` (13 load); the f16 non-FA path is covered by an extra
   flat reserve rather than by a measured curve. An over-estimate is now
   recoverable through the placement ladder, at the cost of a failed load.
-- The planner does not emit MoE-specific offload flags despite the README's
-  description of the flag set.
 - Expert-slab reordering (I/O-locality optimization) is not implemented. It
   needs an expert-usage trace, and this project defines no trace format yet, so
   `model optimize` only handles quantization, imatrix, and layer pruning.

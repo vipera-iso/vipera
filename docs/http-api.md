@@ -70,8 +70,11 @@ Ollama-specific request behavior:
   otherwise.
 
 `/health`, `/docs`, and `/openapi.json` are Vipera/FastAPI conveniences;
-`/v1/*` and `/api/*` are the compatibility surfaces. Errors on `/v1/*` follow
-FastAPI's `{"detail": ...}` format, not OpenAI's `{"error": {...}}` envelope.
+`/v1/*` and `/api/*` are the compatibility surfaces. Validation errors on
+`/v1/*` use FastAPI's `{"detail": ...}`; a failure inside the engine, or a model
+that failed to load, answers `502`/`503` with OpenAI's
+`{"error": {"message", "type", ...}}` envelope. `/api/*` reports both as
+`{"error": "..."}`, as Ollama does.
 
 ### `GET /health`
 
