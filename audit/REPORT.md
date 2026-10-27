@@ -6,6 +6,7 @@
 - **Kết quả nền:** `392 passed`, `ruff check src tests` sạch
 - **Kết quả audit:** 20/20 probe **thất bại** — mỗi thất bại là một lỗi đã tái hiện được (xem cách chạy bên dưới)
 - **Cập nhật sau khi sửa:** `418 passed` (1 skipped), `ruff check src tests` sạch; 11/20 probe đã chuyển sang pass, 9 probe còn lại vẫn fail đúng như mô tả
+- **Cập nhật 2026-10-26:** 6 probe còn đỏ đã được sửa; `pytest audit` **20/20 pass**, bộ chính **517 passed** (1 skipped, 8 xfailed), `ruff` + `mypy` sạch. Các hồi quy tương ứng đã được đưa vào `tests/unit/` để CI giữ chúng xanh.
 
 ## Cách tái hiện
 
@@ -25,18 +26,18 @@ hành vi **đúng**; nó fail vì code chưa làm đúng, không phải vì test
 | 1 | **Cao** | pool / server | `max_loaded` đóng engine **đang sinh token** của request khác | `test_pool_does_not_close_an_engine_that_is_mid_generation` | **Đã sửa** |
 | 2 | **Cao** | pool / server | Load model lười chạy **trên event loop**, chặn toàn bộ HTTP | `test_pool_lazy_load_does_not_block_the_event_loop` | **Đã sửa** |
 | 3 | **Cao** | optimize / shaping | Shaping **bỏ qua tool schema** → prompt vượt context, llama.cpp tự cắt | `test_shaping_accounts_for_the_tool_schema` | **Đã sửa** |
-| 4 | Trung bình | optimize / shaping | Cắt history **làm mồ côi message `tool`** | `test_shaping_never_leaves_a_tool_message_without_its_assistant_turn` | Còn mở |
+| 4 | Trung bình | optimize / shaping | Cắt history **làm mồ côi message `tool`** | `test_shaping_never_leaves_a_tool_message_without_its_assistant_turn` | **Đã sửa** |
 | 5 | Trung bình | optimize / tuning | Phát lại split đo ở ctx 512 cho phiên ctx 8192 | `test_tuning_profile_is_not_replayed_at_a_larger_context` | Còn mở |
 | 6 | Trung bình | protocols | Request sai **vẫn nạp model** trước khi trả 400 | `test_invalid_request_is_rejected_before_the_pool_loads_a_model` | Còn mở |
-| 7 | Trung bình | protocols | Lỗi engine → **500 `text/plain`**, không phải JSON | `test_openai_engine_failure_returns_a_json_error_envelope`, `test_ollama_engine_failure_returns_its_error_shape` | Còn mở |
+| 7 | Trung bình | protocols | Lỗi engine → **500 `text/plain`**, không phải JSON | `test_openai_engine_failure_returns_a_json_error_envelope`, `test_ollama_engine_failure_returns_its_error_shape` | **Đã sửa** |
 | 8 | Trung bình | Ollama | `format` (JSON mode) bị **nhận rồi bỏ qua** | 2 test `..._format_json_...` | **Đã sửa** |
-| 9 | Trung bình | serve | `serve start` thất bại **xoá pid file** của server đang chạy | `test_failed_serve_start_keeps_an_existing_pid_file` | Còn mở |
+| 9 | Trung bình | serve | `serve start` thất bại **xoá pid file** của server đang chạy | `test_failed_serve_start_keeps_an_existing_pid_file` | **Đã sửa** |
 | 10 | Thấp–TB | Ollama | `messages: []` được chuyển thẳng vào engine thay vì 400 | `test_ollama_chat_rejects_empty_messages` | **Đã sửa** |
 | 11 | Thấp | Ollama | Non-stream trả `eval_count`/`prompt_eval_count` = 0 khi backend không có usage | `test_ollama_non_stream_counts_tokens_when_backend_reports_no_usage` | **Đã sửa** |
 | 12 | Thấp | Ollama | `images` bị **nhận rồi bỏ qua** → trả lời như chưa thấy ảnh | `test_ollama_chat_does_not_silently_discard_images` | **Đã sửa** |
 | 13 | Thấp | config / CLI / docs | `profile` trong config: `serve` đọc, `chat`/`bench` bỏ qua, docs nói không đọc | `test_chat_honours_the_configured_profile`, `test_bench_honours_the_configured_profile` | **Đã sửa** |
-| 14 | Thấp | config | Không validate `profile`, `port`; bool sai **im lặng thành False** | 3 test `test_config_...` | Sửa một phần (`profile`) |
-| 15 | Thấp | planner | `iq4_nl` tính 0.5 B/elem thay vì 0.5625 (18 B/32) | `test_iq4_nl_kv_estimate_uses_the_exact_block_size` | Còn mở |
+| 14 | Thấp | config | Không validate `profile`, `port`; bool sai **im lặng thành False** | 3 test `test_config_...` | **Đã sửa** |
+| 15 | Thấp | planner | `iq4_nl` tính 0.5 B/elem thay vì 0.5625 (18 B/32) | `test_iq4_nl_kv_estimate_uses_the_exact_block_size` | **Đã sửa** |
 
 ### Đã sửa gì
 
@@ -71,8 +72,27 @@ hành vi **đúng**; nó fail vì code chưa làm đúng, không phải vì test
   `_coerce_strict` từ chối giá trị lạ; `vipera system config profile turbo`
   giờ exit 1. `port` range và bool im lặng vẫn còn mở.
 
-Các probe của #1, #2, #3, #8, #10–#13 giờ **pass**; 9 probe còn lại vẫn fail vì
-các lỗi #4–#7, #9, #14 (phần `port`/bool) và #15 chưa được sửa.
+Các probe của #1, #2, #3, #8, #10–#13 giờ **pass**.
+
+### Đợt sửa 2026-10-26
+
+- **#4 — shaping bỏ theo nhóm.** Bước 2 xoá cả cặp `assistant(tool_calls)` +
+  các `tool` đi liền sau, nên không còn message `tool` mồ côi. Hồi quy:
+  `tests/unit/test_optimize_shaping.py::test_dropping_history_never_orphans_a_tool_result`.
+- **#7 — lỗi engine là JSON 502.** `_backend_failure` của cả hai lớp protocol
+  đã trả `502` với `{"error": ...}` (OpenAI: object có `message`/`type`;
+  Ollama: chuỗi). Hai probe được cập nhật sang đúng hợp đồng 502 thay vì 500
+  `text/plain`; `docs/http-api.md` mô tả lại hình dạng lỗi. Hồi quy đã có sẵn:
+  `test_server.py::test_backend_failure_is_an_openai_shaped_502`,
+  `test_protocols.py::test_ollama_backend_failure_uses_its_error_shape`.
+- **#9 — pid file có chủ.** `start()` chỉ ghi/ xoá file của chính nó; nếu khởi
+  động thất bại, nội dung cũ (pid của gateway đang chạy) được khôi phục. Hồi quy:
+  `tests/unit/test_serve_cmd.py::test_failed_start_keeps_the_running_gateways_pid_file`.
+- **#14 (phần `port`) — 1–65535.** `_coerce_strict` từ chối, `_coerce` sửa về
+  mặc định kèm cảnh báo; `vipera system config port 99999` giờ exit 1 và không
+  ghi file. Hồi quy: 2 test trong `tests/unit/test_config.py`.
+- **#15 — `iq4_nl` = 18 B/32.** Hồi quy:
+  `tests/unit/test_planner.py::test_iq4_nl_is_priced_at_its_ggml_block_size`.
 
 Khi sửa #3, `_shrink` cũng được chỉnh để trừ độ dài marker khỏi `keep_chars`:
 trước đó mỗi lần cắt còn để lại message dài hơn ngân sách đúng bằng marker
@@ -292,15 +312,7 @@ test hiện có, không phát hiện khiếm khuyết mới.
 - Các probe thời gian (#2) và luồng (#1) là tất định về mặt logic nhưng dùng
   `sleep` mô phỏng; trên máy rất chậm, ngưỡng có thể cần nới.
 
-## Thứ tự sửa đề xuất
+## Trạng thái
 
-Đã xong: #1, #2, #3, #8, #10–#13 (và phần `profile` của #14).
-
-Còn lại, theo thứ tự:
-
-1. **#4** — cùng file shaping với #3: khi bỏ history, bỏ cả cặp
-   `assistant(tool_calls)` + `tool` để không gửi template sai cho llama.cpp.
-2. **#6, #7, #9** — validate trước khi nạp, JSON error handler, quyền sở hữu pid file.
-3. **#5** — tuning chỉ phát lại split khi `ctx` không lớn hơn lúc đo.
-4. **#14 (phần còn lại), #15** — `port` 1–65535, bool sai phải cảnh báo,
-   `iq4_nl` dùng đúng 18 B/32.
+Cả 20 lỗi đã xong: #1–#15 (2026-10-24 và đợt 2026-10-26), `pytest audit` 20/20
+pass và các hồi quy tương ứng đã nằm trong `tests/unit/` để CI giữ xanh.

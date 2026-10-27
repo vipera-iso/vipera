@@ -201,7 +201,7 @@ def test_ollama_non_stream_counts_tokens_when_backend_reports_no_usage():
 
 
 # --------------------------------------------------------------------------
-# 4. An engine failure returns a non-JSON 500 from both protocol layers
+# 4. An engine failure must answer with the protocol's JSON error envelope
 # --------------------------------------------------------------------------
 
 
@@ -220,9 +220,11 @@ def test_openai_engine_failure_returns_a_json_error_envelope():
         json={"messages": [{"role": "user", "content": "hi"}]},
     )
 
-    assert r.status_code == 500
+    # 502 Bad Gateway is the documented status for an engine that failed; the
+    # regression this guards is the bodyless `500 text/plain` that preceded it.
+    assert r.status_code == 502
     assert r.headers["content-type"].startswith("application/json")
-    assert "error" in r.json()
+    assert r.json()["error"]["message"]
 
 
 def test_ollama_engine_failure_returns_its_error_shape():
@@ -240,9 +242,11 @@ def test_ollama_engine_failure_returns_its_error_shape():
         },
     )
 
-    assert r.status_code == 500
+    # 502 Bad Gateway is the documented status for an engine that failed; the
+    # regression this guards is the bodyless `500 text/plain` that preceded it.
+    assert r.status_code == 502
     assert r.headers["content-type"].startswith("application/json")
-    assert "error" in r.json()
+    assert r.json()["error"]  # Ollama's shape is a plain string
 
 
 # --------------------------------------------------------------------------
