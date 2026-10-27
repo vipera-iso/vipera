@@ -1,0 +1,21 @@
+[
+  {
+    "model": "l1a-hermes-q4km.gguf",
+    "path": "/home/user/.vipera/models/l1a-hermes-q4km.gguf",
+    "sha256": "29fbc000f645676433af56ad6a99872827292e9a5accfda96c2caa2b709364fd",
+    "size_gib": 8.384,
+    "rc": 0,
+    "wall_s": 637.2,
+    "ctx": 512,
+    "ngl": 0,
+    "chunks": 24,
+    "n_seq": 4,
+    "scored_tok": 12264,
+    "pass_s": 104.08,
+    "ppl": 6.9289,
+    "ppl_stderr": 0.22355,
+    "peak_rss_gib": 12.388,
+    "ppl_tok_per_s": 19.68,
+    "ppl_delta": 0.0
+  }
+]

@@ -1,0 +1,21 @@
+[
+  {
+    "model": "ctl-hermes-q3km.gguf",
+    "path": "/home/user/.vipera/models/ctl-hermes-q3km.gguf",
+    "sha256": "2dbf2cba756660a69c9d1fda37b32ba20c7ff676b7721f7f8fa0d4a1203ea6bc",
+    "size_gib": 6.819,
+    "rc": 0,
+    "wall_s": 514.1,
+    "ctx": 512,
+    "ngl": 0,
+    "chunks": 24,
+    "n_seq": 4,
+    "scored_tok": 12264,
+    "pass_s": 84.2,
+    "ppl": 7.3904,
+    "ppl_stderr": 0.24359,
+    "peak_rss_gib": 10.517,
+    "ppl_tok_per_s": 24.32,
+    "ppl_delta": 0.0
+  }
+]

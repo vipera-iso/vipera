@@ -1,0 +1,25 @@
+run thong so (phai giong nhau): ctx / ngl / chunks / wall_s
+  hermes_orig2     ctx=512 ngl=0 chunks=24 wall=631.0s sha256=7ad9be1e446e
+  hermes_ctl_q4    ctx=512 ngl=0 chunks=24 wall=638.0s sha256=f5ae7e17988f
+  hermes_l1a_q4    ctx=512 ngl=0 chunks=24 wall=637.2s sha256=29fbc000f645
+  hermes_ctl_q3    ctx=512 ngl=0 chunks=24 wall=514.1s sha256=2dbf2cba7566
+  hermes_l1a_q3    ctx=512 ngl=0 chunks=24 wall=516.4s sha256=6119aba67bce
+  qwen_orig2       ctx=512 ngl=0 chunks=24 wall=70.1s sha256=6a1a2eb6d156
+  qwen_ctl_q4      ctx=512 ngl=0 chunks=24 wall=70.1s sha256=6c20a48720de
+  qwen_l1a_q4      ctx=512 ngl=0 chunks=24 wall=70.0s sha256=70c870c806b7
+
+5 CON SO:
+#1 session: orig_run2 - run1(6.9289)         6.9289 -    6.9289 =  +0.0000  PASS
+
+#2 requant loss: control - orig_run2         6.9289 -    6.9289 =  +0.0000
+#3 HIEU UNG IMATRIX (chinh): l1a - control   6.9289 -    6.9289 =  +0.0000  FAIL (nguong 0.25)
+#4 net: l1a - orig_run2                      6.9289 -    6.9289 =  +0.0000
+#5 Q3 GATE: q3_l1a - q3_control              7.1508 -    7.3904 =  -0.2396  FAIL (nguong 0.4)
+
+HANG PHU (qwen15b, khong cham gate):
+qwen requant loss: control - orig_run2      11.3815 -   11.3256 =  +0.0559
+qwen hieu ung imatrix: l1a - control        11.3478 -   11.3815 =  -0.0337
+
+QUYET DINH:
+  DUNG: Q3 gate -0.2396 < 0.4 - khong ket luan Q4, dieu truoc khi dung L1b
+  (nho loai tru hypothesis: imatrix build tu Q4_K_M khong phai F16)

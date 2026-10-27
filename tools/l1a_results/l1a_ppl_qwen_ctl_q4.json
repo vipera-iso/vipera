@@ -1,0 +1,21 @@
+[
+  {
+    "model": "ctl-qwen15b-q4km.gguf",
+    "path": "/home/user/.vipera/models/ctl-qwen15b-q4km.gguf",
+    "sha256": "6c20a48720de5066c1fe7287f64a4fc6dd44877e6459741b186c024d9062885c",
+    "size_gib": 1.041,
+    "rc": 0,
+    "wall_s": 70.1,
+    "ctx": 512,
+    "ngl": 0,
+    "chunks": 24,
+    "n_seq": 4,
+    "scored_tok": 12264,
+    "pass_s": 11.36,
+    "ppl": 11.3815,
+    "ppl_stderr": 0.40581,
+    "peak_rss_gib": 2.615,
+    "ppl_tok_per_s": 180.28,
+    "ppl_delta": 0.0
+  }
+]
