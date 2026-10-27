@@ -46,13 +46,14 @@ def _cuda_server_available() -> bool:
 def resolve_backend(plan: Plan, backend: str) -> tuple[str, Plan]:
     """Return a backend that can actually execute ``plan``.
 
-    llama-cpp-python has no ``n_cpu_moe`` argument, so a MoE plan is silently
-    ignored by the in-process engine (and its classic ``gpu_layers`` split is
-    the only safe fallback). A llama-server with ``-ncmoe`` can run the plan,
-    but only if its CUDA backend can actually see a device. A CPU-only build
-    (or a CUDA build with an incomplete LD_LIBRARY_PATH) parses every flag and
-    then ignores ``--gpu-layers``, which made the "upgrade" slower than the
-    in-process split on the reference box. Probe devices before switching.
+    llama-cpp-python has no ``n_cpu_moe``/``n_cpu_ffn`` argument, so a plan that
+    places weights by tensor type is silently ignored by the in-process engine
+    (and its classic ``gpu_layers`` split is the only safe fallback). A
+    llama-server with ``-ncmoe`` or ``-ncffn`` can run the plan, but only if its
+    CUDA backend can actually see a device. A CPU-only build (or a CUDA build
+    with an incomplete LD_LIBRARY_PATH) parses every flag and then ignores
+    ``--gpu-layers``, which made the "upgrade" slower than the in-process split
+    on the reference box. Probe devices before switching.
     """
     # `auto` is resolved once per process: llama-server when it can see the
     # card, the Python binding otherwise. Only probed when it is actually asked
@@ -63,9 +64,25 @@ def resolve_backend(plan: Plan, backend: str) -> tuple[str, Plan]:
     if backend != "inprocess" or not plan.requires_server:
         return backend, plan
 
+    # Two tensor-override plans reach this path: MoE expert placement (-ncmoe)
+    # and the dense attention/FFN split (-ncffn). Each needs its own flag, and
+    # each falls back to the classic split in a different way.
+    tensor_split = plan.n_cpu_ffn >= 0
+    flag = "-ncffn" if tensor_split else "-ncmoe"
+    what = "tensor split" if tensor_split else "MoE plan"
+    classic = (
+        replace(plan, n_cpu_ffn=-1)
+        if tensor_split
+        else replace(plan, moe_cpu_layers=-1, n_ubatch=0)
+    )
+
     try:
         binary = find_llama_tool("server")
-        supported = server_backend.supports_n_cpu_moe(binary)
+        supported = (
+            server_backend.supports_n_cpu_ffn(binary)
+            if tensor_split
+            else server_backend.supports_n_cpu_moe(binary)
+        )
         devices = server_backend.probe_devices(binary) if supported else None
     except (OptimizerError, OSError):
         binary = None
@@ -73,12 +90,19 @@ def resolve_backend(plan: Plan, backend: str) -> tuple[str, Plan]:
         devices = None
 
     if supported and server_backend.has_cuda_device(devices):
-        gpu_experts = plan.n_layers - plan.moe_cpu_layers
-        print(
-            "[i] MoE plan: using llama-server for expert placement "
-            f"({gpu_experts}/{plan.n_layers} expert layers on GPU, "
-            f"ubatch {plan.n_ubatch})."
-        )
+        if tensor_split:
+            print(
+                "[i] Tensor split: using llama-server for FFN placement "
+                f"({plan.n_layers - plan.n_cpu_ffn}/{plan.n_layers} dense FFN layers "
+                "on GPU, attention and KV cache on the GPU)."
+            )
+        else:
+            gpu_experts = plan.n_layers - plan.moe_cpu_layers
+            print(
+                "[i] MoE plan: using llama-server for expert placement "
+                f"({gpu_experts}/{plan.n_layers} expert layers on GPU, "
+                f"ubatch {plan.n_ubatch})."
+            )
         return "server", plan
 
     if supported:
@@ -87,8 +111,8 @@ def resolve_backend(plan: Plan, backend: str) -> tuple[str, Plan]:
         ld_path = os.environ.get("LD_LIBRARY_PATH") or "(unset)"
         bin_env = os.environ.get("VIPERA_LLAMA_BIN") or "(unset)"
         print(
-            "[!] Warning: llama-server parsed -ncmoe but does not see a CUDA0 "
-            "device; refusing the MoE server plan and falling back to the "
+            f"[!] Warning: llama-server parsed {flag} but does not see a CUDA0 "
+            f"device; refusing the {what} and falling back to the "
             "classic layer split.\n"
             f"    binary: {binary}\n"
             f"    --list-devices:\n{probe_lines}\n"
@@ -97,15 +121,15 @@ def resolve_backend(plan: Plan, backend: str) -> tuple[str, Plan]:
             "    If this is a CUDA build, point LD_LIBRARY_PATH at its CUDA "
             "runtime libraries (libcudart/libcublas) and re-run."
         )
-        return "inprocess", replace(plan, moe_cpu_layers=-1, n_ubatch=0)
+        return "inprocess", classic
 
-    where = f"{binary} has no -ncmoe" if binary else "llama-server was not found"
+    where = f"{binary} has no {flag}" if binary else "llama-server was not found"
     print(
-        f"[!] Warning: {where}; the MoE plan cannot run in-process and is "
+        f"[!] Warning: {where}; the {what} cannot run in-process and is "
         "falling back to the classic layer split. Install a newer llama-server "
-        "to use expert offload."
+        f"to use {flag}."
     )
-    return "inprocess", replace(plan, moe_cpu_layers=-1, n_ubatch=0)
+    return "inprocess", classic
 
 
 def _load_plugin(name: str):

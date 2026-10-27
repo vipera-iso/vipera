@@ -450,3 +450,82 @@ def test_auto_is_probed_once_per_process(monkeypatch):
     resolve_backend(_plan(), "auto")
 
     assert len(calls) == 1
+
+
+def test_tensor_split_load_attempts_step_ffn_back_then_go_cpu():
+    plan = _plan(
+        gpu_layers=17,
+        n_layers=40,
+        n_cpu_ffn=36,
+        note="Tensor split: 4/40 dense FFN layers on GPU, attention on GPU",
+    )
+
+    attempts = load_attempts(plan)
+    tensor = [candidate for candidate, _ in attempts if candidate.n_cpu_ffn >= 0]
+    cpu = [candidate for candidate, _ in attempts if candidate.gpu_layers == 0]
+
+    assert [candidate.n_cpu_ffn for candidate in tensor] == [36, 37, 38, 40]
+    # The note travels with the placement: a rung that serves 1/40 FFN layers
+    # must not still advertise 4/40 in the banner.
+    assert tensor[1].note == "Tensor split: 3/40 dense FFN layers on GPU, attention on GPU"
+    assert cpu
+    # -ncffn with -ngl 0 is not a valid CPU-only plan.
+    assert all(candidate.n_cpu_ffn == -1 for candidate in cpu)
+
+
+def test_moe_probe_tries_more_experts_on_the_gpu_before_the_planned_split():
+    plan = _plan(gpu_layers=14, moe_cpu_layers=12, n_layers=24, n_ubatch=896, note="MoE")
+
+    probed = load_attempts(plan, probe=True)
+    assert [candidate.moe_cpu_layers for candidate, _ in probed][:3] == [10, 11, 12]
+    # The safe direction is untouched, and the ladder still ends CPU-only.
+    assert [candidate.moe_cpu_layers for candidate, _ in probed][3:6] == [13, 14, 24]
+    assert [candidate.gpu_layers for candidate, _ in probed][-1] == 0
+
+    # Without the flag the planned split is tried as given: the in-process
+    # engine cannot execute an override plan at all.
+    assert load_attempts(plan)[0][0].moe_cpu_layers == 12
+
+
+def test_moe_probe_never_asks_for_a_negative_expert_layer_count():
+    plan = _plan(gpu_layers=14, moe_cpu_layers=1, n_layers=24, note="MoE")
+
+    probed = load_attempts(plan, probe=True)
+
+    assert [candidate.moe_cpu_layers for candidate, _ in probed][:3] == [0, 1, 2]
+
+
+def test_resolve_backend_upgrades_a_tensor_split_plan(monkeypatch, capsys):
+    monkeypatch.setattr(
+        "vipera.backends.registry.find_llama_tool", lambda *a, **kw: "/bin/llama-server"
+    )
+    monkeypatch.setattr("vipera.backends.server.supports_n_cpu_ffn", lambda binary: True)
+    monkeypatch.setattr(
+        "vipera.backends.server.probe_devices",
+        lambda binary: "Available devices:\n  CUDA0: NVIDIA GeForce GTX 1650\n",
+    )
+
+    backend, plan = resolve_backend(_plan(gpu_layers=17, n_layers=40, n_cpu_ffn=36), "inprocess")
+
+    assert backend == "server"
+    assert plan.requires_server is True
+    assert plan.n_cpu_ffn == 36
+    assert "Tensor split" in capsys.readouterr().out
+
+
+def test_resolve_backend_falls_back_when_ncffn_is_missing(monkeypatch, capsys):
+    # An older build has -ncmoe but no -ncffn: the tensor split has to be given
+    # up, and the classic split is what remains. Clearing the flag is what makes
+    # the in-process fallback load something that fits.
+    monkeypatch.setattr(
+        "vipera.backends.registry.find_llama_tool", lambda *a, **kw: "/bin/llama-server"
+    )
+    monkeypatch.setattr("vipera.backends.server.supports_n_cpu_ffn", lambda binary: False)
+
+    backend, plan = resolve_backend(_plan(gpu_layers=17, n_layers=40, n_cpu_ffn=36), "inprocess")
+
+    assert backend == "inprocess"
+    assert plan.n_cpu_ffn == -1
+    assert plan.requires_server is False
+    assert plan.gpu_layers == 17
+    assert "falling back" in capsys.readouterr().out

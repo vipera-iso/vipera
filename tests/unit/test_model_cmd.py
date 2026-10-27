@@ -310,3 +310,44 @@ def test_optimize_cmd_passes_tensor_type_overrides(monkeypatch, tmp_path):
 
     command = seen["command"]
     assert command[command.index("--tensor-type") + 1] == "ffn_.*_exps=Q3_K"
+
+
+def test_read_meta_propagates_the_per_tensor_split(tmp_path, monkeypatch):
+    # The tensor split is chosen from these bytes, and _read_meta is the only
+    # hand-off between the analyzer and the planner. A dropped key means the
+    # planner silently keeps the classic layer split for every dense model.
+    model = tmp_path / "dense.gguf"
+    model.write_bytes(b"")
+
+    def fake_analyze(_path):
+        return {
+            "metadata": {
+                "n_layers": 40,
+                "architecture": "qwen3",
+                "attn_bytes": 1200 * 1024**2,
+                "ffn_layer_bytes": [132 * 1024**2] * 40,
+                "fixed_bytes": 900 * 1024**2,
+            }
+        }
+
+    monkeypatch.setattr(gguf_analyzer, "analyze_gguf", fake_analyze)
+    meta = _read_meta(model, "dense.gguf")
+
+    assert meta["attn_bytes"] == 1200 * 1024**2
+    assert len(meta["ffn_layer_bytes"]) == 40
+    assert meta["ffn_layer_bytes"][0] == 132 * 1024**2
+    assert meta["fixed_bytes"] == 900 * 1024**2
+
+
+def test_read_meta_defaults_the_per_tensor_split_to_zeros(tmp_path, monkeypatch):
+    # A pre-tensor analyzer (or one that failed) must leave the planner on the
+    # classic split instead of a half-filled budget.
+    model = tmp_path / "old.gguf"
+    model.write_bytes(b"")
+    monkeypatch.setattr(gguf_analyzer, "analyze_gguf", lambda _path: {"metadata": {"n_layers": 32}})
+
+    meta = _read_meta(model, "old.gguf")
+
+    assert meta["attn_bytes"] == 0
+    assert meta["ffn_layer_bytes"] == []
+    assert meta["fixed_bytes"] == 0

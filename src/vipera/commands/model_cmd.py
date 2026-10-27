@@ -66,6 +66,9 @@ def _read_meta(path: Path, name: str | None = None) -> dict:
         "shared_expert_bytes": 0,
         "expert_layer_bytes": [],
         "expert_layers": 0,
+        "attn_bytes": 0,
+        "ffn_layer_bytes": [],
+        "fixed_bytes": 0,
     }
 
     m = _QUANT_RE.search(name or path.name)
@@ -101,6 +104,13 @@ def _read_meta(path: Path, name: str | None = None) -> dict:
         layer_experts = am.get("expert_layer_bytes") or []
         if isinstance(layer_experts, list):
             meta["expert_layer_bytes"] = [int(value) for value in layer_experts]
+        # The tensor-type split needs the attention total and the dense-FFN size
+        # of each layer; without them the planner keeps to the classic split.
+        meta["attn_bytes"] = int(am.get("attn_bytes") or 0)
+        meta["fixed_bytes"] = int(am.get("fixed_bytes") or 0)
+        layer_ffn = am.get("ffn_layer_bytes") or []
+        if isinstance(layer_ffn, list):
+            meta["ffn_layer_bytes"] = [int(value) for value in layer_ffn]
         # Size of one repeating transformer layer, excluding the non-repeating
         # tensors (token_embd, output.weight, ...). The planner budgets VRAM per
         # layer from this; size_bytes/n_layers would charge those tensors to

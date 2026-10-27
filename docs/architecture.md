@@ -155,7 +155,9 @@ The algorithm, in order:
    4 GB (without it the KQ matrix is materialized per batch, which on a 4 GB
    card cut the offload from 14 layers to 10); KQV offload on;
    `n_batch = min(n_batch, 512)`. The note distinguishes full and hybrid
-   offload.
+   offload. From `ctx 4096` up, a dense model that only partly fits is placed by
+   tensor type instead (step 9); this classic split remains the fallback and the
+   only axis below the crossover.
 8. **MoE path.** When the analyzer supplied per-layer routed-expert sizes,
    `_moe_cpu_layers()` keeps the largest suffix of expert layers that fits
    `vram_free - 0.15 GB reserve - non-expert weights - KV - runtime overhead`.
@@ -175,11 +177,40 @@ The algorithm, in order:
    and because it degrades one layer at a time; see
    [techniques](../OPTIMIZE-techniques.md) §3.
 
+   The expert count is the one placement number the planner does not take on
+   faith: `load_attempts(..., probe=True)` (server backend, `moe_probe` config,
+   default on) first tries one and then two expert layers *more* on the GPU and
+   keeps the deepest split that starts, because the fit depends on a card's real
+   overhead rather than on the formula. Measured on the reference card: the fit
+   served 17/24 expert layers at 69.43 t/s and the probe found 19/24 at
+   73.82 t/s on a 7 089-token prompt.
+
+9. **Tensor-type split** (dense models). When the analyzer reported the
+   attention total and the per-layer dense-FFN sizes, the model has no routed
+   experts, and the context is at least 4096, the plan keeps every attention
+   block — and with it the whole KV cache — on the card and fills what is left
+   with FFN blocks, counted from the last layer because `--n-cpu-ffn N` keeps
+   the first N on the CPU. `Planner._tensor_split_ffn_layers` returns that N, or
+   None when not a single FFN block fits beside attention. The classic split is
+   still computed into `gpu_layers` so the in-process fallback loads something
+   that fits; the server backend uses `-ngl n_layers + 1` and adds `-ncffn N`,
+   and `resolve_backend` refuses the plan on a build without the flag.
+
+   The axis was rejected on bytes and survived measurement: an FFN block on the
+   CPU streams 131.5 MiB per token regardless of context, while a layer left on
+   the CPU also runs attention over the window on four threads, so trading bytes
+   for the removal of CPU attention wins once the window fills (3.44 → 5.38 t/s
+   at a 3 750-token prompt on the reference card, and it is the only plan that
+   can configure `ctx 16384` there at all). Full numbers, including the 177-token
+   case where the classic split still wins, are in
+   [benchmarks](benchmarks.md#per-tensor-placement-for-dense-models-the-arithmetic-said-no-the-clock-said-yes).
+
 `profile=cpu` forces zero offload and `profile=lowmem` returns a fixed
 2048-context plan; the other profiles only influence the placement note.
-Dense models and registry entries that predate the expert metadata keep the
-classic per-layer arithmetic. For MoE models, `requires_server` tells callers
-that the in-process binding cannot execute the plan.
+Dense models and registry entries that predate the per-tensor metadata keep the
+classic per-layer arithmetic. For MoE models and tensor splits,
+`requires_server` tells callers that the in-process binding cannot execute the
+plan.
 
 ### Hybrid attention
 

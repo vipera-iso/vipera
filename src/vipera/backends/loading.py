@@ -51,6 +51,17 @@ def layer_ladder(layers: int) -> list[int]:
     return [n for n in dict.fromkeys(steps) if 0 < n <= layers]
 
 
+#: How many expert layers the server backend may try to move back onto the GPU
+#: beyond the planner's own fit, one load attempt each. The planner's fit comes
+#: from per-layer expert bytes and a measured overhead constant; on a card whose
+#: real ceiling is higher it leaves up to two layers' worth of GPU compute idle,
+#: so the start path tries them and keeps the most aggressive split that loads.
+#: Each step costs one spawn (~3-5 s for a mmap'd 8B), and a failed one exits
+#: during context creation. The cap exists because a deeper probe would be paid
+#: by every start on every machine, successful or not.
+_MOE_PROBE_STEPS = 2
+
+
 def with_gpu_layers(plan: Plan, layers: int) -> Plan:
     """Same plan at a different offload depth, with a truthful note."""
     note = plan.note
@@ -66,29 +77,89 @@ def with_gpu_layers(plan: Plan, layers: int) -> Plan:
     return replace(plan, gpu_layers=layers, note=note)
 
 
-def load_attempts(plan: Plan) -> list[tuple[Plan, str]]:
-    """Candidate plans for loading, most offload first, ending CPU-only."""
-    attempts: list[tuple[Plan, str]] = [(plan, "planned split")]
-    if plan.requires_server and plan.n_layers > 0:
-        # The server ladder moves one expert layer at a time to the CPU, which
-        # frees roughly 190-220 MB on the reference model. The last rung keeps
-        # every expert on the CPU instead of failing the load entirely.
-        rungs = (plan.moe_cpu_layers + 1, plan.moe_cpu_layers + 2, plan.n_layers)
-        for cpu_layers in dict.fromkeys(rungs):
-            if cpu_layers <= plan.moe_cpu_layers or cpu_layers > plan.n_layers:
-                continue
-            gpu_experts = plan.n_layers - cpu_layers
-            attempts.append(
-                (
-                    replace(
-                        plan,
-                        moe_cpu_layers=cpu_layers,
-                        note=f"MoE: {gpu_experts}/{plan.n_layers} expert layers on GPU",
-                    ),
-                    f"MoE, {gpu_experts}/{plan.n_layers} expert layers",
-                )
+def with_ffn_on_cpu(plan: Plan, n_cpu_ffn: int) -> Plan:
+    """Same tensor split with more dense-FFN blocks on the CPU, note updated."""
+    note = plan.note
+    if note.startswith("Tensor split: ") and plan.n_layers:
+        gpu_ffn = plan.n_layers - n_cpu_ffn
+        note = f"Tensor split: {gpu_ffn}/{plan.n_layers} dense FFN layers on GPU, attention on GPU"
+    return replace(plan, n_cpu_ffn=n_cpu_ffn, note=note)
+
+
+def _moe_probe_attempts(plan: Plan, steps: int) -> list[tuple[Plan, str]]:
+    """Expert placements more aggressive than the planner's own fit.
+
+    --n-cpu-moe counts the layers whose experts stay on the CPU, so a *smaller*
+    value means more experts on the GPU. These candidates are tried before the
+    planned split; the first one that loads wins and the rest are never spawned.
+    """
+    attempts: list[tuple[Plan, str]] = []
+    for step in range(steps, 0, -1):
+        cpu_layers = plan.moe_cpu_layers - step
+        if cpu_layers < 0:
+            continue
+        gpu_experts = plan.n_layers - cpu_layers
+        attempts.append(
+            (
+                replace(
+                    plan,
+                    moe_cpu_layers=cpu_layers,
+                    note=f"MoE: {gpu_experts}/{plan.n_layers} expert layers on GPU",
+                ),
+                f"MoE, {gpu_experts}/{plan.n_layers} expert layers (probed)",
             )
+        )
+    return attempts
+
+
+def load_attempts(plan: Plan, *, probe: bool = False) -> list[tuple[Plan, str]]:
+    """Candidate plans for loading, most offload first, ending CPU-only.
+
+    ``probe`` is for the server backend, the only one that can execute a
+    tensor-override plan: with it, a MoE plan first tries expert placements
+    *above* the planner's fit (see ``_moe_probe_attempts``) and keeps the most
+    aggressive one that loads. Without it the planned split is tried as given,
+    which is what the in-process engine needs.
+    """
+    attempts: list[tuple[Plan, str]] = []
+    if plan.requires_server and plan.n_layers > 0:
+        if probe and plan.moe_cpu_layers >= 0:
+            attempts.extend(_moe_probe_attempts(plan, _MOE_PROBE_STEPS))
+        attempts.append((plan, "planned split"))
+        # The server ladder moves one unit at a time in the safe direction: one
+        # expert layer (roughly 190-220 MB on the reference model) or one dense
+        # FFN block (131 MB) back to the CPU. The last rung moves everything, so
+        # the load lands somewhere rather than failing outright.
+        if plan.moe_cpu_layers >= 0:
+            rungs = (plan.moe_cpu_layers + 1, plan.moe_cpu_layers + 2, plan.n_layers)
+            for cpu_layers in dict.fromkeys(rungs):
+                if cpu_layers <= plan.moe_cpu_layers or cpu_layers > plan.n_layers:
+                    continue
+                gpu_experts = plan.n_layers - cpu_layers
+                attempts.append(
+                    (
+                        replace(
+                            plan,
+                            moe_cpu_layers=cpu_layers,
+                            note=f"MoE: {gpu_experts}/{plan.n_layers} expert layers on GPU",
+                        ),
+                        f"MoE, {gpu_experts}/{plan.n_layers} expert layers",
+                    )
+                )
+        elif plan.n_cpu_ffn >= 0:
+            rungs = (plan.n_cpu_ffn + 1, plan.n_cpu_ffn + 2, plan.n_layers)
+            for n_cpu_ffn in dict.fromkeys(rungs):
+                if n_cpu_ffn <= plan.n_cpu_ffn or n_cpu_ffn > plan.n_layers:
+                    continue
+                gpu_ffn = plan.n_layers - n_cpu_ffn
+                attempts.append(
+                    (
+                        with_ffn_on_cpu(plan, n_cpu_ffn),
+                        f"tensor split, {gpu_ffn}/{plan.n_layers} FFN layers on GPU",
+                    )
+                )
     else:
+        attempts.append((plan, "planned split"))
         hybrid_total = (
             plan.note.split("/", 1)[1].split()[0] if plan.note.startswith("Hybrid: ") else None
         )
@@ -97,8 +168,8 @@ def load_attempts(plan: Plan) -> list[tuple[Plan, str]]:
             attempts.append((with_gpu_layers(plan, layers), label))
 
     # CPU stages: keep the caller's context and KV type first, then reduce.
-    # Clearing the MoE fields matters: -ncmoe with -ngl 0 is not a valid
-    # CPU-only plan.
+    # Clearing the tensor-placement fields matters: -ncmoe or -ncffn with -ngl 0
+    # is not a valid CPU-only plan.
     cpu_plan = replace(
         plan,
         gpu_layers=0,
@@ -106,6 +177,7 @@ def load_attempts(plan: Plan) -> list[tuple[Plan, str]]:
         n_batch=min(plan.n_batch, 128),
         moe_cpu_layers=-1,
         n_ubatch=0,
+        n_cpu_ffn=-1,
     )
     reduced_plan = replace(cpu_plan, context=min(plan.context, 2048))
     safe_plan = replace(reduced_plan, kv_cache="f16", flash_attn=False)

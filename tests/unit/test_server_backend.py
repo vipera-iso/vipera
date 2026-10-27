@@ -625,3 +625,99 @@ def test_chat_sse_forwards_the_child_frames_unchanged(monkeypatch):
         b"".join(frames[3:]),
     ]
     assert raw.closed is True
+
+
+def test_start_passes_the_environment_to_the_child(monkeypatch, tmp_path):
+    captured = {}
+
+    def fake_popen(command, **kwargs):
+        captured.update(kwargs)
+        return _Proc()
+
+    monkeypatch.setattr(sb, "_free_port", lambda: 4321)
+    monkeypatch.setattr(sb.config, "LOGS_DIR", tmp_path)
+    monkeypatch.setattr(sb, "server_command", lambda *a, **k: ["/bin/llama-server"])
+    monkeypatch.setattr(sb.subprocess, "Popen", fake_popen)
+    monkeypatch.setattr(sb.ServerEngine, "_wait_ready", lambda self, proc, port: None)
+    monkeypatch.setattr(sb.ServerEngine, "_adopt_placement", lambda self, plan: plan)
+
+    engine = _engine()
+    engine._binary = "/bin/llama-server"
+    engine._model_path = "/m.gguf"
+    engine._fit_supported = False
+    engine._spec_type = "none"
+    engine._spec_type_supported = False
+    engine.supports_embeddings = False
+    engine.parallel = 1
+    engine._start(_plan(gpu_layers=17, n_layers=40, n_cpu_ffn=36))
+
+    assert captured["env"]["GGML_CUDA_DISABLE_GRAPHS"] == "1"
+    # The rest of the environment still reaches the child.
+    assert "PATH" in captured["env"]
+
+
+def test_supports_n_cpu_ffn_reads_the_binary_help(monkeypatch):
+    class _Result:
+        def __init__(self, text):
+            self.stdout = text
+            self.stderr = ""
+
+    monkeypatch.setattr(
+        sb.subprocess,
+        "run",
+        lambda *a, **kw: _Result("  -ncffn, --n-cpu-ffn N  keep dense FFN on CPU"),
+    )
+    assert sb.supports_n_cpu_ffn("/bin/llama-server") is True
+
+    monkeypatch.setattr(sb.subprocess, "run", lambda *a, **kw: _Result("  --n-cpu-ffn N  keep FFN"))
+    assert sb.supports_n_cpu_ffn("/bin/llama-server") is True
+
+    # -ncmoe is a different flag: a build with only that one cannot run a
+    # tensor split, and passing it would kill the child.
+    monkeypatch.setattr(sb.subprocess, "run", lambda *a, **kw: _Result("  -ncmoe N"))
+    assert sb.supports_n_cpu_ffn("/bin/llama-server") is False
+
+    def _boom(*a, **kw):
+        raise OSError("no such file")
+
+    monkeypatch.setattr(sb.subprocess, "run", _boom)
+    assert sb.supports_n_cpu_ffn("/bin/llama-server") is False
+
+
+def test_server_command_gives_a_tensor_split_the_full_layer_stack():
+    """-ncffn is a tensor override: -ngl has to leave every layer to llama.cpp.
+
+    Measured on the reference 4 GB card: -ngl 40 -ncffn 38 keeps all 40
+    attention blocks and 2 FFN blocks on the card and decodes 4.89 t/s with a
+    filled window, where the classic 17/40 split decodes 3.44 t/s.
+    """
+    plan = _plan(gpu_layers=17, n_layers=40, n_cpu_ffn=36)
+    command = sb.server_command("/bin/llama-server", "/m.gguf", plan, 1)
+
+    # llama.cpp counts the output layer past block_count: full stack is 41.
+    assert command[command.index("-ngl") + 1] == "41"
+    assert command[command.index("-ncffn") + 1] == "36"
+
+
+def test_server_command_has_no_ncffn_without_a_tensor_split():
+    command = sb.server_command("/bin/llama-server", "/m.gguf", _plan(gpu_layers=17), 1)
+    assert "-ncffn" not in command
+    assert command[command.index("-ngl") + 1] == "17"
+
+
+def test_tensor_split_plan_gives_up_cuda_graphs():
+    """Same reasoning as the classic hybrid: the budget went to placement.
+
+    Measured at a filled window: 4.97 t/s with capture on against 4.89 t/s with
+    it off, so the flag costs noise — and a plan that fills the budget cannot
+    promise the 780 MiB of headroom that measurement had.
+    """
+    plan = _plan(gpu_layers=17, n_layers=40, n_cpu_ffn=36)
+    assert sb.server_env(plan, base={})["GGML_CUDA_DISABLE_GRAPHS"] == "1"
+
+
+def test_every_ffn_block_on_the_gpu_is_not_a_hybrid_split():
+    # n_cpu_ffn=0 leaves llama.cpp nothing on the CPU side, so capture has a
+    # whole card to work with; the graphs stay.
+    plan = _plan(gpu_layers=41, n_layers=40, n_cpu_ffn=0)
+    assert "GGML_CUDA_DISABLE_GRAPHS" not in sb.server_env(plan, base={})

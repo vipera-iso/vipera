@@ -101,7 +101,17 @@ def _announce_plan(label: str, info: ModelSpec, p, backend: str) -> None:
         ("kv cache", f"{p.kv_cache}  {p.kv_cache_gb:.2f} GB" if p.kv_cache_gb > 0 else p.kv_cache),
         ("flash attn", "on" if p.flash_attn else "off"),
     ]
-    if p.requires_server:
+    if p.n_cpu_ffn >= 0:
+        # The tensor split puts every attention block on the card and keeps N
+        # layers' dense FFN in RAM, so the layer row above is about attention and
+        # this row is about the weights that stream. Reusing the MoE row here
+        # would read "41/40 expert layers": there are no experts in a dense plan.
+        gpu_ffn = p.n_layers - p.n_cpu_ffn
+        rows.insert(
+            4,
+            ("dense ffn", f"{gpu_ffn}/{p.n_layers} layers on GPU, attention on GPU"),
+        )
+    elif p.requires_server:
         gpu_experts = p.n_layers - p.moe_cpu_layers
         ubatch = f"  ubatch {p.n_ubatch}" if p.n_ubatch else ""
         rows.insert(4, ("moe experts", f"{gpu_experts}/{p.n_layers} layers{ubatch}"))

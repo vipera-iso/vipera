@@ -225,13 +225,14 @@ went from **37.81 t/s at 0/24 layers** to **51.90 t/s at 24/24 layers** with the
 `lowmem` config unchanged (the small difference from the table is the gateway's
 measured ubatch and its own prefill).
 
-### Rejected: per-tensor placement for dense models
+### Per-tensor placement for dense models: the arithmetic said no, the clock said yes
 
-`llama-server` b11827 accepts `-ot/--override-tensor`, which would let a plan
-keep every attention block and the whole KV cache on the GPU while leaving
-some FFN blocks in system RAM — a finer axis than `-ngl`. Measured off the GGUF
-itself for Hermes-4-14B Q3_K_M (attention 1 192 MiB over 40 layers, FFN
-4 856 MiB), the arithmetic says not to:
+`llama-server` b11827 accepts `-ot/--override-tensor` and `-ncffn/--n-cpu-ffn`,
+which let a plan keep every attention block and the whole KV cache on the GPU
+while leaving FFN blocks in system RAM — a finer axis than `-ngl`. This was
+rejected here **on arithmetic** before any code was written, and the arithmetic
+was wrong. The bytes, off the GGUF for Hermes-4-14B Q3_K_M (attention+
+norms 1 193 MiB over 40 layers, FFN 4 856 MiB, token_embd+output 927 MiB):
 
 | Context | Attention + all KV | Left for FFN | FFN layers on GPU | Today (`-ngl`) |
 |---|---:|---:|---:|---:|
@@ -239,9 +240,130 @@ itself for Hermes-4-14B Q3_K_M (attention 1 192 MiB over 40 layers, FFN
 | 32K, KV q4_0 | 2 599 MiB | 1 131 MiB | 9 | 16 |
 | 64K, KV q4_0 | 3 984 MiB | — | 0 | 18 at 32K, none at 64K |
 
-It loses at every context this card can hold, so the axis was rejected before
-any code was written. What remains for a dense model at 64K is a smaller KV
-cache, not a cleverer placement.
+Read as bytes, it loses at every context, and that is why it was dropped. The
+missing term is what the CPU *does* with those bytes: a layer left on the CPU
+runs attention over the whole window on four threads, and that cost grows with
+the window, while an FFN block streams the same 131.5 MiB per token no matter
+how long the history is. Trading 131.5 MiB of extra host traffic for the removal
+of one CPU attention block is therefore a win, and the measurement is not close:
+
+Hermes-4-14B Q3_K_M, `ctx 8192`, q8_0 KV, 3 750-token filled prompt:
+
+| Placement | CPU streams | decode | prefill | VRAM |
+|---|---:|---:|---:|---:|
+| Classic layers `-ngl 18` | 3 562 MiB/token | 3.44 t/s | 37.15 | 3 708 MiB |
+| Tensor split `-ngl 40 -ncffn 38` | 4 997 MiB/token | **4.89 t/s** (+42%) | 36.67 | 2 926 MiB |
+| Tensor split planned by Vipera `-ncffn 35` | 4 599 MiB/token | **5.38 t/s** (+56%) | 37.15 | 2 926 MiB |
+
+It also unlocks context the classic split cannot configure at all: at
+`ctx 16384` the 18/40 plan dies allocating a 578 MiB KV buffer, while the tensor
+split serves the same prompt at 4.99 t/s (`-ncffn 38`, 3 620 MiB resident).
+
+| Prompt | Classic 18/40 | Tensor split |
+|---|---:|---:|
+| 177 tokens | **6.34 t/s** | 5.51 t/s |
+| 1 840 tokens | 3.96 t/s | **5.22 t/s** |
+| 3 750 tokens | 3.44 t/s | **4.89 t/s** |
+
+The crossover sits between 177 and 1 840 tokens, which is why `planner.py` puts
+a floor of 4096 on the *configured* window before emitting `-ncffn`: below it
+the classic split is the better bet, and from 4K up the tensor split won every
+run. `--load-mode none` (a hint the loader prints for tensor overrides) is
+slower here — 4.37 against 4.89 t/s — so mmap stays. Graphs: 4.97 t/s with
+capture on against 4.89 with it off, i.e. noise, so a tensor split gives up
+capture (a plan that fills the budget cannot promise the 780 MiB of headroom
+that measurement had).
+
+### Placement strategy on a 4 GB card: what actually buys tokens per second
+
+Every number here is the reference GTX 1650 with the same harness (one request,
+48-96 generated tokens, `GGML_CUDA_DISABLE_GRAPHS=1` for hybrid splits), so the
+rows are comparable to each other.
+
+**1. Split by tensor type (dense).** +42 to +56% at a filled window, and it buys
+context as well: see the section above. This is what the planner now emits for a
+dense model that only partly fits, from `ctx 4096` up.
+
+**2. MoE expert placement is the big lever — 10 to 20x, not 40%.**
+LFM2.5-8B-A1B (24 blocks, 32 experts, 4 active, ~1B parameters per token):
+
+| Plan | ctx | decode | prefill | VRAM |
+|---|---:|---:|---:|---:|
+| dense 14B, classic 18/40 (for scale) | 8 192 | 3.96 t/s | 39.5 | 3 708 MiB |
+| `--cpu-moe` (every expert in RAM) | 32 768 | 41.22 t/s | 170.9 | **862 MiB** |
+| `--n-cpu-moe 12` | 32 768 | 58.64 t/s | 199.1 | 2 594 MiB |
+| `--n-cpu-moe 12` | 65 536 | 65.53 t/s | 201.9 | 2 888 MiB |
+| `--n-cpu-moe 12`, q4_0 KV | 131 072 | 65.45 t/s | 202.3 | 3 104 MiB |
+| `--n-cpu-moe 12`, 7 081-token prompt | 16 384 | 62.15 t/s | 212.9 | 2 476 MiB |
+| `--n-cpu-moe 8`, q8_0 KV | 131 072 | load fails (compute buffer, 408 MiB) | | |
+
+The mechanism is the same one the frontier section finds for dense models: what
+matters is bytes streamed per token, and a 4-of-32 expert routing moves ~1B
+parameters instead of 14B. Filling the window costs 5% (62.15 against 65.53), so
+context is nearly free here — and 128K fits with q4_0 KV.
+
+**3. The newest VRAM expert cache is a loss on this card.**
+`--moe-cache-mib` (llama.cpp's `moe-expert-cache`) keeps a persistent pool of
+hot experts in VRAM. On a card with a peer-to-peer/pinned copy path it reports
+double-digit gains; here it makes decode **3x slower**, 41.22 → 13.96 t/s, with
+512 MiB of cache, because every selected expert then crosses PCIe per token
+while "experts on the CPU" crosses nothing. Keep expert weights entirely on one
+side of the bus (`-ncmoe`), which is what the planner does.
+
+**4. Speculative decoding: one arm works, one is blocked.**
+
+| Arm | Result |
+|---|---|
+| `--spec-type ngram-simple` on a "rewrite this text" prompt | 4.03 → **6.94 t/s** (+72%), 50/50 drafts accepted, mean run 26 tokens |
+| `--spec-type ngram-mod` on fresh prose | 4.12 vs 4.03 t/s — nothing to match, no drafts |
+| Draft model Qwen2.5-0.5B at `-ngl 18` | fails to load: `cudaMalloc` 373 MiB |
+| Draft model at `-ngl 15` (fits) | refused: "target and draft vocabs are not compatible"; the child then runs **without** speculation at 3.78 t/s, slower than the 18/40 plan it replaced |
+
+Draft-model speculation needs a same-tokenizer draft *and* ~370 MiB of VRAM
+(about 2.3 target layers) on a card that has neither to spare. The n-gram
+drafter costs ~16 MB and no VRAM, which is why `spec_type` exposes only the
+n-gram values — and why it stays opt-in: +72% where the answer copies the
+prompt, nothing where it does not.
+
+**5. Reuse the prefix; do not re-prefill it.** Same 1 840-token prompt sent
+twice on one child with `cache_prompt`:
+
+| Request | Prefill | Wall |
+|---|---:|---:|
+| first | 46 597 ms / 1 840 tokens | 70.6 s |
+| second | **247 ms / 1 token** | 24.1 s |
+
+For a long-context session this is the largest lever of all, because it removes
+the cost rather than reducing it. `--cache-reuse` covers the case where the
+prefix shifts instead of repeating.
+
+**6. Things that do not help, with the numbers.**
+
+- **KV quantization buys capacity, not speed.** q4_0 KV is what makes 128K
+  context fit on the MoE model above, but it is not a decode lever: [measured
+  elsewhere](https://github.com/ggml-org/llama.cpp/discussions/20969) it costs
+  12% of decode at 24K and 37% at 110K to per-token dequantization.
+- **A lower-bit quant of a dense model is slower here.** Hermes-4-14B IQ3_XXS
+  (5.90 GB) at the largest split that loads (`-ngl 21`) decodes 2.92 t/s against
+  3.96 for the larger Q3_K_M at 18/40: CPU-side dequantization costs more than
+  the bytes saved. `-ngl 24` fails to load.
+- **CUDA graphs are worth nothing here** and can kill a hybrid plan mid-request;
+  the server backend turns them off for exactly that case.
+
+**What the planner does with this.** The per-tensor bytes it needs are written
+when a model is registered (`vipera model import` / `model add`), so a model
+registered before this change keeps the classic split until it is registered
+again — the planner cannot place by tensor type from a meta that lacks
+`attn_bytes` and `ffn_layer_bytes`. A dense model that only partly fits gets
+`n_cpu_ffn` (attention on the card, FFN filled from the last layer down) once the
+window reaches 4096, at most one FFN block fewer than the bytes allow and never
+zero; a MoE model gets `moe_cpu_layers`. The expert count is the one number the
+planner cannot derive from bytes alone, because it depends on a card's real
+overhead rather than on a formula: with `moe_probe` on (the default), the start
+path tries one and then two expert layers more on the GPU than the fit and keeps
+the most aggressive split that starts. On the reference card that is worth +6%:
+the fit put 17/24 expert layers on the GPU and 69.43 t/s, the probe found 19/24
+and 73.82 t/s on a 7 089-token prompt, at 32K with q8_0 KV.
 
 ### `auto` backend: the gateway vs its own child vs Ollama
 
@@ -389,6 +511,9 @@ vipera bench run <model> --ctx 8192,16384 --max-tokens 64
 - `llama.cpp` build and flags move throughput more than the gateway layer does.
 - Prompt-prefix reuse depends on `llama-cpp-python` 0.3.36+ and on the client
   resending an identical prefix; a cold process always pays full prefill.
-- MoE models are placed by the same per-layer arithmetic as dense models;
-  Vipera does not emit `--n-cpu-moe`-style expert placement flags yet, so an
-  expert-only GPU split is not planned for you.
+- Placement is arithmetic plus one probe. A dense model that only partly fits
+  keeps every attention block on the card and streams FFN blocks from
+  `ctx 4096` up (`n_cpu_ffn`); MoE models place routed experts on every profile.
+  The only number that is verified by loading instead of computed is the MoE
+  expert count (`moe_probe`). Both axes, with the numbers, are in
+  [placement strategy](#placement-strategy-on-a-4-gb-card-what-actually-buys-tokens-per-second).

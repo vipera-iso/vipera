@@ -32,11 +32,16 @@ class Plan:
     # min(n_batch, 512) behaviour.
     n_ubatch: int = 0
     n_layers: int = 0
+    # --n-cpu-ffn value: the first N layers keep their dense FFN on the CPU
+    # while every attention block (and the KV cache with it) stays on the card.
+    # -1 means "no tensor split". Like moe_cpu_layers, this is a server flag, so
+    # the classic gpu_layers field stays valid for the in-process fallback.
+    n_cpu_ffn: int = -1
 
     @property
     def requires_server(self) -> bool:
         """True when the plan needs llama-server flags the binding lacks."""
-        return self.moe_cpu_layers >= 0
+        return self.moe_cpu_layers >= 0 or self.n_cpu_ffn >= 0
 
 
 _VALID_PROFILES = ("auto", "cpu", "gpu", "lowmem")
@@ -283,6 +288,85 @@ def _moe_cpu_layers(
     return n_layers - gpu_layers
 
 
+# --- tensor-type split (dense models) ---------------------------------------
+#
+# `--n-cpu-ffn N` keeps the dense FFN of the FIRST N layers on the CPU and leaves
+# every attention block on the card, KV cache included. It is a tensor override,
+# so like `--n-cpu-moe` it is paired with a full `-ngl`: llama.cpp then streams
+# only FFN weights from system RAM.
+#
+# Measured on a GTX 1650 4 GB, Hermes-4-14B Q3_K_M (attention 1193 MiB over 40
+# layers, dense FFN 131.5 MiB per layer, token_embd+output 927 MiB), ctx 8192,
+# q8_0 KV, against the classic contiguous split that fits the same card (18/40):
+#   prompt  177 tokens: classic 6.34 t/s, tensor split 5.51 t/s
+#   prompt 1840 tokens: classic 3.96 t/s, tensor split 5.22 t/s
+#   prompt 3750 tokens: classic 3.44 t/s, tensor split 4.89 t/s
+#   ctx 16384, 3750:    classic fails (KV buffer cudaMalloc OOM),
+#                       tensor split 4.99 t/s
+# The classic split pays CPU-side attention that grows with the window, while the
+# tensor split's extra host bytes do not, so the crossover sits between 177 and
+# 1840 tokens of prompt. The floor below is on the *configured* window, which is
+# the only thing a plan knows: at 2048 the classic split is the better bet, and
+# from 4096 up the tensor split won every measurement.
+_TENSOR_SPLIT_MIN_CTX = 4096
+
+
+def _ffn_layer_sizes(meta: dict, n_layers: int) -> list[int] | None:
+    """Per-layer dense-FFN bytes, or None when the analyzer did not report them."""
+    sizes = meta.get("ffn_layer_bytes")
+    if not isinstance(sizes, list) or len(sizes) != n_layers:
+        return None
+    out = [max(0, int(value or 0)) for value in sizes]
+    return out if sum(out) > 0 else None
+
+
+def _tensor_split_ffn_layers(
+    meta: dict,
+    safe_vram_gb: float,
+    *,
+    n_layers: int,
+    ctx: int,
+    kv_gb: float,
+) -> int | None:
+    """The --n-cpu-ffn value for a dense model, or None when it does not apply.
+
+    Fills what the card has left after attention (and the whole KV cache, since
+    every attention block is on the card) with dense FFN blocks, counting from
+    the last layer because --n-cpu-ffn keeps the FIRST N on the CPU.
+
+    Returns None when the analyzer did not report the attention/FFN split, when
+    the model has routed experts (--n-cpu-ffn moves dense FFN only, and the MoE
+    path places experts better), when the context is below the measured
+    crossover, or when not a single FFN block fits beside attention.
+    """
+    if ctx < _TENSOR_SPLIT_MIN_CTX:
+        return None
+    if int(meta.get("expert_bytes") or 0) > 0:
+        return None
+    attn_bytes = int(meta.get("attn_bytes") or 0)
+    sizes = _ffn_layer_sizes(meta, n_layers)
+    if attn_bytes <= 0 or sizes is None:
+        return None
+    fixed_bytes = int(meta.get("fixed_bytes") or 0)
+    budget_bytes = int((safe_vram_gb - (attn_bytes + fixed_bytes) / 1024**3 - kv_gb) * 1024**3)
+    if budget_bytes <= 0:
+        return None
+
+    used = 0
+    gpu_ffn = 0
+    for size in reversed(sizes):
+        if used + size > budget_bytes:
+            break
+        used += size
+        gpu_ffn += 1
+    # At least one FFN block has to stay on the card: that is the configuration
+    # measured above, and "no FFN on the GPU at all" is just a slower spelling of
+    # the classic split.
+    if gpu_ffn <= 0:
+        return None
+    return n_layers - gpu_ffn
+
+
 def plan(
     meta: dict,
     hw: HardwareInfo,
@@ -401,6 +485,22 @@ def plan(
             moe_cpu_layers = candidate
             moe_ubatch = candidate_ubatch
 
+    # A dense model that does not fit can still keep every attention block (and
+    # therefore the whole KV cache) on the card and stream only FFN weights.
+    # Only when the classic split is already partial: a full offload has nothing
+    # left to improve, and a CPU-only plan has no card to split against.
+    n_cpu_ffn = -1
+    if want_gpu and 0 < gpu_layers < n_layers:
+        candidate_ffn = _tensor_split_ffn_layers(
+            meta,
+            safe_vram,
+            n_layers=n_layers,
+            ctx=ctx,
+            kv_gb=kv_cache_gb,
+        )
+        if candidate_ffn is not None:
+            n_cpu_ffn = candidate_ffn
+
     if gpu_layers == 0:
         offload_kqv = False
         n_batch = min(n_batch, 128)
@@ -427,12 +527,24 @@ def plan(
         note = "Full GPU" if gpu_layers == n_layers else f"Hybrid: {gpu_layers}/{n_layers} layers"
         if moe_cpu_layers >= 0:
             note = f"MoE: {n_layers - moe_cpu_layers}/{n_layers} expert layers on GPU"
+        if n_cpu_ffn >= 0:
+            note = (
+                f"Tensor split: {n_layers - n_cpu_ffn}/{n_layers} dense FFN layers "
+                "on GPU, attention on GPU"
+            )
 
     # mlock pins weights in RAM, so it is only safe when the machine can hold
     # the host-side weights AND the host-side KV cache with headroom. Checking
     # against model size alone ignores a 5 GB KV cache (Q8_0 at 64K), which
     # turns an mlock into an OOM on a 15 GB / no-swap box.
-    if moe_cpu_layers >= 0:
+    if n_cpu_ffn >= 0:
+        # Same shape of plan as the MoE one: attention (and with it the whole KV
+        # cache) is on the card, and the host keeps the FFN blocks of the CPU
+        # prefix.
+        sizes = _ffn_layer_sizes(meta, n_layers) or []
+        cpu_weights_gb = sum(sizes[:n_cpu_ffn]) / 1024**3
+        cpu_kv_gb = 0.0
+    elif moe_cpu_layers >= 0:
         # A MoE plan offloads every layer for its dense tensors, so all KV
         # lives on the GPU; only the routed experts of the CPU prefix remain
         # in system RAM.
@@ -468,4 +580,5 @@ def plan(
         # plan keeps the prefill batch it was budgeted for.
         n_ubatch=moe_ubatch if moe_cpu_layers >= 0 else dense_ubatch,
         n_layers=n_layers,
+        n_cpu_ffn=n_cpu_ffn,
     )

@@ -338,6 +338,15 @@ def analyze_gguf(path: str) -> dict[str, Any]:
     expert_bytes = 0
     shared_expert_bytes = 0
     expert_layer_bytes: dict[int, int] = defaultdict(int)
+    # What a tensor-type split needs (llama.cpp's --n-cpu-ffn): the bytes of a
+    # layer that always ride with attention (its attn block and norms, and the
+    # router/shared-expert tensors a MoE keeps active) versus the dense FFN
+    # block that --n-cpu-ffn can move to the CPU on its own. The flag's regex is
+    # `blk\.N\.ffn_(up|down|gate)\.`, so a shared expert (`ffn_gate_shexp`) is
+    # NOT movable and must not be counted as dense FFN here.
+    attn_layer_bytes: dict[int, int] = defaultdict(int)
+    ffn_layer_bytes: dict[int, int] = defaultdict(int)
+    fixed_bytes = 0
 
     for tensor in getattr(reader, "tensors", []):
         tensor_name = str(tensor.name)
@@ -369,6 +378,14 @@ def analyze_gguf(path: str) -> dict[str, Any]:
                 expert_layer_bytes[layer] += size
         elif "_shexp" in tensor_name:
             shared_expert_bytes += size
+        if layer is None:
+            # token_embd, output.weight and friends: resident either way, so
+            # they are charged once instead of to every layer.
+            fixed_bytes += size
+        elif category == "ffn" and "_shexp" not in tensor_name:
+            ffn_layer_bytes[layer] += size
+        else:
+            attn_layer_bytes[layer] += size
         if layer is not None:
             max_layer = max(max_layer, layer)
 
@@ -399,6 +416,7 @@ def analyze_gguf(path: str) -> dict[str, Any]:
     n_layers = max(0, min(n_layers, _MAX_LAYERS))
 
     expert_layer_sizes = [int(expert_layer_bytes.get(i, 0)) for i in range(n_layers)]
+    ffn_layer_sizes = [int(ffn_layer_bytes.get(i, 0)) for i in range(n_layers)]
 
     attention = _attention_profile([t["name"] for t in tensor_map], n_layers)
 
@@ -432,6 +450,13 @@ def analyze_gguf(path: str) -> dict[str, Any]:
             "shared_expert_bytes": shared_expert_bytes,
             "expert_layer_bytes": expert_layer_sizes,
             "expert_layers": sum(1 for value in expert_layer_sizes if value > 0),
+            # Split by tensor type for --n-cpu-ffn: the attention side (every
+            # attn_* tensor plus its norms) always rides with the layer, only
+            # the dense FFN block can be moved on its own, one layer at a time.
+            # `fixed_bytes` are the tensors outside every block.
+            "attn_bytes": sum(attn_layer_bytes.values()),
+            "ffn_layer_bytes": ffn_layer_sizes,
+            "fixed_bytes": fixed_bytes,
             **attention,
         },
         "tensor_map": tensor_map,

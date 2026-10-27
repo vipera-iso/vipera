@@ -160,10 +160,10 @@ def apply_tuning(
 ) -> Plan:
     """Return ``p`` with the measured layer split, or ``p`` unchanged.
 
-    Only the classic split is learned. A MoE plan's offload is ``-ncmoe``, which
-    the server backend derives from ``n_layers``/``moe_cpu_layers``; the
-    ``gpu_layers`` field is not what it uses, so a stored value would only look
-    applied.
+    Only the classic split is learned. A MoE plan's offload is ``-ncmoe`` and a
+    tensor split's is ``-ncffn``; the server backend derives both from
+    ``n_layers`` and the per-tensor field, so the ``gpu_layers`` a profile stores
+    is not what either plan uses and a stored value would only look applied.
     """
     if p.requires_server:
         return p

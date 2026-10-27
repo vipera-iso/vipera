@@ -66,6 +66,13 @@ DEFAULT_CONFIG = {
     # backend only; the in-process engine has no equivalent (llama-cpp-python's
     # prompt-lookup draft measured -29% decode on this box).
     "spec_type": "none",
+    # Try a more aggressive MoE expert placement before the planner's own fit
+    # and keep it if it loads: the fit comes from per-layer expert bytes plus a
+    # measured overhead constant, so a card whose real ceiling is higher ends up
+    # with expert layers in RAM that it could have computed. Costs up to two
+    # extra spawns per start, and a probed split sits closer to the graph/compute
+    # cliff than the planned one — turn it off to always start with the fit.
+    "moe_probe": True,
     # The optimization layer (vipera.optimize). `shaping` trims a request that
     # is larger than the loaded context instead of letting llama.cpp cut the
     # system prompt itself; `tuning` reuses the split a previous `vipera bench`
@@ -86,6 +93,7 @@ _FALSE_STRINGS = {"0", "false", "no", "off", ""}
 _TYPE_MAP = {
     "port": int,
     "embeddings": bool,
+    "moe_probe": bool,
     "ctx": int,
     "n_batch": int,
     "n_ubatch": int,

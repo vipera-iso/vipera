@@ -612,3 +612,35 @@ def test_start_rejects_an_unknown_alias_in_models(monkeypatch, isolated_home):
         )
 
     assert exc.value.exit_code == 1
+
+
+def test_announce_plan_reports_the_tensor_split_not_experts(capsys):
+    """A dense tensor split has no experts: the MoE row would read 41/40.
+
+    `requires_server` is true for both plans, so the banner has to branch on
+    which flag the plan carries.
+    """
+    p = _plan(
+        n_layers=40,
+        n_cpu_ffn=35,
+        note="Tensor split: 5/40 dense FFN layers on GPU, attention on GPU",
+    )
+
+    serve_cmd._announce_plan("m", _model(), p, "server")
+    out = capsys.readouterr().out
+
+    assert "dense ffn" in out
+    assert "5/40 layers on GPU, attention on GPU" in out
+    assert "expert" not in out.lower()
+    assert "41/40" not in out
+
+
+def test_announce_plan_still_reports_experts_for_a_moe_plan(capsys):
+    p = _plan(n_layers=24, gpu_layers=14, moe_cpu_layers=12, n_ubatch=896, note="MoE")
+
+    serve_cmd._announce_plan("m", _model(), p, "server")
+    out = capsys.readouterr().out
+
+    assert "moe experts" in out
+    assert "12/24 layers" in out
+    assert "dense ffn" not in out

@@ -482,3 +482,108 @@ def test_moe_plan_falls_back_when_non_expert_weights_do_not_fit():
     assert p.gpu_layers > 0
     assert p.moe_cpu_layers == -1
     assert p.requires_server is False
+
+
+# --- tensor-type split: attention on the GPU, dense FFN on the CPU ----------
+
+# Hermes-4-14B Q3_K_M as the analyzer reports it (measured on the reference
+# box): attention with its norms is ~17% of the file over 40 layers, dense FFN
+# ~70% (132 MiB per layer), and token_embd/output sit outside every block.
+_DENSE_SPLIT_META = {
+    "n_layers": 40,
+    "n_heads": 40,
+    "n_kv_heads": 8,
+    "head_dim": 128,
+    "size_bytes": int(6.82 * _GIB),
+    "attn_bytes": 1200 * 1024**2,
+    "ffn_layer_bytes": [132 * 1024**2] * 40,
+    "fixed_bytes": 900 * 1024**2,
+}
+
+
+def test_tensor_split_keeps_attention_on_the_gpu_and_fills_the_rest_with_ffn():
+    # Measured on the reference 4 GB card with a filled window: the classic
+    # split fits 17/40 layers and decodes 3.44 t/s, while this plan keeps every
+    # attention block (and the whole KV cache) on the card plus 4 FFN blocks and
+    # decoded 4.89 t/s.
+    hw = _hw(gpu_name="GTX 1650", vram_total_gb=4.0, vram_free_gb=3.64)
+    p = plan(_DENSE_SPLIT_META, hw, ctx=8192, kv_cache="q8_0")
+
+    # safe_vram 3.227 GB - attention 1.172 - fixed 0.879 - KV 0.625 = 0.551 GB,
+    # which holds 4 x 132 MiB of FFN and not 5.
+    assert p.n_cpu_ffn == 36
+    assert p.requires_server is True
+    assert p.note == "Tensor split: 4/40 dense FFN layers on GPU, attention on GPU"
+    # The classic field still describes what an in-process fallback would load.
+    assert p.gpu_layers == 17
+
+
+def test_tensor_split_is_skipped_below_the_measured_crossover():
+    # At 177 tokens of prompt the classic split decoded 6.34 t/s against 5.51
+    # for the tensor split; the crossover sits between 177 and 1840 tokens, so a
+    # plan for a small window keeps to whole layers.
+    hw = _hw(gpu_name="GTX 1650", vram_total_gb=4.0, vram_free_gb=3.64)
+    p = plan(_DENSE_SPLIT_META, hw, ctx=2048, kv_cache="q8_0")
+
+    assert p.n_cpu_ffn == -1
+    assert p.requires_server is False
+    assert p.note.startswith("Hybrid: ")
+
+
+def test_tensor_split_needs_the_analyzer_split_in_metadata():
+    # Without per-tensor bytes there is no way to know what fits beside
+    # attention; the planner must fall back to whole layers rather than guess.
+    hw = _hw(gpu_name="GTX 1650", vram_total_gb=4.0, vram_free_gb=3.64)
+
+    for missing in ("attn_bytes", "ffn_layer_bytes"):
+        meta = {key: value for key, value in _DENSE_SPLIT_META.items() if key != missing}
+        p = plan(meta, hw, ctx=8192, kv_cache="q8_0")
+        assert p.n_cpu_ffn == -1, missing
+        assert p.note.startswith("Hybrid: "), missing
+
+    # A short per-layer list is a stale analysis, not a model with no FFN.
+    p = plan(dict(_DENSE_SPLIT_META, ffn_layer_bytes=[132 * 1024**2] * 12), hw, ctx=8192)
+    assert p.n_cpu_ffn == -1
+
+
+def test_tensor_split_gives_up_when_attention_itself_does_not_fit():
+    # No FFN block fits beside a 3 GB attention side, and "no FFN on the card"
+    # is just a slower spelling of the classic split.
+    meta = dict(_DENSE_SPLIT_META, attn_bytes=3 * _GIB)
+    hw = _hw(gpu_name="GTX 1650", vram_total_gb=4.0, vram_free_gb=3.64)
+    p = plan(meta, hw, ctx=8192, kv_cache="q8_0")
+
+    assert p.n_cpu_ffn == -1
+
+
+def test_tensor_split_stays_out_of_moe_models():
+    # -ncffn moves dense FFN only; routed experts belong to --n-cpu-moe, which
+    # measured 58.6 t/s against 41.2 for "all experts on the CPU" on the same
+    # card. A MoE model must not get both flags.
+    meta = dict(
+        _LFM_MOE_META,
+        attn_bytes=400 * 1024**2,
+        ffn_layer_bytes=[12 * 1024**2] * 24,
+        fixed_bytes=205 * 1024**2,
+    )
+    hw = _hw(gpu_name="GTX 1650", vram_total_gb=4.0, vram_free_gb=3.64)
+    p = plan(meta, hw, ctx=65536, kv_cache="q4_0")
+
+    assert p.moe_cpu_layers == 12
+    assert p.n_cpu_ffn == -1
+
+
+def test_tensor_split_ram_estimate_charges_only_the_cpu_ffn_blocks():
+    # Attention and the KV cache are on the card, so the host side is the FFN
+    # blocks of the prefix plus compute headroom -- not the whole model.
+    hw = _hw(
+        gpu_name="GTX 1650",
+        vram_total_gb=4.0,
+        vram_free_gb=3.64,
+        ram_total_gb=15.4,
+        ram_free_gb=10.6,
+    )
+    p = plan(_DENSE_SPLIT_META, hw, ctx=8192, kv_cache="q8_0")
+
+    assert p.n_cpu_ffn == 36
+    assert p.ram_estimate_gb == pytest.approx(36 * 132 / 1024 + 2.0, abs=0.02)

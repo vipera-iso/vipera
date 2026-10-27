@@ -579,3 +579,49 @@ def test_head_count_kv_array_skips_zero_layers(tmp_path):
     meta = analyze_gguf(str(path))["metadata"]
 
     assert meta["n_kv_heads"] == 8
+
+
+class FakeDenseReader(FakeReader):
+    """One layer with attention, dense FFN, a router and a shared expert."""
+
+    def __init__(self):
+        super().__init__()
+        self.fields["llama.block_count"] = FakeField(1)
+        self.tensors = [
+            FakeTensor("token_embd.weight", 1, [128, 100], 500, 12_800),
+            FakeTensor("output.weight", 1, [128, 100], 400, 12_800),
+            FakeTensor("blk.0.attn_q.weight", 12, [128, 128], 100, 16_384),
+            FakeTensor("blk.0.attn_norm.weight", 0, [128], 20, 128),
+            FakeTensor("blk.0.ffn_norm.weight", 0, [128], 20, 128),
+            FakeTensor("blk.0.ffn_gate.weight", 12, [128, 256], 200, 32_768),
+            FakeTensor("blk.0.ffn_up.weight", 12, [128, 256], 210, 32_768),
+            FakeTensor("blk.0.ffn_down.weight", 14, [128, 256], 220, 32_768),
+            FakeTensor("blk.0.ffn_gate_shexp.weight", 1, [128, 256], 60, 32_768),
+            FakeTensor("blk.0.ffn_gate_inp.weight", 1, [128, 4], 10, 512),
+        ]
+
+
+@pytest.fixture
+def mocked_dense_gguf(monkeypatch):
+    reader = FakeDenseReader()
+    module = types.ModuleType("gguf")
+    module.GGUFReader = lambda path: reader
+    monkeypatch.setitem(sys.modules, "gguf", module)
+    return reader
+
+
+def test_analyze_splits_attention_from_the_movable_dense_ffn(tmp_path, mocked_dense_gguf):
+    """--n-cpu-ffn moves `blk.N.ffn_(up|down|gate).` and nothing else.
+
+    The router and a shared expert run for every token, so they travel with
+    attention: counting them as dense FFN would promise an offload the flag
+    cannot perform and overstate what the host has to hold.
+    """
+    path = tmp_path / "dense.gguf"
+    path.write_bytes(b"")
+
+    meta = analyze_gguf(str(path))["metadata"]
+
+    assert meta["ffn_layer_bytes"] == [200 + 210 + 220]
+    assert meta["attn_bytes"] == 100 + 20 + 20 + 60 + 10
+    assert meta["fixed_bytes"] == 500 + 400

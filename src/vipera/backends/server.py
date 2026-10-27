@@ -16,12 +16,13 @@ from __future__ import annotations
 import atexit
 import contextlib
 import json
+import os
 import socket
 import subprocess
 import time
 import urllib.error
 import urllib.request
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping
 from dataclasses import replace
 from pathlib import Path
 from typing import Any, BinaryIO
@@ -115,6 +116,21 @@ def supports_n_cpu_moe(binary: str) -> bool:
         return False
     help_text = f"{probe.stdout}{probe.stderr}"
     return "-ncmoe" in help_text or "--n-cpu-moe" in help_text
+
+
+def supports_n_cpu_ffn(binary: str) -> bool:
+    """Whether this llama-server knows `-ncffn` / `--n-cpu-ffn`.
+
+    Same contract as `supports_n_cpu_moe`: the planner must know before
+    choosing the server backend, because a build without the flag exits after
+    allocating the model and the child would never serve a request.
+    """
+    try:
+        probe = subprocess.run([binary, "--help"], capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.SubprocessError):
+        return False
+    help_text = f"{probe.stdout}{probe.stderr}"
+    return "-ncffn" in help_text or "--n-cpu-ffn" in help_text
 
 
 def probe_devices(binary: str) -> str | None:
@@ -220,12 +236,12 @@ def server_command(
     fresh prose — the n-gram drafter only pays where the output repeats the
     input, and costs a hash lookup where it does not.
     """
-    # A MoE plan keeps every layer on the GPU for its dense tensors and moves
-    # only routed experts with -ncmoe. That means -ngl is the full stack, not
-    # the classic gpu_layers value (which exists for the in-process fallback).
-    gpu_layers = (
-        plan.n_layers if plan.moe_cpu_layers >= 0 and plan.n_layers > 0 else plan.gpu_layers
-    )
+    # A tensor-override plan (-ncmoe, -ncffn) keeps every layer on the GPU and
+    # moves only the tensors named by the flag, so -ngl is the full stack rather
+    # than the classic gpu_layers value (which exists for the in-process
+    # fallback).
+    tensor_placement = plan.moe_cpu_layers >= 0 or plan.n_cpu_ffn >= 0
+    gpu_layers = plan.n_layers if tensor_placement and plan.n_layers > 0 else plan.gpu_layers
     # llama.cpp counts the output layer as one group past the GGUF's
     # block_count, so "everything on the GPU" is n_layers + 1. Measured on
     # qwen2.5-0.5B Q4_K_M (24 blocks, GTX 1650): -ngl 24 offloaded 24/25 and
@@ -274,6 +290,12 @@ def server_command(
         command.extend(["-fit", "off"])
     if plan.moe_cpu_layers >= 0:
         command.extend(["-ncmoe", str(plan.moe_cpu_layers)])
+    # -ncffn moves the dense FFN of the first N layers, leaving attention (and
+    # its KV cache) on the card. Registry.resolve_backend only keeps a plan with
+    # n_cpu_ffn set on the server backend when the binary has the flag, so this
+    # is not probed again per spawn.
+    if plan.n_cpu_ffn >= 0:
+        command.extend(["-ncffn", str(plan.n_cpu_ffn)])
     if spec_type and spec_type != "none":
         supported = (
             supports_spec_type(binary) if spec_type_supported is None else spec_type_supported
@@ -297,6 +319,34 @@ def server_command(
             # embeddings; a dedicated embedding GGUF would prefer cls.
             command.extend(["--embeddings", "--pooling", "mean"])
     return command
+
+
+_GRAPHS_ENV = "GGML_CUDA_DISABLE_GRAPHS"
+
+
+def server_env(plan: Plan, base: Mapping[str, str] | None = None) -> dict[str, str]:
+    """Environment for the llama-server child, not for this process.
+
+    CUDA graph capture asks for extra device memory on top of the weights and
+    the KV cache, and it does so per shape: a plan picked from "did it load"
+    passes health checks at a few hundred tokens of context and then takes the
+    whole server down with `cudaGraphInstantiate` OOM as soon as a long prompt
+    arrives.
+
+    A tensor split (--n-cpu-ffn) is exactly that kind of plan: the budget went
+    to placing every attention block, so what is left for capture is whatever
+    the FFN blocks did not take. Measured on the reference 4 GB card, a tensor
+    split at 3750 tokens decoded 4.97 t/s with capture on against 4.89 t/s with
+    it off — capture won there because that plan happened to leave 780 MiB free,
+    which a plan that fills the budget cannot promise. Since the flag is worth
+    noise either way, a tensor split gives it up. An explicit value from the
+    caller wins.
+    """
+    env = dict(os.environ if base is None else base)
+    tensor_hybrid = plan.n_cpu_ffn >= 0 and 0 < plan.n_cpu_ffn < plan.n_layers
+    if tensor_hybrid:
+        env.setdefault(_GRAPHS_ENV, "1")
+    return env
 
 
 class _SseStream:
@@ -384,19 +434,29 @@ class ServerEngine:
         # Same staged fallback as the in-process engine: walk the offload down
         # before giving up the placement entirely, because CPU-only is the
         # slowest outcome and a one-layer-too-optimistic plan pays a few
-        # seconds for the retry instead of the whole run.
+        # seconds for the retry instead of the whole run. With `moe_probe` on,
+        # a MoE plan tries a more aggressive expert placement first and keeps it
+        # only if it starts: the fit the planner computed is a floor on what the
+        # card can take, not a measurement (see loading.load_attempts).
+        probe = bool(cfg.get("moe_probe", True))
         last_exc: Exception | None = None
-        for i, (candidate, label) in enumerate(load_attempts(plan)):
+        fell_back = False
+        for candidate, label in load_attempts(plan, probe=probe):
             try:
                 self._start(candidate)
-                if i > 0:
-                    print(
-                        f"\n[!] Warning: llama-server failed to start with the planned "
-                        f"split; serving {label}."
-                    )
-                break
             except RuntimeError as exc:
                 last_exc = exc
+                fell_back = True
+                continue
+            if candidate != plan:
+                if fell_back:
+                    print(
+                        "\n[!] Warning: llama-server failed to start with the planned "
+                        f"split; serving {label}."
+                    )
+                else:
+                    print(f"\n[i] llama-server started with {label}.")
+            break
         else:
             raise RuntimeError(
                 f"llama-server failed to start on GPU and CPU: {last_exc}"
@@ -429,6 +489,7 @@ class ServerEngine:
                 stdin=subprocess.DEVNULL,
                 stdout=handle,
                 stderr=subprocess.STDOUT,
+                env=server_env(plan),
             )
         except OSError as exc:
             handle.close()
