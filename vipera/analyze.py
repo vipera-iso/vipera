@@ -75,6 +75,59 @@ class Inventory:
         return self.resident_bytes + self.router_bytes + self.shared_expert_bytes + self.other_bytes
 
 
+# Block-quantized KV types do not cost one byte per element: q8_0 packs 32 values
+# into 34 bytes. Counting the nominal width would under-report the cache by 6%,
+# which is the same order as the headroom this budget is meant to protect.
+KV_BYTES_PER_ELEMENT = {
+    "f32": 4.0,
+    "f16": 2.0,
+    "bf16": 2.0,
+    "q8_0": 34 / 32,
+    "q5_1": 24 / 32,
+    "q5_0": 22 / 32,
+    "q4_1": 20 / 32,
+    "q4_0": 18 / 32,
+    "iq4_nl": 18 / 32,
+}
+
+
+def kv_cache_bytes(gguf: GGUF, context: int, *, kv_type: str = "f16") -> int | None:
+    """Bytes the KV cache needs for `context` tokens, read off the GGUF header.
+
+    Returns None when the header does not describe the cache — MLA checkpoints
+    keep a latent cache instead of per-head K/V, and a guessed number would be
+    worse than none, because the caller budgets RAM with it. Validated against
+    llama.cpp on OLMoE-1B-7B Q4_K_M: 512 MiB at 4096 tokens, which is the size
+    the runtime logs for the same file.
+    """
+    arch = gguf.architecture
+    md = gguf.metadata
+    if not arch or context <= 0:
+        return None
+    per_element = KV_BYTES_PER_ELEMENT.get(kv_type)
+    n_layer = md.get(f"{arch}.block_count")
+    heads_kv = md.get(f"{arch}.attention.head_count_kv")
+    key_len = md.get(f"{arch}.attention.key_length")
+    value_len = md.get(f"{arch}.attention.value_length") or key_len
+    if key_len is None:
+        n_embd = md.get(f"{arch}.embedding_length")
+        head_count = md.get(f"{arch}.attention.head_count")
+        if isinstance(n_embd, int) and isinstance(head_count, int) and head_count > 0:
+            key_len = value_len = n_embd // head_count
+    if per_element is None or not isinstance(n_layer, int):
+        return None
+    if isinstance(heads_kv, int):
+        heads = [heads_kv] * n_layer
+    elif isinstance(heads_kv, list):
+        heads = [h for h in heads_kv if isinstance(h, int)]
+    else:
+        return None
+    if not isinstance(key_len, int) or not isinstance(value_len, int):
+        return None
+    per_token = sum(h * (key_len + value_len) for h in heads)
+    return int(per_token * per_element * context)
+
+
 def _block_count(gguf: GGUF) -> int | None:
     arch = gguf.architecture
     if arch:

@@ -86,12 +86,25 @@ class Plan:
         return self.fits
 
 
-def plan(inv: Inventory, target: Target) -> Plan:
+def plan(inv: Inventory, target: Target, *, kv_bytes: int = 0) -> Plan:
     warnings: list[str] = []
 
     always = inv.always_resident_bytes
     vram = target.usable_vram
     ram = target.usable_ram
+
+    # The KV cache is not weight placement, but it is RAM the weights cannot use.
+    # Budgeting it here is what stops a plan from calling a model "resident" when
+    # the context the caller asked for is what makes it page: on this machine the
+    # same 4.2 GiB model decodes at 49.4 t/s with a short cache and 14.5 t/s at
+    # ~2.9k cached tokens, so a KV that does not fit is a throughput question.
+    kv = max(0, kv_bytes)
+    if kv > ram:
+        warnings.append(
+            f"the KV cache ({kv / MIB:.0f} MiB) alone exceeds usable RAM "
+            f"({ram / MIB:.0f} MiB); the requested context cannot be held beside the weights"
+        )
+    ram = max(0, ram - kv)
 
     fits = always <= vram + ram
     if not fits:
@@ -169,7 +182,7 @@ def plan(inv: Inventory, target: Target) -> Plan:
             "expert_order": "uniform",
             "expert_order_pending_trace": True,
         },
-        "kv_cache": {"type_k": "q8_0", "type_v": "q8_0"},
+        "kv_cache": {"type_k": "q8_0", "type_v": "q8_0", "bytes": kv},
     }
 
     return Plan(manifest=manifest, warnings=warnings, fits=fits)

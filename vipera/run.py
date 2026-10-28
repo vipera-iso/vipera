@@ -17,6 +17,8 @@ The mapping from manifest to flags is deliberately small:
     expert cache in VRAM               --moe-cache-mib <expert_cache_vram_mb>
     attention / resident weights       -ngl <n_layers>
     kv_cache.type_k / type_v           -ctk / -ctv
+    kv_cache quantized                 -fa on   (llama.cpp needs it for a quantized cache)
+    CPU build, model fits, no AMX      -nr      (measured +37-43% prompt processing)
 
 There is no per-expert disk streaming in llama.cpp, so a plan with experts
 spilled to disk is reported as unmappable rather than silently approximated.
@@ -32,6 +34,9 @@ import subprocess
 import threading
 import time
 from dataclasses import dataclass, field
+
+from .analyze import kv_cache_bytes
+from .launch import read_available_ram_bytes
 
 MIB = 1024 * 1024
 
@@ -66,6 +71,11 @@ class RunFlags:
     moe_cache_mib: int | None = None
     cache_type_k: str | None = None
     cache_type_v: str | None = None
+    # `-fa`: llama.cpp requires Flash Attention for a quantized KV cache. Current
+    # builds flip it on themselves when the type is quantized, but that is a
+    # default rather than a contract, and relying on it makes `--cache-type-v q8_0`
+    # a load error on any build that does not.
+    flash_attn: str | None = None
     # `-lm` load mode chosen by `vipera.launch` (mmap / mlock / dio). None means
     # "leave llama.cpp at its own default", which is what the comparison baseline does.
     load_mode: str | None = None
@@ -141,7 +151,29 @@ def supports_prefetch(binary: str) -> bool:
     )
 
 
-def plan_flags(manifest: dict, *, gpu: bool, n_layers: int | None = None) -> RunFlags:
+def host_cpu_flags(path: str = "/proc/cpuinfo") -> set[str]:
+    """CPU feature flags from /proc/cpuinfo; empty when it cannot be read."""
+    try:
+        with open(path) as f:
+            for line in f:
+                if line.startswith("flags"):
+                    return set(line.split(":", 1)[1].split())
+    except OSError:
+        pass
+    return set()
+
+
+def _quantized(t: str | None) -> bool:
+    return t is not None and t not in ("f32", "f16", "bf16")
+
+
+def plan_flags(
+    manifest: dict,
+    *,
+    gpu: bool,
+    n_layers: int | None = None,
+    cpu_flags: set[str] | None = None,
+) -> RunFlags:
     """Translate a residency manifest into llama.cpp flags.
 
     `n_layers` is taken from the live model when known (more reliable than the
@@ -196,10 +228,76 @@ def plan_flags(manifest: dict, *, gpu: bool, n_layers: int | None = None) -> Run
             "hit rate does not describe"
         )
 
+    elif not gpu:
+        # Repacking is a CPU *speed* feature, and on this machine it costs 37-43%
+        # of prompt processing while leaving generation unchanged (FINDINGS §Round 6,
+        # two models). It is skipped only where it cannot pay: a GPU build still
+        # runs experts on the CPU, and AMX/KleidiAI machines have their own reason
+        # to keep it, so neither is touched here.
+        when = cpu_flags if cpu_flags is not None else host_cpu_flags()
+        # Empty means the flags could not be read (or this is not x86, where the
+        # line is spelled differently and KleidiAI may be in play), so keep the
+        # build's own kernels rather than guessing.
+        if when and "amx_tile" not in when:
+            flags.no_repack = True
+            warnings.append(
+                "-nr is set: repacking measured +37-43% prompt processing and no "
+                "change to generation on a CPU without AMX; it is skipped so the "
+                "build's own CPU kernels stay enabled"
+            )
+
     kv = manifest.get("kv_cache") or {}
     flags.cache_type_k = kv.get("type_k")
     flags.cache_type_v = kv.get("type_v")
+    if _quantized(flags.cache_type_k) or _quantized(flags.cache_type_v):
+        flags.flash_attn = "on"
     return flags
+
+
+DEFAULT_KV_HEADROOM_BYTES = 512 * MIB
+
+
+def fit_context(
+    gguf,
+    *,
+    model_bytes: int,
+    requested: int,
+    kv_type: str = "f16",
+    available_bytes: int | None = None,
+    headroom_bytes: int = DEFAULT_KV_HEADROOM_BYTES,
+) -> tuple[int, list[str]]:
+    """Largest context within `requested` whose KV cache still fits beside the model.
+
+    Clamps, never raises: a caller that asked for 2048 does not want 8192 because
+    the machine has room. Returns (context, warnings); the warning names both
+    numbers, so a clamped run says so instead of quietly getting a different
+    context than it asked for.
+    """
+    warnings: list[str] = []
+    if requested <= 0:
+        return requested, warnings
+    per_token = kv_cache_bytes(gguf, 1, kv_type=kv_type)
+    if not per_token:
+        return requested, warnings
+    available = available_bytes if available_bytes is not None else read_available_ram_bytes()
+    if available is None:
+        return requested, warnings
+    budget = available - model_bytes - headroom_bytes
+    if budget <= 0:
+        warnings.append(
+            f"no RAM is left beside the model ({model_bytes / MIB:.0f} MiB) for a KV "
+            "cache; the requested context is passed through unclamped and will page"
+        )
+        return requested, warnings
+    cap = budget // per_token
+    if requested > cap:
+        warnings.append(
+            f"requested context {requested} needs {per_token * requested / MIB:.0f} MiB "
+            f"of KV at {kv_type}, but only {budget / MIB:.0f} MiB is free beside the "
+            f"model; clamping to {cap} tokens"
+        )
+        return cap, warnings
+    return requested, warnings
 
 
 def build_command(
@@ -238,6 +336,8 @@ def build_command(
         cmd += ["-ctk", flags.cache_type_k]
     if flags.cache_type_v:
         cmd += ["-ctv", flags.cache_type_v]
+    if flags.flash_attn:
+        cmd += ["-fa", flags.flash_attn]
     if flags.load_mode:
         cmd += ["-lm", flags.load_mode]
     if flags.n_keep is not None:
@@ -424,6 +524,8 @@ def format_report(report: dict, *, flags: RunFlags, manifest_source: str) -> str
         mapping.append(f"--moe-cache-mib {flags.moe_cache_mib}")
     if flags.cache_type_k or flags.cache_type_v:
         mapping.append(f"-ctk {flags.cache_type_k or '?'} -ctv {flags.cache_type_v or '?'}")
+    if flags.flash_attn:
+        mapping.append(f"-fa {flags.flash_attn}")
     if flags.load_mode:
         mapping.append(f"-lm {flags.load_mode}")
     if flags.n_keep is not None:

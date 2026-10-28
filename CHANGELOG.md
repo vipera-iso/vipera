@@ -85,6 +85,16 @@ this project intends to follow [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
+- **The KV cache is budgeted instead of ignored** — `plan` now subtracts the cache
+  for a requested context from usable RAM (`--context` on `plan`; `analyze.kv_cache_bytes`
+  reads the size off the GGUF header, and reproduces llama.cpp's own 512 MiB at 4096
+  tokens for OLMoE-1B-7B Q4_K_M). `vipera run` clamps `-c` to the cache that fits
+  beside the model and says both numbers when it does.
+- **`run` emits `-fa on` whenever the KV type is quantized**, instead of relying on
+  llama.cpp's `auto` default to notice.
+- **`run` skips weight repacking (`-nr`) on a CPU-only build without AMX**, where it
+  measured +37–43% prompt processing at unchanged generation; GPU builds and
+  AMX/KleidiAI machines keep the default.
 - **Model and machine constants are now measured** rather than assumed
   (`bench/hwprobe.c`), including the disk bandwidth that drives every
   disk-bound verdict.

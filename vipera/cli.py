@@ -19,7 +19,7 @@ import tempfile
 import tomllib
 
 from . import __version__
-from .analyze import analyze, to_dict
+from .analyze import analyze, kv_cache_bytes, to_dict
 from .arch import Architecture
 from .gguf import GGUFError, read_gguf
 from .gguf_write import expert_order, rewrite_experts
@@ -44,6 +44,7 @@ from .prefetch import build_table as build_prefetch_table, write_table as write_
 from .run import (
     PREFETCH_ENV,
     build_command,
+    fit_context,
     compare as compare_runs,
     default_binary,
     detect_gpu_backend,
@@ -103,7 +104,11 @@ def cmd_plan(args: argparse.Namespace) -> int:
     gguf = read_gguf(args.model)
     inv = analyze(gguf)
     target = Target.from_toml(args.target)
-    result = plan(inv, target)
+    ctx = args.context or 0
+    # `plan` writes q8_0 KV into the manifest, so the budget has to price that type
+    # rather than a nominal 1 byte per element.
+    kv_bytes = kv_cache_bytes(gguf, ctx, kv_type="q8_0") or 0
+    result = plan(inv, target, kv_bytes=kv_bytes)
 
     if args.out:
         os.makedirs(args.out, exist_ok=True)
@@ -533,12 +538,26 @@ def cmd_run(args: argparse.Namespace) -> int:
     if args.manifest:
         manifest = load_manifest(args.manifest)
         manifest_source = args.manifest
+        kv_type = (manifest.get("kv_cache") or {}).get("type_v") or "f16"
     else:
         if not args.target:
             print("error: `run` needs --target or --manifest", file=sys.stderr)
             return 2
         target = Target.from_toml(args.target)
-        result = plan(inv, target)
+        kv_type = "q8_0"  # what plan() writes into the manifest
+
+    # `-c` decides whether a model still runs: the KV cache grows with it and
+    # competes with the weights for the same RAM. Clamp first, then plan, so the
+    # manifest budgets the context that will actually be allocated.
+    context, context_warnings = fit_context(
+        gguf, model_bytes=os.path.getsize(args.model),
+        requested=args.context, kv_type=kv_type,
+    )
+    for w in context_warnings:
+        print(f"warning: {w}", file=sys.stderr)
+
+    if not args.manifest:
+        result = plan(inv, target, kv_bytes=kv_cache_bytes(gguf, context, kv_type=kv_type) or 0)
         manifest = result.manifest
         manifest_source = f"computed from {os.path.basename(args.model)} + {target.name}"
         for w in result.warnings:
@@ -575,7 +594,7 @@ def cmd_run(args: argparse.Namespace) -> int:
 
     cmd = build_command(
         binary, args.model, flags,
-        context=args.context, n_predict=args.n_predict, prompt=args.prompt,
+        context=context, n_predict=args.n_predict, prompt=args.prompt,
         threads=threads, extra=args.llama_args or None,
         prefetch=bool(prefetch_env),
     )
@@ -592,7 +611,7 @@ def cmd_run(args: argparse.Namespace) -> int:
     if args.compare:
         report = compare_runs(
             binary, args.model, flags,
-            context=args.context, n_predict=args.n_predict, prompt=args.prompt,
+            context=context, n_predict=args.n_predict, prompt=args.prompt,
             threads=threads, extra=args.llama_args or None, timeout=args.timeout,
             extra_env=prefetch_env or None,
         )
@@ -603,7 +622,7 @@ def cmd_run(args: argparse.Namespace) -> int:
     else:
         report = run_model(
             binary, args.model, flags,
-            context=args.context, n_predict=args.n_predict, prompt=args.prompt,
+            context=context, n_predict=args.n_predict, prompt=args.prompt,
             threads=threads, extra=args.llama_args or None, timeout=args.timeout,
             extra_env=prefetch_env or None,
         )
@@ -674,6 +693,8 @@ def build_parser() -> argparse.ArgumentParser:
     pl.add_argument("model")
     pl.add_argument("--target", required=True, help="hardware profile (TOML)")
     pl.add_argument("--out", help="directory to write <model>.vipera.json into")
+    pl.add_argument("--context", type=int, default=0,
+                    help="budget the KV cache for this many tokens (0 = weights only)")
     pl.set_defaults(func=cmd_plan)
 
     ar = sub.add_parser("arch", help="report a model architecture and its calibration")
