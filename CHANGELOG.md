@@ -5,9 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [1.4.0] - 2026-10-28
 
 ### Added
+- **`planner/` — the optimization layer, now in this repository.** The planner
+  lineage (model and hardware measurement, the residency manifest, the KV cache
+  budget, the expert-cache simulation and its benchmarks) was a separate tree;
+  it now lives under `planner/` with its own `pyproject.toml`, so it keeps its
+  tests and bench data without changing how the gateway is packaged. It is a
+  separate distribution: both provide the import name `vipera`, so they need
+  separate virtualenvs until one is renamed.
 - **The gateway can require an API key, and can answer CORS.** Both are opt-in
   (`api_key`, `cors`), so an upgrade keeps serving exactly as before. With a key
   set, every route except `/health` needs `Authorization: Bearer <key>` (or a
@@ -38,7 +45,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `system doctor` matches any backend's device line (CUDA, ROCm/HIP, SYCL,
   Vulkan, Metal) and prints the rebuild command for the card it found.
 
+### Changed
+- `ruff check .` at the root no longer walks `planner/`
+  (`extend-exclude`): the gateway's rule selection is written for `src/`
+  and flagging the planner's bench scripts as gateway regressions helped
+  nobody.
+
 ### Fixed
+
+- **The Windows CI job is green again.**
+  `test_the_config_file_is_not_world_readable` asserted POSIX mode bits on a
+  platform that has none: `os.chmod` there only toggles the read-only
+  attribute, and permissions come from the ACL inherited from the directory.
+  The test now skips on win32 with that reason; the POSIX guarantee itself is
+  unchanged and still asserted on Linux and macOS.
 - **Shaping could orphan a tool result.** When history had to be dropped, the
   oldest messages were deleted one at a time, so an `assistant(tool_calls)`
   turn could go while its `tool` replies stayed behind; Hermes/Qwen chat
@@ -414,7 +434,8 @@ First public release.
 - The `model` field in `/v1/chat/completions` is ignored; one gateway serves
   one model.
 
-[Unreleased]: https://github.com/vipera-iso/vipera/compare/v1.2.1...HEAD
+[Unreleased]: https://github.com/vipera-iso/vipera/compare/v1.4.0...HEAD
+[1.4.0]: https://github.com/vipera-iso/vipera/compare/v1.3.0...v1.4.0
 [1.2.1]: https://github.com/vipera-iso/vipera/releases/tag/v1.2.1
 [1.2.0]: https://github.com/vipera-iso/vipera/releases/tag/v1.2.0
 [1.1.0]: https://github.com/vipera-iso/vipera/releases/tag/v1.1.0
