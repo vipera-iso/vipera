@@ -1,0 +1,328 @@
+{
+  "variant": "baseline",
+  "runner": "llama-bench",
+  "flags": [
+    "-fa",
+    "off",
+    "-ctk",
+    "f16",
+    "-ctv",
+    "f16"
+  ],
+  "question": "The llm-optimization literature pack proposes three families of optimizations for local inference: IO-aware attention (FlashAttention), quantized KV cache, and speculative decoding. plantodo.md STEP 1 measured decode at 22.90 tok/s against a modelled ALU ceiling of ~23 tok/s, i.e. compute-bound with disk at <=0.2%. Which of the three moves decode tok/s on THIS machine, when each is turned on alone against a common control?\n",
+  "generated_at": "2026-10-14T02:36:19+00:00",
+  "measurement": {
+    "runs": 5,
+    "warmup_runs": 1,
+    "threads": 4,
+    "n_gen": 32,
+    "ctx_size": 512,
+    "seed": 42,
+    "prompt": "The quick brown fox jumps over the lazy dog.",
+    "timeout_s": 1800,
+    "load_mode": {
+      "deepseek-v2-lite": "mlock",
+      "qwen3-4b": "mlock"
+    }
+  },
+  "arms": {
+    "default": {
+      "models": {
+        "deepseek-v2-lite": {
+          "model_path": "models/DeepSeek-V2-Lite.Q4_K_M.gguf",
+          "model_bytes": 10364416736,
+          "load_mode": "mlock",
+          "runner": "llama-bench",
+          "flags": [
+            "-fa",
+            "off",
+            "-ctk",
+            "f16",
+            "-ctv",
+            "f16"
+          ],
+          "draft": null,
+          "command": "/home/user/dev/llama.cpp/build/bin/llama-bench -m /home/user/dev/vipera/models/DeepSeek-V2-Lite.Q4_K_M.gguf -p 0 -n 32 -r 1 -t 4 -o json -lm mlock -fa off -ctk f16 -ctv f16",
+          "runs": [
+            {
+              "status": "ok",
+              "exit_code": 0,
+              "wall_s": 11.6,
+              "peak_rss_mib": 10008,
+              "majflt": 3881314,
+              "nvme_mib_read": 9687.8,
+              "log": "experiments/logs/baseline_deepseek-v2-lite_run1.log",
+              "run": 1,
+              "tok_s": 22.62,
+              "tok_s_std": 0.0,
+              "per_rep_tok_s": [
+                22.62
+              ],
+              "ms_per_token": 44.22,
+              "n_threads": 4,
+              "flash_attn": 0,
+              "type_k": "f16",
+              "type_v": "f16",
+              "n_gpu_layers": -1,
+              "model_size_mib": 9880.5
+            },
+            {
+              "status": "ok",
+              "exit_code": 0,
+              "wall_s": 11.7,
+              "peak_rss_mib": 10008,
+              "majflt": 3881392,
+              "nvme_mib_read": 9666.6,
+              "log": "experiments/logs/baseline_deepseek-v2-lite_run2.log",
+              "run": 2,
+              "tok_s": 22.44,
+              "tok_s_std": 0.0,
+              "per_rep_tok_s": [
+                22.44
+              ],
+              "ms_per_token": 44.55,
+              "n_threads": 4,
+              "flash_attn": 0,
+              "type_k": "f16",
+              "type_v": "f16",
+              "n_gpu_layers": -1,
+              "model_size_mib": 9880.5
+            },
+            {
+              "status": "ok",
+              "exit_code": 0,
+              "wall_s": 11.7,
+              "peak_rss_mib": 10008,
+              "majflt": 3881390,
+              "nvme_mib_read": 9644.4,
+              "log": "experiments/logs/baseline_deepseek-v2-lite_run3.log",
+              "run": 3,
+              "tok_s": 22.46,
+              "tok_s_std": 0.0,
+              "per_rep_tok_s": [
+                22.46
+              ],
+              "ms_per_token": 44.52,
+              "n_threads": 4,
+              "flash_attn": 0,
+              "type_k": "f16",
+              "type_v": "f16",
+              "n_gpu_layers": -1,
+              "model_size_mib": 9880.5
+            },
+            {
+              "status": "ok",
+              "exit_code": 0,
+              "wall_s": 11.7,
+              "peak_rss_mib": 10008,
+              "majflt": 3881349,
+              "nvme_mib_read": 9621.1,
+              "log": "experiments/logs/baseline_deepseek-v2-lite_run4.log",
+              "run": 4,
+              "tok_s": 22.57,
+              "tok_s_std": 0.0,
+              "per_rep_tok_s": [
+                22.57
+              ],
+              "ms_per_token": 44.32,
+              "n_threads": 4,
+              "flash_attn": 0,
+              "type_k": "f16",
+              "type_v": "f16",
+              "n_gpu_layers": -1,
+              "model_size_mib": 9880.5
+            },
+            {
+              "status": "ok",
+              "exit_code": 0,
+              "wall_s": 11.7,
+              "peak_rss_mib": 10008,
+              "majflt": 3881311,
+              "nvme_mib_read": 9597.2,
+              "log": "experiments/logs/baseline_deepseek-v2-lite_run5.log",
+              "run": 5,
+              "tok_s": 22.26,
+              "tok_s_std": 0.0,
+              "per_rep_tok_s": [
+                22.26
+              ],
+              "ms_per_token": 44.91,
+              "n_threads": 4,
+              "flash_attn": 0,
+              "type_k": "f16",
+              "type_v": "f16",
+              "n_gpu_layers": -1,
+              "model_size_mib": 9880.5
+            }
+          ],
+          "warmup": [
+            {
+              "status": "ok",
+              "tok_s": 21.85,
+              "wall_s": 11.7,
+              "peak_rss_mib": 10008,
+              "nvme_mib_read": 9668.6,
+              "log": "experiments/logs/baseline_deepseek-v2-lite_warmup1.log"
+            }
+          ],
+          "ok": 5,
+          "failed": 0,
+          "n_runs": 5,
+          "median_tok_s": 22.46,
+          "mean_tok_s": 22.47,
+          "std_tok_s": 0.14,
+          "min_tok_s": 22.26,
+          "max_tok_s": 22.62,
+          "cv_pct": 0.6
+        },
+        "qwen3-4b": {
+          "model_path": "models/Qwen3-4B-Q4_K_M.gguf",
+          "model_bytes": 2497281312,
+          "load_mode": "mlock",
+          "runner": "llama-bench",
+          "flags": [
+            "-fa",
+            "off",
+            "-ctk",
+            "f16",
+            "-ctv",
+            "f16"
+          ],
+          "draft": null,
+          "command": "/home/user/dev/llama.cpp/build/bin/llama-bench -m /home/user/dev/vipera/models/Qwen3-4B-Q4_K_M.gguf -p 0 -n 32 -r 1 -t 4 -o json -lm mlock -fa off -ctk f16 -ctv f16",
+          "runs": [
+            {
+              "status": "ok",
+              "exit_code": 0,
+              "wall_s": 3.6,
+              "peak_rss_mib": 2489,
+              "majflt": 639826,
+              "nvme_mib_read": 0.0,
+              "log": "experiments/logs/baseline_qwen3-4b_run1.log",
+              "run": 1,
+              "tok_s": 15.02,
+              "tok_s_std": 0.0,
+              "per_rep_tok_s": [
+                15.02
+              ],
+              "ms_per_token": 66.58,
+              "n_threads": 4,
+              "flash_attn": 0,
+              "type_k": "f16",
+              "type_v": "f16",
+              "n_gpu_layers": -1,
+              "model_size_mib": 2375.9
+            },
+            {
+              "status": "ok",
+              "exit_code": 0,
+              "wall_s": 3.6,
+              "peak_rss_mib": 2489,
+              "majflt": 639832,
+              "nvme_mib_read": 0.0,
+              "log": "experiments/logs/baseline_qwen3-4b_run2.log",
+              "run": 2,
+              "tok_s": 14.86,
+              "tok_s_std": 0.0,
+              "per_rep_tok_s": [
+                14.86
+              ],
+              "ms_per_token": 67.28,
+              "n_threads": 4,
+              "flash_attn": 0,
+              "type_k": "f16",
+              "type_v": "f16",
+              "n_gpu_layers": -1,
+              "model_size_mib": 2375.9
+            },
+            {
+              "status": "ok",
+              "exit_code": 0,
+              "wall_s": 3.6,
+              "peak_rss_mib": 2489,
+              "majflt": 639789,
+              "nvme_mib_read": 0.0,
+              "log": "experiments/logs/baseline_qwen3-4b_run3.log",
+              "run": 3,
+              "tok_s": 14.92,
+              "tok_s_std": 0.0,
+              "per_rep_tok_s": [
+                14.92
+              ],
+              "ms_per_token": 67.03,
+              "n_threads": 4,
+              "flash_attn": 0,
+              "type_k": "f16",
+              "type_v": "f16",
+              "n_gpu_layers": -1,
+              "model_size_mib": 2375.9
+            },
+            {
+              "status": "ok",
+              "exit_code": 0,
+              "wall_s": 3.6,
+              "peak_rss_mib": 2489,
+              "majflt": 639787,
+              "nvme_mib_read": 0.0,
+              "log": "experiments/logs/baseline_qwen3-4b_run4.log",
+              "run": 4,
+              "tok_s": 15.0,
+              "tok_s_std": 0.0,
+              "per_rep_tok_s": [
+                15.0
+              ],
+              "ms_per_token": 66.66,
+              "n_threads": 4,
+              "flash_attn": 0,
+              "type_k": "f16",
+              "type_v": "f16",
+              "n_gpu_layers": -1,
+              "model_size_mib": 2375.9
+            },
+            {
+              "status": "ok",
+              "exit_code": 0,
+              "wall_s": 3.6,
+              "peak_rss_mib": 2489,
+              "majflt": 639797,
+              "nvme_mib_read": 0.0,
+              "log": "experiments/logs/baseline_qwen3-4b_run5.log",
+              "run": 5,
+              "tok_s": 14.96,
+              "tok_s_std": 0.0,
+              "per_rep_tok_s": [
+                14.96
+              ],
+              "ms_per_token": 66.83,
+              "n_threads": 4,
+              "flash_attn": 0,
+              "type_k": "f16",
+              "type_v": "f16",
+              "n_gpu_layers": -1,
+              "model_size_mib": 2375.9
+            }
+          ],
+          "warmup": [
+            {
+              "status": "ok",
+              "tok_s": 15.02,
+              "wall_s": 4.7,
+              "peak_rss_mib": 2489,
+              "nvme_mib_read": 2311.6,
+              "log": "experiments/logs/baseline_qwen3-4b_warmup1.log"
+            }
+          ],
+          "ok": 5,
+          "failed": 0,
+          "n_runs": 5,
+          "median_tok_s": 14.96,
+          "mean_tok_s": 14.95,
+          "std_tok_s": 0.06,
+          "min_tok_s": 14.86,
+          "max_tok_s": 15.02,
+          "cv_pct": 0.4
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,94 @@
+# experiments/config.yaml — hardware + software configuration for this experiment set.
+#
+# Every value tagged [measured] was read off this machine during setup, not copied
+# from a spec sheet. The harness reads this file; variant definitions live in
+# baseline/control.yaml and variants/*/variant.yaml so each lever is documented in
+# exactly one place.
+
+experiment:
+  name: llm-optimization-variants
+  date: 2026-10-14
+  # The question this set exists to answer, in one sentence.
+  question: >
+    The llm-optimization literature pack proposes three families of optimizations for
+    local inference: IO-aware attention (FlashAttention), quantized KV cache, and
+    speculative decoding. plantodo.md STEP 1 measured decode at 22.90 tok/s against a
+    modelled ALU ceiling of ~23 tok/s, i.e. compute-bound with disk at <=0.2%.
+    Which of the three moves decode tok/s on THIS machine, when each is turned on
+    alone against a common control?
+
+hardware:                                    # [measured] this machine
+  cpu: "11th Gen Intel(R) Core(TM) i5-11300H @ 3.10GHz"
+  cores: 8                                   # 4 physical cores x 2 threads
+  ram_gib: 15                                # no swap configured
+  gpu: "NVIDIA GeForce GTX 1650, 4096 MiB — present, unused: the build under test is CPU-only"
+  storage: nvme0n1
+
+software:
+  llama_cpp_dir: ~/dev/llama.cpp/build/bin   # CPU-only build: `llama-bench --list-devices` -> (none)
+  llama_cpp_version: "0.6.0-dev (build 1, commit f2cc728)"   # [measured] llama-cli --version
+  python: "3.14.8"                           # [measured]
+  # Dev-only, installed into .venv. vipera itself stays stdlib-only
+  # (pyproject.toml: dependencies = []), so none of these are runtime deps.
+  dev_only_deps: [matplotlib, numpy, pandas, pyyaml]
+
+measurement:
+  runs: 5                 # one process invocation per run, per variant, per model
+  # One discarded invocation per cell, before the recorded runs. Measured reason: without
+  # it the first recorded run is systematically slow (10.58 vs 13.96 tok/s on qwen3-4b,
+  # 15.03 vs 23.37 on deepseek) — the model file is not in the page cache yet, because each
+  # cell starts a fresh process and the previous cell read a different model. With it, the
+  # first recorded run is warm. The warm-up's own numbers are kept in the result file under
+  # `warmup` as evidence and are excluded from every statistic.
+  warmup_runs: 1
+  threads: 4              # matches the STEP 1 condition that produced 22.90 tok/s
+  n_gen: 32               # decode tokens per run (STEP 1 used 32)
+  ctx_size: 512
+  seed: 42
+  prompt: "The quick brown fox jumps over the lazy dog."
+  timeout_s: 1800         # per run; a timeout is recorded as a failure, never as a number
+  # Both measured models fit in RAM, so both can be pinned with mlock — the load mode
+  # STEP 1 found to remove the paging tax (22.90 vs 16.95 tok/s).
+  load_mode:
+    deepseek-v2-lite: mlock
+    qwen3-4b: mlock
+
+models:
+  deepseek-v2-lite:
+    path: models/DeepSeek-V2-Lite.Q4_K_M.gguf
+    bytes: 10364416736                     # [measured]
+    note: "9.9 GiB — fits in RAM; this is the model STEP 1 measured at 22.90 tok/s"
+  qwen3-4b:
+    path: models/Qwen3-4B-Q4_K_M.gguf
+    bytes: 2497281312                      # [measured]
+    note: "2.3 GiB — a second, much smaller RAM-resident model; same Qwen3 tokenizer as the draft, which is what makes the speculative variant measurable"
+
+# A model that was in the planned set and could not be measured here at all. Recorded
+# rather than dropped, because "the bigger MoE needs a bigger box" is a result about this
+# machine, and because it explains why the second model is a 4B rather than a 30B.
+models_not_runnable:
+  qwen3-30b-a3b:
+    path: models/Qwen3-30B-A3B-Q4_K_M.gguf
+    bytes: 18556685824
+    reason: >
+      18.6 GiB model on a 15 GiB machine with no swap. llama-cli is killed by the kernel
+      OOM killer during model load, with both -lm mmap (the default for a model this size)
+      and -lm dio: exit -9 / 137 after ~23 s, no decode timing printed at all.
+    evidence:
+      kernel: "oom-kill: ... task=llama-cli ... Out of memory: Killed process (llama-cli) total-vm:32478932kB, anon-rss:11798284kB"
+      logs: [logs/speculative_control_no_draft_qwen3-30b-a3b_run1.log,
+             logs/speculative_speculative_qwen3-30b-a3b_run1.log]
+      also_tried: "-lm dio -ub 64 -b 64 (exit 137, same point in load)"
+    consequence: >
+      The spill/offload regime is unreachable on this box: a model large enough to spill is a
+      model too large to load. Every number in this experiment set is therefore from a
+      RAM-resident model, and REPORT.md says so next to the conclusions.
+
+# The draft model for the speculative variant. It pairs with qwen3-4b (same Qwen3
+# tokenizer). No small draft with the DeepSeek-V2 tokenizer exists locally, so that variant
+# is measured on the Qwen3 target only and reported as not-applicable for DeepSeek.
+draft_model:
+  path: models/Qwen3-0.6B-Q4_K_M.gguf
+  bytes: 396705472                         # [measured]
+  pairs_with: qwen3-4b
+  source: "https://huggingface.co/unsloth/Qwen3-0.6B-GGUF (Q4_K_M)"

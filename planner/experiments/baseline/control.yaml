@@ -1,0 +1,22 @@
+# experiments/baseline/control.yaml — the control every variant is compared against.
+#
+# "Baseline" here means both levers of the test explicitly OFF, so each variant
+# differs from the control in exactly one lever:
+#
+#   baseline                 -fa off   -ctk f16 -ctv f16
+#   variant flashattention   -fa on    -ctk f16 -ctv f16
+#   variant kv-cache-quant   -fa off   -ctk q8_0 -ctv q8_0
+#
+# Stock llama.cpp defaults are `-fa auto` with an f16 KV cache, so the control is NOT
+# the stock configuration — it is the stock configuration with the two levers set to
+# their off state, which is what makes a one-lever-at-a-time comparison possible.
+# Whatever `-fa auto` resolves to on this build is echoed in every llama-bench log
+# (`flash_attn` field) and is checked in REPORT.md.
+
+name: baseline
+runner: llama-bench
+flags: ["-fa", "off", "-ctk", "f16", "-ctv", "f16"]
+applicable_models: [deepseek-v2-lite, qwen3-4b]
+doc: >
+  Control: FlashAttention off, KV cache in f16. Identical to each variant except
+  for the single flag under test in that variant.

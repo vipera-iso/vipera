@@ -1,0 +1,42 @@
+diff --git a/ggml/src/ggml-cpu/repack.cpp b/ggml/src/ggml-cpu/repack.cpp
+index 2632ae3..f4be860 100644
+--- a/ggml/src/ggml-cpu/repack.cpp
++++ b/ggml/src/ggml-cpu/repack.cpp
+@@ -15,6 +15,7 @@
+ #include <cstring>
+ #include <cassert>
+ #include <cstdio>  // for GGML_ASSERT
++#include <cstdlib> // for getenv (vipera: GGML_CPU_REPACK_MOE)
+ 
+ #include "repack.h"
+ 
+@@ -5187,6 +5188,21 @@ static size_t ggml_backend_cpu_repack_buffer_type_get_alignment(ggml_backend_buf
+ }
+ 
+ namespace ggml::cpu::repack {
++// vipera: repacking a 3D MoE expert tensor copies it into anonymous memory, which the
++// kernel cannot reclaim. A model whose expert pool exceeds RAM therefore cannot load at
++// all -- it is OOM-killed during load -- instead of streaming the experts from disk.
++// Skipping this one branch keeps every 2D weight repacked (fast kernels, and only ~1 GiB
++// of anonymous memory: the non-expert weights) while the expert slabs stay file-backed
++// and reclaimable. Measured on Qwen3-30B-A3B with `bench/moe_spill.py`: with the branch,
++// 3/3 runs OOM-killed; with `-nr` (all repacking off), 3/3 run at 5.6 tok/s.
++//
++// GGML_CPU_REPACK_MOE=0 disables it. The default keeps the upstream behaviour, so this
++// changes nothing unless it is asked for.
++static bool ggml_cpu_repack_moe_enabled() {
++    const char * env = getenv("GGML_CPU_REPACK_MOE");
++    return !(env && env[0] == '0');
++}
++
+ class extra_buffer_type : ggml::cpu::extra_buffer_type {
+     bool supports_op(ggml_backend_dev_t, const struct ggml_tensor * op) override {
+         if (    op->op == GGML_OP_MUL_MAT &&
+@@ -5206,6 +5222,7 @@ class extra_buffer_type : ggml::cpu::extra_buffer_type {
+             //}
+             // may be possible if Q8_0 packed...
+         } else if (op->op == GGML_OP_MUL_MAT_ID
++                && ggml_cpu_repack_moe_enabled()
+                 && op->src[0]->buffer
+                 && (ggml_n_dims(op->src[0]) == 3)
+                 && op->src[0]->buffer->buft == ggml_backend_cpu_repack_buffer_type()

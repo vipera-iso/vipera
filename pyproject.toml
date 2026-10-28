@@ -80,6 +80,9 @@ include = [
 line-length = 100
 target-version = "py311"
 src = ["src", "tests"]
+# planner/ is a separate distribution with its own pyproject; the gateway's
+# rule selection was written for src/ and tests/ and would flag its bench scripts.
+extend-exclude = ["planner"]
 
 [tool.ruff.lint]
 select = ["E", "W", "F", "I", "B", "UP", "SIM", "RUF"]

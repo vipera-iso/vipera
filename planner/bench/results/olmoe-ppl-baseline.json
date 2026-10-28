@@ -1,0 +1,25 @@
+{
+  "ok": true,
+  "exit_code": 0,
+  "command": [
+    "<llama.cpp>/build/bin/llama-perplexity",
+    "-m",
+    "/tmp/vipera-capture/olmoe-q4km.gguf",
+    "-f",
+    "<llama.cpp>/wikitext-2-raw/wiki.test.raw",
+    "-c",
+    "512",
+    "--chunks",
+    "20",
+    "-t",
+    "8",
+    "-ngl",
+    "0"
+  ],
+  "elapsed_s": 84.944,
+  "chunks": 20,
+  "context": 512,
+  "corpus": "wiki.test.raw",
+  "ppl": 8.6426,
+  "ppl_stderr": 0.30373
+}

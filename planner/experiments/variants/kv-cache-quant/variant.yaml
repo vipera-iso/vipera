@@ -1,0 +1,31 @@
+# experiments/variants/kv-cache-quant/variant.yaml
+#
+# Lever: quantize the KV cache (-ctk/-ctv q8_0). The papers this comes from (vLLM/PagedAttention
+# 2309.06180, H2O 2306.14048, StreamingLLM 2309.17453, plus the quant pack) all attack KV
+# memory: fewer bytes per cached token buys context length and, in a bandwidth-bound
+# regime, tok/s.
+#
+# The measured question: on this machine decode is compute-bound by STEP 1 (0.4 MiB/token
+# of disk traffic, ALU saturated), so a KV-size change should buy ~nothing at 512 tokens
+# of context. This variant measures whether that prediction holds — a quantized cache
+# dequantizes on read, which is an ALU cost, so the honest expectation is "no gain, or a
+# small loss". It also doubles as the f16-vs-q8_0 control for the earlier STEP 1 runs,
+# which already used q8_0.
+
+name: kv-cache-quant
+runner: llama-bench
+# -fa on is not part of this lever, it is a precondition for it: this build refuses
+# `-ctk q8_0 -ctv q8_0` with `-fa off` — "llama_init_from_model: quantized V cache
+# requires flash_attn to be enabled" [measured: 5/5 runs, exit 1]. The lever is therefore
+# isolated against the flashattention arm (FA on, f16 KV), not against the control, and
+# the CSV names the control it used in its `control` column.
+flags: ["-fa", "on", "-ctk", "q8_0", "-ctv", "q8_0"]
+control_arm: flashattention
+applicable_models: [deepseek-v2-lite, qwen3-4b]
+doc: >
+  KV cache quantized to q8_0 on both K and V, with FlashAttention on because the build
+  requires it. Isolated against the flashattention arm to keep one lever at a time;
+  the difference against the control (f16 KV, FA off) is reported as a two-lever number.
+  Relevant papers in the local pack: 2309.06180 (PagedAttention), 2306.14048 (H2O), 2309.17453 (StreamingLLM).
+  Incidental finding worth keeping: on this build the two "independent" levers are coupled —
+  the KV-cache quantization cannot be turned on without attention kernel changes.

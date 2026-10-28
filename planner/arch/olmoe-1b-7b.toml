@@ -1,0 +1,30 @@
+# OLMoE-1B-7B-0924 — the small real MoE used to capture a routing trace (S7).
+#
+# Values are read from the published config (allenai/OLMoE-1B-7B-0924), not
+# derived: 16 layers, hidden 2048, 64 experts with top-8, GQA attention
+# (16 heads / 16 kv heads / head_dim 128), vocab 50304, no shared experts and no
+# MTP layer. `stated_*` are the published total/active so `vipera arch` reports
+# the calibration residual.
+name = "olmoe-1b-7b"
+n_layers = 16
+hidden = 2048
+vocab = 50304
+n_experts = 64
+top_k = 8
+moe_inter = 1024
+n_shared_experts = 0
+shared_inter = 0
+# All layers use grouped-query attention (no KDA/MLA).
+kda_layers = 0
+mla_layers = 0
+full_layers = 16
+mhc_streams = 0
+mtp_layers = 0
+vision_params = 0
+stated_total = 6900000000
+stated_active = 1300000000
+
+[full]
+n_heads = 16
+n_kv_heads = 16
+head_dim = 128

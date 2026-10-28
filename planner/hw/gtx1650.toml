@@ -1,0 +1,58 @@
+# Target: the machine measured on 2026-10-12 (see README).
+# Numbers are MiB as reported by the OS, not marketing values.
+#
+# Provenance of the tuning constants (round 3, ROADMAP §9):
+#   ram_bw_gbs   MEASURED by bench/hwprobe.c: 40-46 GB/s streaming read (256 MiB
+#                buffer, 8 threads; varies run to run). Was 40.0, an estimate.
+#   disk_bw_gbs  MEASURED: 8-9 GB/s sequential AND 1 MiB random O_DIRECT reads
+#                (dd -iflag=direct; os.pread O_DIRECT). Random 8.76, sequential
+#                7.75-9.1 GB/s. Was 2.0 - wrong by ~4x, and that error is why
+#                every disk-bound verdict in the repo was too pessimistic.
+#   cpu_gflops   MEASURED by bench/hwprobe.c: 110 GFLOP/s ALU-bound GEMV on a
+#                L3-resident 512x1024 matrix, 8 threads (20.8 single-threaded).
+#                Cross-checked against a real model: OLMoE-1B-7B Q4_K_M decodes
+#                at 41.2 tok/s here (llama-bench, ngl=0), i.e. an effective
+#                2*1.18e9*41.2 = ~97 GFLOP/s. Was 50.0, an estimate.
+#   vram_bw_gbs  NOT MEASURED. A root-free CUDA toolkit and a libggml-cuda build
+#                now exist (README "Exercising the VRAM half"), so the GPU can be
+#                exercised, but no bandwidth probe has been run yet: 192 stays a
+#                datasheet figure and no result in this repo depends on it. The
+#                GPU runs taken so far (Vulkan 2.60, CUDA 7.00 tok/s) are end-to-end
+#                decode rates with experts on the CPU, not VRAM bandwidth.
+#   ram_headroom_mb  MEASURED budget (README target table, 2026-10-12): 15 GiB total,
+#                ~10 GiB available, no swap — so ~5 GiB belongs to the OS and the working
+#                environment, not to the model. Was 1536 (1.5 GiB), the generic KV/activation
+#                reserve copied from the 32 GB instance profiles; that left 13.5 GiB of usable
+#                RAM and made every RAM verdict optimistic. Measured on a 15.9 GiB
+#                Qwen3-30B-shaped header: with 1536 the plan reports **0 MiB of spill**
+#                (i.e. the planner says a model the docs mark ❌ "needs streaming" stays
+#                resident), with 5120 the same file spills **2.40 GiB**. 5120 holds back the
+#                5 GiB the machine really does not have, so usable RAM is the documented
+#                10 GiB; DeepSeek-V2-Lite still plans with no spill, as the docs say it should.
+#                KV cache and activations are budgeted inside that 10 GiB by the scheduler.
+#                Re-measure with:
+#                  awk '/MemTotal|MemAvailable|SwapTotal/' /proc/meminfo
+#                (a 2026-10-13 probe on an idle box read MemAvailable = 13924024 kB =
+#                 13.3 GiB; the conservative working-environment figure is kept on purpose,
+#                 because that is what a run can count on while the dev environment is up.)
+name = "gtx1650-laptop"
+vram_mb = 4096          # GTX 1650 Max-Q
+ram_mb = 15360          # 15 GiB, no swap
+disk = "nvme-dramless"
+
+# Headroom held back from the totals above so the runtime can still allocate
+# KV cache and activations (VRAM) and so that "usable RAM" means the RAM a run can
+# actually get (RAM — see the ram_headroom_mb provenance above).
+vram_headroom_mb = 512
+ram_headroom_mb = 5120
+
+# Memory tiers in GB/s (decimal). These decide how long a byte costs, so they
+# belong to the machine description.
+vram_bw_gbs = 192.0   # GTX 1650 Max-Q, ~192 GB/s (datasheet; NOT measurable here)
+ram_bw_gbs = 44.0     # MEASURED: 40-46 GB/s streaming read (bench/hwprobe.c)
+disk_bw_gbs = 8.0     # MEASURED: 8-9 GB/s, random 1 MiB ~= sequential (O_DIRECT)
+# Effective CPU throughput for the scheduler's compute floor (GFLOP/s).
+# MEASURED: 110 GFLOP/s ALU-bound GEMV; corroborated by a real 41.2 tok/s OLMoE
+# decode (~97 effective GFLOP/s), so the ALU probe slightly overstates the real
+# quantized kernel. Feeding 110 keeps the modelled and measured rates within ~13%.
+cpu_gflops = 110.0

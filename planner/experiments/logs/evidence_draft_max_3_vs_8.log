@@ -1,0 +1,4 @@
+### --spec-draft-n-max 3
+[ Prompt: 40.0 t/s | Generation: 11.9 t/s ]
+### --spec-draft-n-max 8
+[ Prompt: 37.7 t/s | Generation: 13.3 t/s ]

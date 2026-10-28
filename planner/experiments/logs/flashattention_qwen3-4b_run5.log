@@ -1,0 +1,52 @@
+# flashattention qwen3-4b (llama-bench) run 5
+# argv: /home/user/dev/llama.cpp/build/bin/llama-bench -m /home/user/dev/vipera/models/Qwen3-4B-Q4_K_M.gguf -p 0 -n 32 -r 1 -t 4 -o json -lm mlock -fa on -ctk f16 -ctv f16
+# wall_s: 3.6
+
+[
+  {
+    "build_commit": "f2cc728",
+    "build_number": 1,
+    "cpu_info": "11th Gen Intel(R) Core(TM) i5-11300H @ 3.10GHz",
+    "gpu_info": "",
+    "backends": "CPU",
+    "model_filename": "/home/user/dev/vipera/models/Qwen3-4B-Q4_K_M.gguf",
+    "model_type": "qwen3 4B Q4_K - Medium",
+    "model_size": 2491323904,
+    "model_n_params": 4022468096,
+    "n_batch": 2048,
+    "n_ubatch": 512,
+    "n_threads": 4,
+    "cpu_mask": "0x0",
+    "cpu_strict": false,
+    "poll": 50,
+    "type_k": "f16",
+    "type_v": "f16",
+    "n_gpu_layers": -1,
+    "n_cpu_moe": 0,
+    "split_mode": "layer",
+    "main_gpu": 0,
+    "no_kv_offload": false,
+    "flash_attn": 1,
+    "devices": "auto",
+    "tensor_split": "0.00",
+    "tensor_buft_overrides": "none",
+    "load_mode": "mlock",
+    "lazy_mode": "auto",
+    "embeddings": false,
+    "no_op_offload": 0,
+    "no_host": false,
+    "repack": true,
+    "fit_target": 0,
+    "fit_min_ctx": 0,
+    "n_prompt": 0,
+    "n_gen": 32,
+    "n_depth": 0,
+    "test_time": "2026-10-14T02:39:21Z",
+    "avg_ns": 2063123127,
+    "stddev_ns": 0,
+    "avg_ts": 15.510465,
+    "stddev_ts": 0.000000,
+    "samples_ns": [ 2063123127 ],
+    "samples_ts": [ 15.5105 ]
+  }
+]

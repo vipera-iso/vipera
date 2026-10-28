@@ -1,0 +1,356 @@
+diff --git a/tools/perplexity/perplexity.cpp b/tools/perplexity/perplexity.cpp
+index 601361a..40362a7 100644
+--- a/tools/perplexity/perplexity.cpp
++++ b/tools/perplexity/perplexity.cpp
+@@ -11,9 +11,11 @@
+ #include <clocale>
+ #include <cmath>
+ #include <cstdio>
++#include <cstdlib>
+ #include <cstring>
+ #include <ctime>
+ #include <fstream>
++#include <map>
+ #include <mutex>
+ #include <random>
+ #include <sstream>
+@@ -352,6 +354,8 @@ static results_perplexity perplexity_v2(llama_context * ctx, const common_params
+     const int n_seq = std::max(1, n_batch / n_ctx);
+     LOG_INF("%s: computing over %d chunks, n_ctx=%d, batch_size=%d, n_seq=%d\n", __func__, n_chunk, n_ctx, n_batch, n_seq);
+ 
++    double nll2 = 0.0;
++
+     for (int i = 0; i < n_chunk; ++i) {
+         const int start =     i * params.ppl_stride;
+         const int end   = start + calc_chunk;
+@@ -424,7 +428,9 @@ static results_perplexity perplexity_v2(llama_context * ctx, const common_params
+             logit_history[start + j + 1] = tok_logits[tokens[start + j + 1]];
+             prob_history[start + j + 1]  = prob;
+ 
+-            nll += -std::log(prob);
++            const double v = -std::log(prob);
++            nll  += v;
++            nll2 += v*v;
+             ++count;
+         }
+         // perplexity is e^(average negative log-likelihood)
+@@ -436,11 +442,318 @@ static results_perplexity perplexity_v2(llama_context * ctx, const common_params
+     }
+     LOG("\n");
+ 
+-    return {tokens, std::exp(nll / count), logit_history, prob_history};
++    {
++        // report the same statistic shape as perplexity_v1 so the two paths are interchangeable
++        const double mean = nll/count;
++        const double ppl  = std::exp(mean);
++        double var = nll2/count - mean*mean;
++        if (var > 0 && count > 1) {
++            var = std::sqrt(var/(count - 1));
++            LOG_INF("Final estimate: PPL = %.4lf +/- %.5lf\n", ppl, var*ppl);
++        } else {
++            LOG_INF("Final estimate: PPL = %.4lf\n", ppl);
++        }
++        return {tokens, ppl, logit_history, prob_history};
++    }
++}
++
++// StreamingLLM-style perplexity: the corpus is fed as one continuous stream and the KV cache
++// is shifted exactly like `llama-cli --context-shift` (keep the first `n_keep` attention sinks,
++// drop the middle of the window). The set of scored tokens is identical to the one
++// `perplexity_v2` scores, so the two are directly comparable - the only difference is what the
++// model is allowed to attend to when it predicts them.
++static results_perplexity perplexity_stream(llama_context * ctx, const common_params & params) {
++    const llama_model * model = llama_get_model(ctx);
++    const llama_vocab * vocab = llama_model_get_vocab(model);
++
++    const bool add_bos = llama_vocab_get_add_bos(vocab);
++    GGML_ASSERT(!llama_vocab_get_add_eos(vocab));
++
++    LOG_INF("%s: tokenizing the input ..\n", __func__);
++
++    std::vector<llama_token> tokens = common_tokenize(ctx, params.prompt, true);
++
++    const int n_ctx = llama_n_ctx(ctx);
++
++    if (int(tokens.size()) < 2*n_ctx) {
++        LOG_ERR("%s: you need at least %d tokens to evaluate perplexity with a context of %d\n",__func__,2*n_ctx,
++                n_ctx);
++        LOG_ERR("%s: the data file you provided tokenizes to only %zu tokens\n",__func__,tokens.size());
++        return {std::move(tokens), 0., {}, {}};
++    }
++
++    std::vector<float> logit_history(tokens.size(), 0.0f);
++    std::vector<float> prob_history (tokens.size(), 0.0f);
++
++    if (params.ppl_stride <= 0 || params.ppl_stride >= n_ctx) {
++        LOG_ERR("%s: --ppl-stride must be in [1, n_ctx) for streaming perplexity (got %d, n_ctx = %d)\n",
++                __func__, params.ppl_stride, n_ctx);
++        return {tokens, -1, logit_history, prob_history};
++    }
++
++    const int stride = params.ppl_stride;
++
++    // llama-cli always keeps the BOS token as well, so that the sink set matches
++    const int n_keep = params.n_keep + (add_bos ? 1 : 0);
++    if (n_keep < 1 || n_keep >= n_ctx) {
++        LOG_ERR("%s: --keep must be in [1, n_ctx - 1] (got %d, n_ctx = %d)\n", __func__, params.n_keep, n_ctx);
++        return {tokens, -1, logit_history, prob_history};
++    }
++
++    const int n_vocab = llama_vocab_n_tokens(vocab);
++    const int n_batch = params.n_batch;
++
++    // same window stride as perplexity_v2
++    const int n_chunk_max = (tokens.size() - n_ctx + stride - 1) / stride;
++    const int n_chunk = params.n_chunks < 0 ? n_chunk_max : std::min(params.n_chunks, n_chunk_max);
++
++    // first token whose logits are used to score: it predicts tokens[n_ctx - stride]
++    const int first_scored = n_ctx - stride - 1;
++
++    LOG_INF("%s: streaming eval: n_ctx = %d, sinks = %d, window = %d, stride = %d, %d chunks\n",
++            __func__, n_ctx, n_keep, n_ctx - n_keep, stride, n_chunk);
++
++    llama_memory_t mem = llama_get_memory(ctx);
++    llama_memory_clear(mem, true);
++
++    // ---- eviction policy (env LLAMA_PPL_STREAM_POLICY) ---------------------------------
++    // `recency` is llama-cli's own behaviour: drop the middle of the window and close the gap.
++    // The other two share one mechanism - evict the same count of tokens and leave the
++    // remaining positions alone - so that only *which* tokens go differs, which is what makes
++    // them an experiment instead of two changes at once:
++    //   recency-gap  the oldest tokens (the control arm)
++    //   surprise     the tokens with the LOWEST accumulated surprise, -log p(token | context
++    //                so far). Surprise is the one relevance signal a decoder produces for free
++    //                at every step, so unlike H2O this needs no attention scores and no kernel
++    //                change - which is exactly why it can be measured here.
++    //   surprise-local  surprise, but the newest `margin` tokens are never candidates. Pure
++    //                surprise scores 31.9 PPL against recency's 21.4 (measured, docs/REWRITE.md
++    //                §E): ranking by how *interesting* a token is throws away the ordinary
++    //                tokens that make the context coherent. The hybrid keeps local continuity
++    //                and only lets surprise choose inside the older part.
++    enum stream_policy { STREAM_RECENCY, STREAM_RECENCY_GAP, STREAM_SURPRISE, STREAM_SURPRISE_LOCAL };
++    stream_policy policy = STREAM_RECENCY;
++    if (const char * env = std::getenv("LLAMA_PPL_STREAM_POLICY")) {
++        const std::string s(env);
++        if (s.empty() || s == "recency") {
++            policy = STREAM_RECENCY;
++        } else if (s == "recency-gap") {
++            policy = STREAM_RECENCY_GAP;
++        } else if (s == "surprise") {
++            policy = STREAM_SURPRISE;
++        } else if (s == "surprise-local") {
++            policy = STREAM_SURPRISE_LOCAL;
++        } else {
++            LOG_ERR("%s: unknown LLAMA_PPL_STREAM_POLICY '%s' "
++                    "(recency | recency-gap | surprise | surprise-local)\n", __func__, env);
++            return {tokens, -1, logit_history, prob_history};
++        }
++    }
++    int recency_margin = 128;
++    if (const char * env = std::getenv("LLAMA_PPL_STREAM_MARGIN")) {
++        recency_margin = std::max(0, std::atoi(env));
++    }
++    const bool gap_evict = policy != STREAM_RECENCY;
++    LOG_INF("%s: eviction policy = %s\n", __func__,
++            policy == STREAM_RECENCY        ? "recency (StreamingLLM middle drop)" :
++            policy == STREAM_RECENCY_GAP    ? "recency-gap (oldest first, positions kept)" :
++            policy == STREAM_SURPRISE       ? "surprise (keep the least predictable)" :
++                                              "surprise-local (surprise outside a recency margin)");
++
++    int n_past    = 0; // logical position of the next token to evaluate (never rewound here)
++    int fed       = 0; // next token index to feed
++    int n_shift   = 0;
++    int n_dropped = 0;
++    int count     = 0;
++    double nll    = 0.0;
++    double nll2   = 0.0;
++
++    // live tokens in the KV cache, by position -> accumulated surprise. Only kept for the gap
++    // policies: recency needs no bookkeeping because position itself is the whole ordering.
++    std::map<llama_pos, double> live;
++    std::vector<llama_pos> tok_pos(tokens.size(), -1);
++
++    for (int i = 0; i < n_chunk; ++i) {
++        const int target = i * stride + n_ctx; // feed tokens [fed, target)
++
++        std::vector<int>   scored_idx;
++        std::vector<float> scored_logits;
++
++        while (fed < target) {
++            if (!gap_evict && n_past >= n_ctx) {
++                // context full - keep the sinks, discard the middle of the window (StreamingLLM)
++                const int n_left    = n_past - n_keep;
++                const int n_discard = std::max(1, n_left/2);
++
++                llama_memory_seq_rm (mem, 0, n_keep, n_keep + n_discard);
++                llama_memory_seq_add(mem, 0, n_keep + n_discard, n_past, -n_discard);
++
++                n_past -= n_discard;
++                ++n_shift;
++                n_dropped += n_discard;
++            }
++
++            while (gap_evict && (int) live.size() >= n_ctx) {
++                const int n_evictable = (int) live.size() - n_keep;
++                if (n_evictable <= 1) {
++                    LOG_ERR("%s: nothing evictable left (%d sinks in a %d-token window)\n",
++                            __func__, n_keep, n_ctx);
++                    return {tokens, -1, logit_history, prob_history};
++                }
++
++                // Never a candidate: the newest token. llama.cpp requires the next batch to
++                // continue at (last stored position + 1), so the position that ends the
++                // sequence has to survive even if a policy would rank it lowest.
++                const llama_pos newest = live.rbegin()->first;
++
++                // `surprise-local` protects the newest `recency_margin` positions as well, so the
++                // policy only ever chooses inside the older part of the window.
++                llama_pos cutoff = newest; // candidates must be strictly older than this
++                if (policy == STREAM_SURPRISE_LOCAL && recency_margin > 0 &&
++                    (int) live.size() > n_keep + recency_margin) {
++                    auto it = live.end();
++                    for (int j = 0; j < recency_margin && it != live.begin(); ++j) {
++                        --it;
++                    }
++                    cutoff = it->first;
++                }
++
++                std::vector<llama_pos> candidates;
++                {
++                    int seen = 0;
++                    for (const auto & kv : live) {
++                        if (seen++ < n_keep) continue;      // the sinks stay
++                        if (kv.first >= cutoff) continue;   // the newest token, and any margin
++                        candidates.push_back(kv.first);
++                    }
++                }
++                const int n_drop = std::min((int) candidates.size(),
++                                            std::max(1, n_evictable/2));
++
++                std::vector<llama_pos> drop;
++                if (policy == STREAM_RECENCY_GAP) {
++                    for (int j = 0; j < n_drop; ++j) {
++                        drop.push_back(candidates[j]);      // candidates are in position order
++                    }
++                } else {
++                    std::vector<std::pair<double, llama_pos>> ranked;  // (surprise, position)
++                    for (llama_pos p : candidates) {
++                        ranked.emplace_back(live[p], p);
++                    }
++                    std::sort(ranked.begin(), ranked.end());           // least surprising first
++                    for (int j = 0; j < n_drop; ++j) {
++                        drop.push_back(ranked[j].second);
++                    }
++                }
++
++                for (llama_pos p : drop) {
++                    llama_memory_seq_rm(mem, 0, p, p + 1);
++                    live.erase(p);
++                }
++                ++n_shift;
++                n_dropped += (int) drop.size();
++            }
++
++            const int n_used = gap_evict ? (int) live.size() : n_past;
++            const int n_feed = std::min({n_batch, target - fed, n_ctx - n_used});
++
++            common_batch batch(ctx);
++            for (int k = 0; k < n_feed; ++k) {
++                batch.add(tokens[fed + k], n_past + k, 0, fed + k >= first_scored);
++            }
++
++            if (llama_process(ctx, LLAMA_PROCESS_TYPE_DECODE, batch.get())) {
++                LOG_ERR("%s : failed to decode\n", __func__);
++                return {tokens, -1, logit_history, prob_history};
++            }
++
++            for (int k = 0; k < n_feed; ++k) {
++                if (fed + k < first_scored) {
++                    continue;
++                }
++                const float * l = llama_get_logits_ith(ctx, k);
++                if (l == nullptr) {
++                    LOG_ERR("%s : no logits for batch index %d\n", __func__, k);
++                    return {tokens, -1, logit_history, prob_history};
++                }
++                scored_idx.push_back(fed + k);
++                scored_logits.insert(scored_logits.end(), l, l + n_vocab);
++            }
++
++            if (gap_evict) {
++                for (int k = 0; k < n_feed; ++k) {
++                    tok_pos[fed + k] = n_past + k;
++                    live[n_past + k]   = 0.0;
++                }
++            }
++
++            n_past += n_feed;
++            fed    += n_feed;
++        }
++
++        for (size_t s = 0; s < scored_idx.size(); ++s) {
++            const int idx = scored_idx[s];
++            const std::vector<float> tok_logits(scored_logits.begin() + s*n_vocab,
++                                                scored_logits.begin() + (s + 1)*n_vocab);
++
++            const float prob = softmax(tok_logits)[tokens[idx + 1]];
++            logit_history[idx + 1] = tok_logits[tokens[idx + 1]];
++            prob_history [idx + 1] = prob;
++
++            const double v = -std::log(prob);
++            nll  += v;
++            nll2 += v*v;
++            ++count;
++
++            // What the surprise policies rank on: how hard this token was to predict.
++            // Accumulated for every gap policy, not just STREAM_SURPRISE: `surprise-local`
++            // also ranks on it, and a margin-protected token still needs its score by the
++            // time it leaves the margin. (Skipping it for surprise-local silently reduced
++            // that arm to `recency-gap` - every score stayed 0.0, so the sort fell back to
++            // position order. The two arms produced identical PPL to five digits.)
++            if (gap_evict) {
++                const auto it = live.find(tok_pos[idx + 1]);
++                if (it != live.end()) {
++                    it->second += v;
++                }
++            }
++        }
++
++        // perplexity is e^(average negative log-likelihood)
++        if (params.ppl_output_type == 0) {
++            LOG("[%d]%.4lf,", i + 1, std::exp(nll / count));
++        } else {
++            LOG("%8d  %.4lf\n", i*stride, std::exp(nll / count));
++        }
++    }
++    LOG("\n");
++
++    nll2 /= count;
++    nll  /= count;
++    const double ppl = std::exp(nll);
++    nll2 -= nll*nll;
++    if (nll2 > 0 && count > 1) {
++        nll2 = std::sqrt(nll2/(count - 1));
++        LOG_INF("Final estimate: PPL = %.4lf +/- %.5lf\n", ppl, nll2*ppl);
++    } else {
++        LOG_INF("Final estimate: PPL = %.4lf\n", ppl);
++    }
++
++    LOG_INF("%s: %d context shifts, %d tokens scored, sinks = %d\n", __func__, n_shift, count, n_keep);
++    LOG_INF("%s: policy = %s, %d tokens dropped\n", __func__,
++            policy == STREAM_RECENCY     ? "recency" :
++            policy == STREAM_RECENCY_GAP ? "recency-gap" :
++            policy == STREAM_SURPRISE    ? "surprise" : "surprise-local", n_dropped);
++
++    return {tokens, ppl, logit_history, prob_history};
+ }
+ 
+ static results_perplexity perplexity(llama_context * ctx, const common_params & params, const int32_t n_ctx) {
+     if (params.ppl_stride > 0) {
++        // --context-shift + --keep turn the evaluation into a streaming (sink + sliding window) one
++        if (params.ctx_shift && params.n_keep > 0) {
++            return perplexity_stream(ctx, params);
++        }
+         return perplexity_v2(ctx, params);
+     }
+ 

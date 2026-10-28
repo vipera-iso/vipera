@@ -1,0 +1,267 @@
+diff --git a/src/llama-moe-cache.cpp b/src/llama-moe-cache.cpp
+index f22d986..1728f8a 100644
+--- a/src/llama-moe-cache.cpp
++++ b/src/llama-moe-cache.cpp
+@@ -6,6 +6,8 @@
+ #include "ggml-cpp.h"
+ 
+ #include <algorithm>
++#include <cstdio>
++#include <cstdlib>
+ #include <stdexcept>
+ #include <unordered_map>
+ #include <vector>
+@@ -117,6 +119,26 @@ struct moe_cache_lru {
+         }
+         return true;
+     }
++
++    // vipera: give expert e of layer il a slot *without* uploading it, so a caller
++    // that knows which experts are coming can prepare the cache ahead of time.
++    // the slot is taken from the LRU head exactly like a miss in plan().
++    // returns the slot the expert now owns, or -1 if it already had one.
++    int32_t reserve(int32_t il, int32_t e) {
++        int32_t * slots = slot_map[il];
++        if (slots[e] >= 0) {
++            touch(slots[e]);
++            return -1;
++        }
++        const int32_t s = head;
++        if (key_of[s] >= 0) {
++            slot_map[key_of[s] / n_expert][key_of[s] % n_expert] = -1;
++        }
++        key_of[s] = il*n_expert + e;
++        slots[e] = s;
++        touch(s);
++        return s;
++    }
+ };
+ 
+ // gate, up, down or gate_up, down
+@@ -148,6 +170,78 @@ static bool llama_moe_cache_is_host_weight(const ggml_tensor * t) {
+         ggml_backend_buffer_is_host(t->buffer);
+ }
+ 
++static int32_t llama_moe_env_int(const char * name, int32_t dflt) {
++    const char * v = getenv(name);
++    if (v == nullptr || *v == '\0') {
++        return dflt;
++    }
++    return (int32_t) strtol(v, nullptr, 10);
++}
++
++// vipera: routing-aware prefetch table.
++//
++// The router only reveals the experts of a layer when that layer's split is about
++// to run, so llama.cpp has no lead time to hide an expert upload behind: the cache
++// is filled strictly on demand. A table learned offline from a routing trace (see
++// vipera's manifest) predicts which experts the *next* layers are likely to use, and
++// this file is that table:
++//
++//   # comment
++//   <layer index>  <expert>,<expert>,...     experts most likely first
++//
++// Set LLAMA_MOE_PREFETCH=<path> to enable it; LLAMA_MOE_PREFETCH_DEPTH (default 1)
++// is how many layers ahead to prefetch, LLAMA_MOE_PREFETCH_TOP (default 0 = all)
++// limits each layer to its first N candidates.
++static std::vector<std::vector<int32_t>> llama_moe_prefetch_table(const char * path) {
++    std::vector<std::vector<int32_t>> res;
++    if (path == nullptr) {
++        return res;
++    }
++    FILE * fp = fopen(path, "r");
++    if (fp == nullptr) {
++        LLAMA_LOG_WARN("%s: cannot open prefetch table %s\n", __func__, path);
++        return res;
++    }
++    char line[4096];
++    while (fgets(line, sizeof(line), fp) != nullptr) {
++        char * p = line;
++        while (*p == ' ' || *p == '\t') {
++            ++p;
++        }
++        if (*p == '#' || *p == '\n' || *p == '\r' || *p == '\0') {
++            continue;
++        }
++        char * end = nullptr;
++        const long il = strtol(p, &end, 10);
++        if (end == p || il < 0) {
++            continue;
++        }
++        p = end;
++        while (*p == ' ' || *p == '\t' || *p == ':' || *p == ',') {
++            ++p;
++        }
++        std::vector<int32_t> ids;
++        while (*p != '\0' && *p != '\n' && *p != '\r' && *p != '#') {
++            const long e = strtol(p, &end, 10);
++            if (end == p) {
++                ++p;
++                continue;
++            }
++            ids.push_back((int32_t) e);
++            p = end;
++        }
++        if (ids.empty()) {
++            continue;
++        }
++        if ((size_t) il >= res.size()) {
++            res.resize(il + 1);
++        }
++        res[il] = std::move(ids);
++    }
++    fclose(fp);
++    return res;
++}
++
+ }
+ 
+ struct llama_moe_cache::impl {
+@@ -191,6 +285,7 @@ struct llama_moe_cache::impl {
+         size_t hits   = 0;
+         size_t misses = 0;
+         size_t bytes  = 0;
++        size_t placed = 0; // vipera: prefetch only, experts uploaded ahead of time
+     };
+ 
+     static constexpr int64_t max_batch = 32;
+@@ -201,6 +296,11 @@ struct llama_moe_cache::impl {
+     stats stats_large;
+     stats stats_copy;  // experts copied from the cache for large batches
+ 
++    // vipera: routing-aware prefetch. `placed` counts experts uploaded ahead of
++    // time, `hits` counts how many of them were then selected by the router before
++    // being evicted (i.e. the prefetch was not wasted), `bytes` is the extra traffic.
++    stats stats_prefetch;
++
+     std::vector<device> devices;
+     std::vector<group> groups;
+     std::vector<layer> layers;
+@@ -210,6 +310,17 @@ struct llama_moe_cache::impl {
+     std::vector<int32_t> ids;
+     std::vector<moe_cache_lru::fill> fills;
+ 
++    // vipera: prefetch state, empty unless LLAMA_MOE_PREFETCH is set
++    std::vector<std::vector<int32_t>> predict;        // [n_layer] candidate experts, most likely first
++    std::vector<std::vector<uint8_t>> prefetched;     // [n_layer][n_expert] uploaded ahead of time
++    std::vector<std::vector<uint8_t>> prefetched_used; // [n_layer][n_expert] a prefetch that the router then used
++    int32_t predict_depth = 0;
++    int32_t predict_top   = 0;
++
++    bool prefetch_enabled() const {
++        return predict_depth > 0 && !predict.empty();
++    }
++
+     // slot maps in host memory
+     ggml_context_ptr ctx_host;
+     ggml_backend_buffer_ptr buf_host;
+@@ -427,6 +538,27 @@ struct llama_moe_cache::impl {
+             }
+         }
+ 
++        // vipera: optional routing-aware prefetch table, see llama_moe_prefetch_table
++        predict = llama_moe_prefetch_table(getenv("LLAMA_MOE_PREFETCH"));
++        if (!predict.empty()) {
++            predict_depth = llama_moe_env_int("LLAMA_MOE_PREFETCH_DEPTH", 1);
++            predict_top   = llama_moe_env_int("LLAMA_MOE_PREFETCH_TOP", 0);
++            if (predict_depth <= 0) {
++                predict.clear();
++            }
++        }
++        if (prefetch_enabled()) {
++            const int32_t n_expert = model.hparams.n_expert;
++            prefetched.assign(layers.size(), std::vector<uint8_t>(n_expert, 0));
++            prefetched_used.assign(layers.size(), std::vector<uint8_t>(n_expert, 0));
++            size_t n_predicted = 0;
++            for (const auto & l : predict) {
++                n_predicted += l.size();
++            }
++            LLAMA_LOG_INFO("%s: MoE prefetch enabled: depth = %d, top = %s, %zu experts predicted\n", __func__,
++                predict_depth, predict_top > 0 ? "limited" : "all", n_predicted);
++        }
++
+         // as weights, the ops that read the banks run on the device and the slot maps are copied with the copy callback
+         for (device & d : devices) {
+             if (d.buf) {
+@@ -554,6 +686,21 @@ struct llama_moe_cache::impl {
+             GGML_ABORT("the MoE cache is too small for the experts selected in layer %d", il);
+         }
+ 
++        // vipera: grade the prefetch. an expert uploaded ahead of time that the router
++        // then selects before it is evicted was a useful prefetch, the rest was wasted.
++        if (prefetch_enabled() && il < (int32_t) prefetched.size()) {
++            for (size_t i = 0; i < ids.size(); ++i) {
++                const int32_t e = ids[i];
++                if (e < 0 || e >= g.lru.n_expert) {
++                    continue;
++                }
++                if (prefetched[il][e] && !prefetched_used[il][e]) {
++                    prefetched_used[il][e] = 1;
++                    stats_prefetch.hits++;
++                }
++            }
++        }
++
+         // upload the missing experts, consecutive experts going to consecutive slots are uploaded together
+         size_t bytes = 0;
+         for (size_t ip = 0; ip < l.experts.size(); ++ip) {
+@@ -579,6 +726,44 @@ struct llama_moe_cache::impl {
+         // the next copy synchronizes the backend before it changes the slot map again
+         ggml_backend_tensor_set_async(backend, dst, src->data, 0, ggml_nbytes(src));
+ 
++        // vipera: spend the current layer's compute to fill the cache for the next layers.
++        // only layers of the same group are reachable: they share the banks and run on
++        // `backend`, so an upload issued here lands exactly where their lookup will read.
++        if (prefetch_enabled()) {
++            for (int32_t d = 1; d <= predict_depth; ++d) {
++                const int32_t ij = il + d;
++                if (ij >= (int32_t) layers.size() || ij >= (int32_t) predict.size()) {
++                    break;
++                }
++                if (layers[ij].ig != l.ig) {
++                    break; // a different device owns this layer, we cannot upload for it
++                }
++                const std::vector<int32_t> & cand = predict[ij];
++                const size_t n = predict_top > 0 ? std::min((size_t) predict_top, cand.size()) : cand.size();
++                for (size_t i = 0; i < n; ++i) {
++                    const int32_t e = cand[i];
++                    if (e < 0 || e >= g.lru.n_expert) {
++                        continue;
++                    }
++                    const int32_t slot = g.lru.reserve(ij, e);
++                    if (slot < 0) {
++                        continue; // already cached, nothing to upload
++                    }
++                    for (size_t ip = 0; ip < layers[ij].experts.size(); ++ip) {
++                        const ggml_tensor * w    = layers[ij].experts[ip];
++                        ggml_tensor       * bank = g.banks[ip];
++                        const size_t expert_size = w->nb[2];
++                        ggml_backend_tensor_set_async(backend, bank, (const uint8_t *) w->data + (size_t) e*expert_size,
++                                                      (size_t) slot*expert_size, expert_size);
++                        stats_prefetch.bytes += expert_size;
++                    }
++                    prefetched[ij][e]      = 1;
++                    prefetched_used[ij][e] = 0;
++                    stats_prefetch.placed++;
++                }
++            }
++        }
++
+         return true;
+     }
+ 
+@@ -596,6 +781,14 @@ struct llama_moe_cache::impl {
+         if (stats_copy.hits > 0) {
+             LLAMA_LOG_INFO("llama_moe_cache: large batches: %zu experts copied from the cache, %.2f MiB\n", stats_copy.hits, stats_copy.bytes/1024.0/1024.0);
+         }
++        // vipera: prefetch report. `useful` is the share of prefetched experts the
++        // router went on to select, i.e. the share of the extra traffic that bought
++        // something. a low value means the prediction table is wrong, not the cache.
++        if (stats_prefetch.placed > 0) {
++            LLAMA_LOG_INFO("llama_moe_cache: prefetch: placed = %zu, useful = %zu (%.2f%%), extra upload = %.2f MiB\n",
++                stats_prefetch.placed, stats_prefetch.hits,
++                100.0*stats_prefetch.hits/stats_prefetch.placed, stats_prefetch.bytes/1024.0/1024.0);
++        }
+     }
+ };
+ 
