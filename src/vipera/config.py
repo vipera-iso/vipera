@@ -335,6 +335,9 @@ def save_config(cfg: dict) -> None:
     tmp.write_text(json.dumps(cfg, indent=2))
     # The file can hold an API key, so it must not be world-readable. Written
     # before the rename: a crash leaves a tmp file nobody should read either.
+    # POSIX only: on Windows this clears the read-only attribute and nothing else --
+    # access is governed by the ACL inherited from the directory, which this call
+    # neither reads nor tightens.
     with contextlib.suppress(OSError):
         os.chmod(tmp, 0o600)
     os.replace(tmp, CONFIG_FILE)

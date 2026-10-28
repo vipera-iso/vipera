@@ -2,6 +2,7 @@
 
 import json
 import stat
+import sys
 
 import pytest
 
@@ -50,6 +51,12 @@ def test_cors_rejects_a_shape_that_cannot_be_parsed(home):
         config._coerce_strict({"cors": 42})
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="Windows has no POSIX mode bits: os.chmod only toggles the read-only "
+    "attribute and permissions come from the inherited NTFS ACL, so the property "
+    "this test asserts cannot be stated there",
+)
 def test_the_config_file_is_not_world_readable(home):
     # It can hold an API key.
     config.save_config({**config.DEFAULT_CONFIG, "api_key": "secret"})
