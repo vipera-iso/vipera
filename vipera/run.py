@@ -151,18 +151,6 @@ def supports_prefetch(binary: str) -> bool:
     )
 
 
-def host_cpu_flags(path: str = "/proc/cpuinfo") -> set[str]:
-    """CPU feature flags from /proc/cpuinfo; empty when it cannot be read."""
-    try:
-        with open(path) as f:
-            for line in f:
-                if line.startswith("flags"):
-                    return set(line.split(":", 1)[1].split())
-    except OSError:
-        pass
-    return set()
-
-
 def _quantized(t: str | None) -> bool:
     return t is not None and t not in ("f32", "f16", "bf16")
 
@@ -172,7 +160,6 @@ def plan_flags(
     *,
     gpu: bool,
     n_layers: int | None = None,
-    cpu_flags: set[str] | None = None,
 ) -> RunFlags:
     """Translate a residency manifest into llama.cpp flags.
 
@@ -228,23 +215,12 @@ def plan_flags(
             "hit rate does not describe"
         )
 
-    elif not gpu:
-        # Repacking is a CPU *speed* feature, and on this machine it costs 37-43%
-        # of prompt processing while leaving generation unchanged (FINDINGS §Round 6,
-        # two models). It is skipped only where it cannot pay: a GPU build still
-        # runs experts on the CPU, and AMX/KleidiAI machines have their own reason
-        # to keep it, so neither is touched here.
-        when = cpu_flags if cpu_flags is not None else host_cpu_flags()
-        # Empty means the flags could not be read (or this is not x86, where the
-        # line is spelled differently and KleidiAI may be in play), so keep the
-        # build's own kernels rather than guessing.
-        if when and "amx_tile" not in when:
-            flags.no_repack = True
-            warnings.append(
-                "-nr is set: repacking measured +37-43% prompt processing and no "
-                "change to generation on a CPU without AMX; it is skipped so the "
-                "build's own CPU kernels stay enabled"
-            )
+    # `-nr` is deliberately NOT derived from the host CPU or from `gpu=False`.
+    # Repacking measured +37-43% prompt processing on one CPU and one build
+    # (FINDINGS §Round 6), but turning that into a default would silently disable
+    # the kernels a different machine's CPU offers -- the tradeoff the GPU backend
+    # and AMX/KleidiAI paths make for themselves. Only the spill case above, where
+    # repacking is the difference between loading and being OOM-killed, sets it.
 
     kv = manifest.get("kv_cache") or {}
     flags.cache_type_k = kv.get("type_k")
