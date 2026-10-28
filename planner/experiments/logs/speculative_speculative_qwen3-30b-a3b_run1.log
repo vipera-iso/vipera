@@ -1,0 +1,7 @@
+# speculative:speculative qwen3-30b-a3b (llama-cli) run 1
+# argv: /home/user/dev/llama.cpp/build/bin/llama-cli -m /home/user/dev/vipera/models/Qwen3-30B-A3B-Q4_K_M.gguf -p The quick brown fox jumps over the lazy dog. -n 32 -t 4 -lm mmap -c 512 -s 42 --temp 0 --ignore-eos -st -fa off -ctk f16 -ctv f16 -md /home/user/dev/vipera/models/Qwen3-0.6B-Q4_K_M.gguf --spec-draft-n-max 3
+# wall_s: 24.1
+
+
+
+Loading model... |-\|/-\|/-\|/-\|/-\|/-\|/-\|/-\|/-\|/-\|/-\|/-\|/-\|/-\|/-\|/-\|/-\|/-\|/-\|/-\|/-\|/-\|/-\|/-\|/-\|/-\|/-\|/-\|/-\|/-\|/-\|/-\|/-\|/-\|/-\|/-\|/-\|/-\|/-\|/-\|/-\|/-\|/-\|/-\|/-\|/-\|/-\|/-\|/-\|/-\|/-\|/-\|/-\|/-\|/-\|/-\|/-\|/-

@@ -1,0 +1,11 @@
+0.00.003.129 I Will perform strided perplexity calculation -> adjusting context size from 512 to 640
+0.00.344.231 W load: control-looking token: 128247 '</s>' was not control-type; this is probably a bug in the model. its type will be overridden
+0.00.518.524 I cmn          init: llama threadpool init, n_threads = 4
+0.00.534.741 I 
+0.00.534.815 I system_info: n_threads = 4 (n_threads_batch = 4) / 8 | CPU : SSE3 = 1 | SSSE3 = 1 | AVX = 1 | AVX2 = 1 | F16C = 1 | FMA = 1 | BMI2 = 1 | AVX512 = 1 | AVX512_VBMI = 1 | AVX512_VNNI = 1 | LLAMAFILE = 1 | OPENMP = 1 | REPACK = 1 | 
+0.00.534.822 I perplexity_stream: tokenizing the input ..
+0.01.021.187 I perplexity_stream: streaming eval: n_ctx = 768, sinks = 32, window = 736, stride = 256, 20 chunks
+[1]4.7012,[2]10.3208,[3]13.5166,[4]14.0218,[5]16.8351,[6]17.8078,[7]18.0645,[8]18.1925,[9]19.0431,[10]19.4963,[11]19.9933,[12]20.0918,[13]20.2996,[14]21.0396,[15]21.9813,[16]22.6941,[17]23.2440,[18]23.5631,[19]23.4525,[20]23.6849,
+0.24.499.536 I Final estimate: PPL = 23.6849 +/- 1.12858
+0.24.499.538 I perplexity_stream: 14 context shifts, 5121 tokens scored, sinks = 32
+

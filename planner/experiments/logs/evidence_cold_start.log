@@ -1,0 +1,57 @@
+# Why the harness now runs one discarded warm-up per cell.
+# Excerpt from the full-matrix session run BEFORE warm-up support existed
+# (/tmp/final_matrix.log, 09:22-09:27, same commands otherwise).
+# Every cell's first recorded run is the slowest one by a wide margin:
+
+  [09:22:22] baseline deepseek-v2-lite run 1/5 status=ok tok/s=20.54 wall=11.8s
+  [09:22:34] baseline deepseek-v2-lite run 2/5 status=ok tok/s=20.2 wall=11.8s
+  [09:22:46] baseline deepseek-v2-lite run 3/5 status=ok tok/s=16.49 wall=12.0s
+  [09:22:57] baseline deepseek-v2-lite run 4/5 status=ok tok/s=18.89 wall=11.8s
+  [09:23:09] baseline deepseek-v2-lite run 5/5 status=ok tok/s=19.54 wall=11.6s
+  [09:23:15] baseline qwen3-4b run 1/5 status=ok tok/s=10.58 wall=5.6s
+  [09:23:19] baseline qwen3-4b run 2/5 status=ok tok/s=12.76 wall=4.1s
+  [09:23:23] baseline qwen3-4b run 3/5 status=ok tok/s=13.57 wall=4.0s
+  [09:23:27] baseline qwen3-4b run 4/5 status=ok tok/s=13.96 wall=4.0s
+  [09:23:31] baseline qwen3-4b run 5/5 status=ok tok/s=13.66 wall=4.0s
+  [09:23:43] flashattention deepseek-v2-lite run 1/5 status=ok tok/s=17.39 wall=12.0s
+  [09:23:54] flashattention deepseek-v2-lite run 2/5 status=ok tok/s=20.81 wall=11.4s
+  [09:24:06] flashattention deepseek-v2-lite run 3/5 status=ok tok/s=22.13 wall=11.3s
+  [09:24:17] flashattention deepseek-v2-lite run 4/5 status=ok tok/s=22.64 wall=11.5s
+  [09:24:29] flashattention deepseek-v2-lite run 5/5 status=ok tok/s=19.84 wall=11.8s
+  [09:24:34] flashattention qwen3-4b run 1/5 status=ok tok/s=11.06 wall=5.4s
+  [09:24:38] flashattention qwen3-4b run 2/5 status=ok tok/s=13.36 wall=4.0s
+  [09:24:42] flashattention qwen3-4b run 3/5 status=ok tok/s=13.59 wall=4.0s
+  [09:24:46] flashattention qwen3-4b run 4/5 status=ok tok/s=13.89 wall=4.0s
+  [09:24:50] flashattention qwen3-4b run 5/5 status=ok tok/s=14.03 wall=3.9s
+  [09:25:03] kv-cache-quant deepseek-v2-lite run 1/5 status=ok tok/s=15.03 wall=12.2s
+  [09:25:14] kv-cache-quant deepseek-v2-lite run 2/5 status=ok tok/s=20.96 wall=11.5s
+  [09:25:26] kv-cache-quant deepseek-v2-lite run 3/5 status=ok tok/s=23.08 wall=11.5s
+  [09:25:37] kv-cache-quant deepseek-v2-lite run 4/5 status=ok tok/s=23.36 wall=11.5s
+  [09:25:49] kv-cache-quant deepseek-v2-lite run 5/5 status=ok tok/s=23.37 wall=11.4s
+  [09:25:53] kv-cache-quant qwen3-4b run 1/5 status=ok tok/s=15.5 wall=4.7s
+  [09:25:57] kv-cache-quant qwen3-4b run 2/5 status=ok tok/s=15.51 wall=3.5s
+  [09:26:00] kv-cache-quant qwen3-4b run 3/5 status=ok tok/s=15.39 wall=3.6s
+  [09:26:04] kv-cache-quant qwen3-4b run 4/5 status=ok tok/s=15.57 wall=3.5s
+  [09:26:08] kv-cache-quant qwen3-4b run 5/5 status=ok tok/s=15.53 wall=3.6s
+
+# Same cells after the warm-up was added (09:35-09:42) — first run no longer an outlier:
+  [09:36:42] baseline deepseek-v2-lite run 1/5 status=ok tok/s=22.62 wall=11.6s
+  [09:36:54] baseline deepseek-v2-lite run 2/5 status=ok tok/s=22.44 wall=11.7s
+  [09:37:06] baseline deepseek-v2-lite run 3/5 status=ok tok/s=22.46 wall=11.7s
+  [09:37:18] baseline deepseek-v2-lite run 4/5 status=ok tok/s=22.57 wall=11.7s
+  [09:37:29] baseline deepseek-v2-lite run 5/5 status=ok tok/s=22.26 wall=11.7s
+  [09:37:38] baseline qwen3-4b run 1/5 status=ok tok/s=15.02 wall=3.6s
+  [09:37:41] baseline qwen3-4b run 2/5 status=ok tok/s=14.86 wall=3.6s
+  [09:37:45] baseline qwen3-4b run 3/5 status=ok tok/s=14.92 wall=3.6s
+  [09:37:49] baseline qwen3-4b run 4/5 status=ok tok/s=15.0 wall=3.6s
+  [09:37:52] baseline qwen3-4b run 5/5 status=ok tok/s=14.96 wall=3.6s
+  [09:38:15] flashattention deepseek-v2-lite run 1/5 status=ok tok/s=23.49 wall=11.5s
+  [09:38:27] flashattention deepseek-v2-lite run 2/5 status=ok tok/s=23.49 wall=11.3s
+  [09:38:38] flashattention deepseek-v2-lite run 3/5 status=ok tok/s=23.52 wall=11.3s
+  [09:38:49] flashattention deepseek-v2-lite run 4/5 status=ok tok/s=23.45 wall=11.4s
+  [09:39:01] flashattention deepseek-v2-lite run 5/5 status=ok tok/s=23.62 wall=11.3s
+  [09:39:09] flashattention qwen3-4b run 1/5 status=ok tok/s=15.36 wall=3.6s
+  [09:39:12] flashattention qwen3-4b run 2/5 status=ok tok/s=15.59 wall=3.5s
+  [09:39:16] flashattention qwen3-4b run 3/5 status=ok tok/s=15.6 wall=3.5s
+  [09:39:20] flashattention qwen3-4b run 4/5 status=ok tok/s=15.56 wall=3.6s
+  [09:39:23] flashattention qwen3-4b run 5/5 status=ok tok/s=15.51 wall=3.6s

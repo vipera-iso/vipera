@@ -1,0 +1,10 @@
+{
+  "threads": 8,
+  "stream_buffer_mib": 256,
+  "gemv_matrix": [512, 1024],
+  "read_gbs": 45.67,
+  "copy_gbs": 36.14,
+  "gemv_gflops_single_thread": 20.69,
+  "gemv_gflops_all_threads": 109.99,
+  "note": "read/copy are DRAM streaming (copy counts read+write); gemv is L3-resident and ALU-bound"
+}

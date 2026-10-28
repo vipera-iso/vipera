@@ -1,0 +1,204 @@
+diff --git a/src/llama-graph.cpp b/src/llama-graph.cpp
+index 2bc3a29..d93b3a9 100644
+--- a/src/llama-graph.cpp
++++ b/src/llama-graph.cpp
+@@ -1,5 +1,7 @@
+ #include "llama-graph.h"
+ 
++#include "ggml-backend.h"
++
+ #include "llama-impl.h"
+ #include "llama-model.h"
+ #include "llama-moe-cache.h"
+@@ -19,11 +21,135 @@
+ 
+ #include <cassert>
+ #include <cmath>
++#include <cstdio>
++#include <cstdlib>
+ #include <cstring>
++#include <map>
+ #include <numeric>
+ #include <sstream>
+ #include <string>
+ #include <unordered_set>
++#include <vector>
++
++//
++// vipera: pruned-expert mask (bench/llama-moe-prune.patch).
++//
++// Set LLAMA_MOE_PRUNE=<path> to make the router unable to select experts that a
++// pruning experiment removed. The file is one line per MoE layer, '#' comments
++// and blank lines skipped:
++//
++//   0  3,17,42
++//   1  3,17,42
++//
++// The first field is the layer's block index, the rest are the expert ids to
++// KEEP. Layers that are not listed are left alone, so the file only has to name
++// what changed. Every kept id is validated against the layer's expert count when
++// the mask is written; an out-of-range id aborts instead of silently keeping a
++// different set than the file asked for.
++//
++// The mask is a 1-D f32 vector of 0 / -1e30 added to the router logits *before*
++// the softmax, so a pruned expert's probability is expf(-1e30) == 0.0f exactly and
++// the softmax renormalises over the kept set. That is the same arithmetic as a
++// model whose expert slabs were deleted - the difference is that this needs no
++// second GGUF, which is what makes it usable for a perplexity sweep.
++struct vipera_prune_table {
++    std::map<int, std::vector<int>> keep;
++};
++
++static const vipera_prune_table & vipera_moe_prune_table() {
++    static const vipera_prune_table table = [] {
++        vipera_prune_table t;
++
++        const char * path = getenv("LLAMA_MOE_PRUNE");
++        if (path == nullptr || path[0] == '\0') {
++            return t;
++        }
++
++        FILE * f = fopen(path, "r");
++        if (f == nullptr) {
++            LLAMA_LOG_ERROR("%s: cannot open LLAMA_MOE_PRUNE file '%s'\n", __func__, path);
++            return t;
++        }
++
++        char line[1 << 14];
++        int n_lines = 0;
++        while (fgets(line, sizeof(line), f) != nullptr) {
++            n_lines++;
++            char * p = line;
++            while (*p == ' ' || *p == '\t') {
++                p++;
++            }
++            if (*p == '#' || *p == '\n' || *p == '\r' || *p == '\0') {
++                continue;
++            }
++
++            char * end = nullptr;
++            const long layer = strtol(p, &end, 10);
++            if (end == p || layer < 0) {
++                LLAMA_LOG_ERROR("%s: %s:%d: expected a layer index\n", __func__, path, n_lines);
++                continue;
++            }
++
++            std::vector<int> ids;
++            p = end;
++            while (*p != '\0' && *p != '\n' && *p != '\r') {
++                if (*p == ',' || *p == ' ' || *p == '\t') {
++                    p++;
++                    continue;
++                }
++                const long e = strtol(p, &end, 10);
++                if (end == p) {
++                    LLAMA_LOG_ERROR("%s: %s:%d: '%.16s' is not an expert id\n",
++                                    __func__, path, n_lines, p);
++                    ids.clear();
++                    break;
++                }
++                ids.push_back((int) e);
++                p = end;
++            }
++            if (ids.empty()) {
++                LLAMA_LOG_ERROR("%s: %s:%d: no expert ids; nothing pruned for that layer\n",
++                                __func__, path, n_lines);
++                continue;
++            }
++            t.keep[(int) layer] = std::move(ids);
++        }
++        fclose(f);
++
++        LLAMA_LOG_INFO("%s: pruning %zu MoE layer(s) from %s\n", __func__, t.keep.size(), path);
++        return t;
++    }();
++    return table;
++}
++
++// The keep-set this layer was told to keep, or nullptr when it is not masked.
++static const std::vector<int> * vipera_moe_prune_keep(int il) {
++    const auto & table = vipera_moe_prune_table();
++    auto it = table.keep.find(il);
++    return it == table.keep.end() ? nullptr : &it->second;
++}
++
++// Write the 0 / -1e30 mask into every pruning tensor the scheduler has allocated.
++static void vipera_moe_prune_fill(const std::vector<std::pair<int, ggml_tensor *>> & masks) {
++    for (const auto & [il, mask] : masks) {
++        const std::vector<int> * keep = vipera_moe_prune_keep(il);
++        if (keep == nullptr || mask->buffer == nullptr) {
++            // no keep-set, or a graph that does not go through the scheduler
++            continue;
++        }
++
++        const int64_t n_expert = mask->ne[0];
++        std::vector<float> data((size_t) n_expert, -1e30f);
++        for (int e : *keep) {
++            if (e < 0 || e >= n_expert) {
++                GGML_ABORT("LLAMA_MOE_PRUNE: layer %d keeps expert %d, but the layer has %d experts",
++                           il, e, (int) n_expert);
++            }
++            data[(size_t) e] = 0.0f;
++        }
++        ggml_backend_tensor_set(mask, data.data(), 0, ggml_nbytes(mask));
++    }
++}
+ 
+ // dedup helpers
+ 
+@@ -1412,6 +1538,8 @@ void llm_graph_result::reset() {
+     fused_nodes.clear();
+     hdmd_inputs.clear();
+ 
++    prune_masks.clear();
++
+     buf_compute_meta.resize(ggml_tensor_overhead()*max_nodes + ggml_graph_overhead_custom(max_nodes, false));
+ 
+     ggml_init_params params = {
+@@ -1429,6 +1557,11 @@ void llm_graph_result::set_inputs(const llama_ubatch * ubatch) {
+     for (auto & input : inputs) {
+         input->set_input(ubatch);
+     }
++
++    // vipera: the pruning mask is an input too, but it is the same bytes for every
++    // ubatch, so it is not part of `inputs` - it is written here, after the
++    // scheduler has allocated the buffers this graph will run in.
++    vipera_moe_prune_fill(prune_masks);
+ }
+ 
+ void llm_graph_result::set_outputs(const llm_graph_params & params) {
+@@ -2197,6 +2330,19 @@ ggml_tensor * llm_graph_context::build_moe_ffn(
+         cb(logits, "ffn_moe_logits_biased", il);
+     }
+ 
++    // vipera: keep an expert that a pruning experiment deleted out of the top-k by
++    // driving its logit to -1e30 before the softmax; a pruned expert's probability
++    // is then exactly 0, so the surviving weights renormalise as in a pruned model.
++    if (vipera_moe_prune_keep(il) != nullptr) {
++        ggml_tensor * prune_mask = ggml_new_tensor_1d(ctx0, GGML_TYPE_F32, n_expert);
++        ggml_set_input(prune_mask);
++        // the graph owns the tensor; the result keeps the handle so set_inputs can
++        // write the bytes once the scheduler has allocated them
++        res->prune_masks.emplace_back(il, prune_mask);
++        logits = ggml_add(ctx0, logits, prune_mask);
++        cb(logits, "ffn_moe_logits_pruned", il);
++    }
++
+     ggml_tensor * probs = nullptr;
+     switch (gating_op) {
+         case LLAMA_EXPERT_GATING_FUNC_TYPE_SOFTMAX:
+diff --git a/src/llama-graph.h b/src/llama-graph.h
+index f66bedb..c7eed1c 100644
+--- a/src/llama-graph.h
++++ b/src/llama-graph.h
+@@ -976,6 +976,10 @@ public:
+     std::vector<llm_graph_input_ptr> inputs;
+     std::vector<llm_graph_fused_node> fused_nodes;
+ 
++    // vipera: (block index, expert keep-set mask) for the graph being built.
++    // Empty unless LLAMA_MOE_PRUNE named a mask file (bench/llama-moe-prune.patch).
++    std::vector<std::pair<int, ggml_tensor *>> prune_masks;
++
+     std::map<std::pair<const ggml_tensor *, const ggml_tensor *>, ggml_tensor *> hdmd_inputs;
+ 
+     ggml_context_ptr ctx_compute;

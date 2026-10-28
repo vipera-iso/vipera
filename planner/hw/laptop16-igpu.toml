@@ -1,0 +1,18 @@
+# Hardware of the LOCAL-LLM-16GB problem:
+#   8-core CPU, integrated GPU only, 16 GB unified memory, 3 GB/s NVMe,
+#   PCIe 4.0, offline.
+#
+# Unified memory means there is no separate VRAM pool: the iGPU and the CPU draw
+# from the same 16 GB, so vram_mb = 0 and everything is budgeted as RAM. The
+# bandwidths are class figures (the problem does not state them) — the disk
+# number (3 GB/s) is the one the problem gives.
+name = "laptop-16gb-igpu"
+vram_mb = 0                # no discrete GPU: unified memory only
+ram_mb = 16384
+disk = "nvme-3000mbs"
+vram_headroom_mb = 0
+ram_headroom_mb = 2048     # OS + KV + activations + runtime
+vram_bw_gbs = 100.0        # iGPU and CPU share one LPDDR5 pool (~100 GB/s)
+ram_bw_gbs = 100.0
+disk_bw_gbs = 3.0
+cpu_gflops = 80.0          # 8 cores, AVX2, GEMV after dequant

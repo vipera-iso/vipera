@@ -1,0 +1,35 @@
+models/
+bench/results/*
+# Small, reproducible evidence artifacts; keep these.
+!bench/results/olmoe-1b-7b-511tok.jsonl
+!bench/results/olmoe-multitopic-545tok.jsonl
+!bench/results/README.md
+!bench/results/hwprobe-run1.json
+!bench/results/hwprobe-run2.json
+!bench/results/olmoe-ppl-baseline.json
+!bench/results/olmoe-1b-7b-prefetch-table.txt
+!bench/results/step1-attrib.json
+!bench/results/algo-measure.json
+!bench/results/moe-spill.json
+!bench/results/ppl-*.json
+!bench/results/ppl-*.log
+!bench/results/prune-ppl-*.json
+# The archive holds one artifact on purpose: the build whose two policies tied to five
+# digits, which is what exposed the accumulation bug (docs/REWRITE.md §E). A parent
+# directory has to be re-included before a file inside it can be.
+!bench/results/archive/
+!bench/results/archive/*.json
+!bench/results/archive/*.log
+*.gguf
+__pycache__/
+.venv/
+*.egg-info/
+build/
+*.o
+out/
+.bridge/
+graphify-out/
+
+# Personal working notes — kept out of the repository on purpose.
+viperasuport.md
+docs/reference/literature/

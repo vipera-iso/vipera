@@ -1,0 +1,414 @@
+{
+  "variant": "speculative",
+  "runner": "llama-cli",
+  "flags": [
+    "-fa",
+    "off",
+    "-ctk",
+    "f16",
+    "-ctv",
+    "f16"
+  ],
+  "question": "The llm-optimization literature pack proposes three families of optimizations for local inference: IO-aware attention (FlashAttention), quantized KV cache, and speculative decoding. plantodo.md STEP 1 measured decode at 22.90 tok/s against a modelled ALU ceiling of ~23 tok/s, i.e. compute-bound with disk at <=0.2%. Which of the three moves decode tok/s on THIS machine, when each is turned on alone against a common control?\n",
+  "generated_at": "2026-10-14T02:40:54+00:00",
+  "measurement": {
+    "runs": 5,
+    "warmup_runs": 1,
+    "threads": 4,
+    "n_gen": 32,
+    "ctx_size": 512,
+    "seed": 42,
+    "prompt": "The quick brown fox jumps over the lazy dog.",
+    "timeout_s": 1800,
+    "load_mode": {
+      "deepseek-v2-lite": "mlock",
+      "qwen3-4b": "mlock"
+    }
+  },
+  "arms": {
+    "control_no_draft": {
+      "models": {
+        "qwen3-30b-a3b": {
+          "model_path": "models/Qwen3-30B-A3B-Q4_K_M.gguf",
+          "model_bytes": 18556685824,
+          "load_mode": "mmap",
+          "runner": "llama-cli",
+          "flags": [
+            "-fa",
+            "off",
+            "-ctk",
+            "f16",
+            "-ctv",
+            "f16"
+          ],
+          "draft": null,
+          "command": "/home/user/dev/llama.cpp/build/bin/llama-cli -m /home/user/dev/vipera/models/Qwen3-30B-A3B-Q4_K_M.gguf -p The quick brown fox jumps over the lazy dog. -n 32 -t 4 -lm mmap -c 512 -s 42 --temp 0 --ignore-eos -st -fa off -ctk f16 -ctv f16",
+          "runs": [
+            {
+              "status": "exit_-9",
+              "exit_code": -9,
+              "wall_s": 23.0,
+              "peak_rss_mib": 11506,
+              "majflt": 3078086,
+              "nvme_mib_read": 29826.6,
+              "log": "experiments/logs/speculative_control_no_draft_qwen3-30b-a3b_run1.log",
+              "error_tail": "\b/\b-\b\\\b|\b/\b-\b\\\b|\b/\b-\b\\\b|\b/\b-\b\\\b|\b/\b-\b\\\b|\b/\b-\b\\\b|\b/\b-\b\\\b|\b/\b-\b\\\b|\b/\b-\b\\\b|\b/\b-\b\\\b|\b/\b-\b\\\b|\b/\b-\b\\\b|\b/\b-\b\\\b|\b/\b-\b\\\b|\b/\b-\b\\\b|\b/\b-\b\\\b|\b/\b-\b\\\b|\b/\b-\b\\\b|\b/\b-\b\\\b|\b/\b-\b\\\b|\b/\b-\b\\\b|\b/\b-\b\\\b|\b/\b-\b\\\b|\b/\b-\b\\\b|\b/\b-\b\\\b|\b/\b-\b\\\b|\b/\b-\b\\\b|\b/\b-\b\\\b|\b/\b-\b\\\b|\b/\b-\b\\\b|\b/\b-\b\\\b|\b/\b-\b\\\b|\b/\b-\b\\\b|\b/\b-\b\\\b|\b/\b-\b\\\b|\b/\b-\b\\\b|\b/\b-\b\\\b|\b/\b-",
+              "run": 1
+            }
+          ],
+          "ok": 0,
+          "failed": 1,
+          "n_runs": 1
+        },
+        "qwen3-4b": {
+          "model_path": "models/Qwen3-4B-Q4_K_M.gguf",
+          "model_bytes": 2497281312,
+          "load_mode": "mlock",
+          "runner": "llama-cli",
+          "flags": [
+            "-fa",
+            "off",
+            "-ctk",
+            "f16",
+            "-ctv",
+            "f16"
+          ],
+          "draft": null,
+          "command": "/home/user/dev/llama.cpp/build/bin/llama-cli -m /home/user/dev/vipera/models/Qwen3-4B-Q4_K_M.gguf -p The quick brown fox jumps over the lazy dog. -n 32 -t 4 -lm mlock -c 512 -s 42 --temp 0 --ignore-eos -st -fa off -ctk f16 -ctv f16 -v",
+          "runs": [
+            {
+              "status": "ok",
+              "exit_code": 0,
+              "wall_s": 4.9,
+              "peak_rss_mib": 2533,
+              "majflt": 956282,
+              "nvme_mib_read": 6.4,
+              "log": "experiments/logs/speculative_control_no_draft_qwen3-4b_run1.log",
+              "run": 1,
+              "tok_s": 14.74,
+              "ms_per_token": 67.82,
+              "predicted_n": 32,
+              "predicted_ms": 2102.5,
+              "prompt_n": 18,
+              "prompt_ms": 375.9,
+              "perf_source": "verbose timings JSON",
+              "slot_speculative": false,
+              "spec_types": "none",
+              "spec_impl_missing": true
+            },
+            {
+              "status": "ok",
+              "exit_code": 0,
+              "wall_s": 4.9,
+              "peak_rss_mib": 2533,
+              "majflt": 956259,
+              "nvme_mib_read": 4.2,
+              "log": "experiments/logs/speculative_control_no_draft_qwen3-4b_run2.log",
+              "run": 2,
+              "tok_s": 14.73,
+              "ms_per_token": 67.87,
+              "predicted_n": 32,
+              "predicted_ms": 2103.8,
+              "prompt_n": 18,
+              "prompt_ms": 389.4,
+              "perf_source": "verbose timings JSON",
+              "slot_speculative": false,
+              "spec_types": "none",
+              "spec_impl_missing": true
+            },
+            {
+              "status": "ok",
+              "exit_code": 0,
+              "wall_s": 4.9,
+              "peak_rss_mib": 2533,
+              "majflt": 956359,
+              "nvme_mib_read": 0.4,
+              "log": "experiments/logs/speculative_control_no_draft_qwen3-4b_run3.log",
+              "run": 3,
+              "tok_s": 14.73,
+              "ms_per_token": 67.87,
+              "predicted_n": 32,
+              "predicted_ms": 2104.0,
+              "prompt_n": 18,
+              "prompt_ms": 369.4,
+              "perf_source": "verbose timings JSON",
+              "slot_speculative": false,
+              "spec_types": "none",
+              "spec_impl_missing": true
+            },
+            {
+              "status": "ok",
+              "exit_code": 0,
+              "wall_s": 4.9,
+              "peak_rss_mib": 2533,
+              "majflt": 956341,
+              "nvme_mib_read": 0.0,
+              "log": "experiments/logs/speculative_control_no_draft_qwen3-4b_run4.log",
+              "run": 4,
+              "tok_s": 14.69,
+              "ms_per_token": 68.06,
+              "predicted_n": 32,
+              "predicted_ms": 2109.9,
+              "prompt_n": 18,
+              "prompt_ms": 371.5,
+              "perf_source": "verbose timings JSON",
+              "slot_speculative": false,
+              "spec_types": "none",
+              "spec_impl_missing": true
+            },
+            {
+              "status": "ok",
+              "exit_code": 0,
+              "wall_s": 5.0,
+              "peak_rss_mib": 2533,
+              "majflt": 956325,
+              "nvme_mib_read": 0.0,
+              "log": "experiments/logs/speculative_control_no_draft_qwen3-4b_run5.log",
+              "run": 5,
+              "tok_s": 13.68,
+              "ms_per_token": 73.09,
+              "predicted_n": 32,
+              "predicted_ms": 2265.9,
+              "prompt_n": 18,
+              "prompt_ms": 379.6,
+              "perf_source": "verbose timings JSON",
+              "slot_speculative": false,
+              "spec_types": "none",
+              "spec_impl_missing": true
+            }
+          ],
+          "warmup": [
+            {
+              "status": "ok",
+              "tok_s": 14.7,
+              "wall_s": 4.9,
+              "peak_rss_mib": 2533,
+              "nvme_mib_read": 6.8,
+              "log": "experiments/logs/speculative_control_no_draft_qwen3-4b_warmup1.log"
+            }
+          ],
+          "ok": 5,
+          "failed": 0,
+          "n_runs": 5,
+          "median_tok_s": 14.73,
+          "mean_tok_s": 14.51,
+          "std_tok_s": 0.47,
+          "min_tok_s": 13.68,
+          "max_tok_s": 14.74,
+          "cv_pct": 3.2,
+          "lever_engaged": false,
+          "lever_note": "draft model was loaded, but no speculative implementation was available in this build: the runtime logs 'no implementations specified for speculative decoding', the slot reports speculative:false and the sampler list reports speculative.types:'none' [measured, see results/evidence_lever_and_oom.txt]. These tok/s rows therefore measure the identical non-speculative decode path twice, not the speculative lever.",
+          "status": "lever-not-engaged"
+        },
+        "deepseek-v2-lite": {
+          "status": "not-applicable",
+          "runner": "llama-cli",
+          "flags": [
+            "-fa",
+            "off",
+            "-ctk",
+            "f16",
+            "-ctv",
+            "f16"
+          ],
+          "reason": "no draft model with the deepseek-v2-lite tokenizer exists locally; models/Qwen3-0.6B-Q4_K_M.gguf shares the Qwen3 tokenizer and pairs with Qwen3-30B-A3B, so this variant is measured on that model only",
+          "runs": []
+        }
+      }
+    },
+    "speculative": {
+      "models": {
+        "qwen3-30b-a3b": {
+          "model_path": "models/Qwen3-30B-A3B-Q4_K_M.gguf",
+          "model_bytes": 18556685824,
+          "load_mode": "mmap",
+          "runner": "llama-cli",
+          "flags": [
+            "-fa",
+            "off",
+            "-ctk",
+            "f16",
+            "-ctv",
+            "f16",
+            "--spec-draft-n-max",
+            "3"
+          ],
+          "draft": "models/Qwen3-0.6B-Q4_K_M.gguf",
+          "command": "/home/user/dev/llama.cpp/build/bin/llama-cli -m /home/user/dev/vipera/models/Qwen3-30B-A3B-Q4_K_M.gguf -p The quick brown fox jumps over the lazy dog. -n 32 -t 4 -lm mmap -c 512 -s 42 --temp 0 --ignore-eos -st -fa off -ctk f16 -ctv f16 -md /home/user/dev/vipera/models/Qwen3-0.6B-Q4_K_M.gguf --spec-draft-n-max 3",
+          "runs": [
+            {
+              "status": "exit_-9",
+              "exit_code": -9,
+              "wall_s": 24.1,
+              "peak_rss_mib": 11517,
+              "majflt": 3072233,
+              "nvme_mib_read": 30484.6,
+              "log": "experiments/logs/speculative_speculative_qwen3-30b-a3b_run1.log",
+              "error_tail": "\b/\b-\b\\\b|\b/\b-\b\\\b|\b/\b-\b\\\b|\b/\b-\b\\\b|\b/\b-\b\\\b|\b/\b-\b\\\b|\b/\b-\b\\\b|\b/\b-\b\\\b|\b/\b-\b\\\b|\b/\b-\b\\\b|\b/\b-\b\\\b|\b/\b-\b\\\b|\b/\b-\b\\\b|\b/\b-\b\\\b|\b/\b-\b\\\b|\b/\b-\b\\\b|\b/\b-\b\\\b|\b/\b-\b\\\b|\b/\b-\b\\\b|\b/\b-\b\\\b|\b/\b-\b\\\b|\b/\b-\b\\\b|\b/\b-\b\\\b|\b/\b-\b\\\b|\b/\b-\b\\\b|\b/\b-\b\\\b|\b/\b-\b\\\b|\b/\b-\b\\\b|\b/\b-\b\\\b|\b/\b-\b\\\b|\b/\b-\b\\\b|\b/\b-\b\\\b|\b/\b-\b\\\b|\b/\b-\b\\\b|\b/\b-\b\\\b|\b/\b-\b\\\b|\b/\b-\b\\\b|\b/\b-",
+              "run": 1
+            }
+          ],
+          "ok": 0,
+          "failed": 1,
+          "n_runs": 1
+        },
+        "qwen3-4b": {
+          "model_path": "models/Qwen3-4B-Q4_K_M.gguf",
+          "model_bytes": 2497281312,
+          "load_mode": "mlock",
+          "runner": "llama-cli",
+          "flags": [
+            "-fa",
+            "off",
+            "-ctk",
+            "f16",
+            "-ctv",
+            "f16",
+            "--spec-draft-n-max",
+            "3"
+          ],
+          "draft": "models/Qwen3-0.6B-Q4_K_M.gguf",
+          "command": "/home/user/dev/llama.cpp/build/bin/llama-cli -m /home/user/dev/vipera/models/Qwen3-4B-Q4_K_M.gguf -p The quick brown fox jumps over the lazy dog. -n 32 -t 4 -lm mlock -c 512 -s 42 --temp 0 --ignore-eos -st -fa off -ctk f16 -ctv f16 -v -md /home/user/dev/vipera/models/Qwen3-0.6B-Q4_K_M.gguf --spec-draft-n-max 3",
+          "runs": [
+            {
+              "status": "ok",
+              "exit_code": 0,
+              "wall_s": 5.5,
+              "peak_rss_mib": 3012,
+              "majflt": 1080732,
+              "nvme_mib_read": 6.5,
+              "log": "experiments/logs/speculative_speculative_qwen3-4b_run1.log",
+              "run": 1,
+              "tok_s": 14.51,
+              "ms_per_token": 68.94,
+              "predicted_n": 32,
+              "predicted_ms": 2137.0,
+              "prompt_n": 18,
+              "prompt_ms": 373.5,
+              "perf_source": "verbose timings JSON",
+              "slot_speculative": false,
+              "spec_types": "none",
+              "spec_impl_missing": true
+            },
+            {
+              "status": "ok",
+              "exit_code": 0,
+              "wall_s": 5.5,
+              "peak_rss_mib": 3012,
+              "majflt": 1080836,
+              "nvme_mib_read": 0.0,
+              "log": "experiments/logs/speculative_speculative_qwen3-4b_run2.log",
+              "run": 2,
+              "tok_s": 14.73,
+              "ms_per_token": 67.9,
+              "predicted_n": 32,
+              "predicted_ms": 2104.9,
+              "prompt_n": 18,
+              "prompt_ms": 364.1,
+              "perf_source": "verbose timings JSON",
+              "slot_speculative": false,
+              "spec_types": "none",
+              "spec_impl_missing": true
+            },
+            {
+              "status": "ok",
+              "exit_code": 0,
+              "wall_s": 5.5,
+              "peak_rss_mib": 3012,
+              "majflt": 1080747,
+              "nvme_mib_read": 1.4,
+              "log": "experiments/logs/speculative_speculative_qwen3-4b_run3.log",
+              "run": 3,
+              "tok_s": 14.63,
+              "ms_per_token": 68.36,
+              "predicted_n": 32,
+              "predicted_ms": 2119.2,
+              "prompt_n": 18,
+              "prompt_ms": 364.3,
+              "perf_source": "verbose timings JSON",
+              "slot_speculative": false,
+              "spec_types": "none",
+              "spec_impl_missing": true
+            },
+            {
+              "status": "ok",
+              "exit_code": 0,
+              "wall_s": 5.5,
+              "peak_rss_mib": 3012,
+              "majflt": 1080822,
+              "nvme_mib_read": 18.3,
+              "log": "experiments/logs/speculative_speculative_qwen3-4b_run4.log",
+              "run": 4,
+              "tok_s": 14.53,
+              "ms_per_token": 68.82,
+              "predicted_n": 32,
+              "predicted_ms": 2133.3,
+              "prompt_n": 18,
+              "prompt_ms": 364.7,
+              "perf_source": "verbose timings JSON",
+              "slot_speculative": false,
+              "spec_types": "none",
+              "spec_impl_missing": true
+            },
+            {
+              "status": "ok",
+              "exit_code": 0,
+              "wall_s": 5.5,
+              "peak_rss_mib": 3012,
+              "majflt": 1080833,
+              "nvme_mib_read": 0.1,
+              "log": "experiments/logs/speculative_speculative_qwen3-4b_run5.log",
+              "run": 5,
+              "tok_s": 14.6,
+              "ms_per_token": 68.49,
+              "predicted_n": 32,
+              "predicted_ms": 2123.2,
+              "prompt_n": 18,
+              "prompt_ms": 373.0,
+              "perf_source": "verbose timings JSON",
+              "slot_speculative": false,
+              "spec_types": "none",
+              "spec_impl_missing": true
+            }
+          ],
+          "warmup": [
+            {
+              "status": "ok",
+              "tok_s": 14.66,
+              "wall_s": 5.7,
+              "peak_rss_mib": 3012,
+              "nvme_mib_read": 387.9,
+              "log": "experiments/logs/speculative_speculative_qwen3-4b_warmup1.log"
+            }
+          ],
+          "ok": 5,
+          "failed": 0,
+          "n_runs": 5,
+          "median_tok_s": 14.6,
+          "mean_tok_s": 14.6,
+          "std_tok_s": 0.09,
+          "min_tok_s": 14.51,
+          "max_tok_s": 14.73,
+          "cv_pct": 0.6,
+          "lever_engaged": false,
+          "lever_note": "draft model was loaded, but no speculative implementation was available in this build: the runtime logs 'no implementations specified for speculative decoding', the slot reports speculative:false and the sampler list reports speculative.types:'none' [measured, see results/evidence_lever_and_oom.txt]. These tok/s rows therefore measure the identical non-speculative decode path twice, not the speculative lever.",
+          "status": "lever-not-engaged"
+        },
+        "deepseek-v2-lite": {
+          "status": "not-applicable",
+          "runner": "llama-cli",
+          "flags": [
+            "-fa",
+            "off",
+            "-ctk",
+            "f16",
+            "-ctv",
+            "f16"
+          ],
+          "reason": "no draft model with the deepseek-v2-lite tokenizer exists locally; models/Qwen3-0.6B-Q4_K_M.gguf shares the Qwen3 tokenizer and pairs with Qwen3-30B-A3B, so this variant is measured on that model only",
+          "runs": []
+        }
+      }
+    }
+  }
+}

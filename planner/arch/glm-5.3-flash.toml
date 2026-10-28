@@ -1,0 +1,39 @@
+# GLM-5.3-Flash — derived architecture profile (vipera stage 2).
+#
+# Z.ai publishes: 321B total / 18B active, a 45-layer language model that routes
+# each token through 8 of 288 experts, 34 Kimi-Delta (KDA) + 11 MLA/DSA layers,
+# a four-stream mHC residual path, one MTP draft layer, and a native FP8
+# checkpoint (~306 GiB). The exact config is not public, so the shapes below are
+# DERIVED: they were chosen to reproduce 321B total / 18B active within ~1%
+# (run `python3 -m vipera arch arch/glm-5.3-flash.toml` to see the residual).
+# Treat them as a calibrated estimate, not ground truth.
+name = "glm-5.3-flash"
+n_layers = 45
+hidden = 5120
+vocab = 151936
+n_experts = 288
+top_k = 8
+moe_inter = 1536
+n_shared_experts = 1
+shared_inter = 1536
+kda_layers = 34
+mla_layers = 11
+mhc_streams = 4
+mtp_layers = 1
+vision_params = 1000000000   # native vision encoder, not on the text decode path
+# Published headline numbers, used only to report the calibration residual.
+stated_total = 321000000000
+stated_active = 18000000000
+
+[mla]
+n_heads = 48
+qk_nope = 128
+qk_rope = 64
+v_head = 128
+kv_lora = 512
+
+[kda]
+# KDA weight cost per layer = hidden_multiple * hidden^2 (q/k/v/o + gates + conv).
+hidden_multiple = 7.4
+state_width = 128
+d_conv = 4

@@ -1,0 +1,32 @@
+# experiments/variants/speculative/variant.yaml
+#
+# Lever: speculative decoding with a small draft model (SpecInfer 2305.09781, EAGLE 2401.15077).
+# A 0.6B draft proposes tokens, the 30B target verifies them in one forward pass, so every
+# accepted token is a large-model weight read that did not happen.
+#
+# Two things make this variant different from the other two, and both are stated
+# in REPORT.md rather than smoothed over:
+#
+#   1. It runs through llama-cli, not llama-bench: this build's llama-bench has no draft-model
+#      flags (checked against `llama-bench --help`). llama-cli reports its own eval time, but
+#      it also pays prompt processing and draft overhead, so its absolute tok/s is NOT
+#      comparable to a llama-bench row. Comparisons are made against a llama-cli control
+#      measured in the same session (see REPORT.md "method").
+#   2. The draft must share the target's tokenizer. Qwen3-0.6B pairs with the Qwen3 target
+#      (qwen3-4b — see config.yaml `models_not_runnable` for why the intended 30B target was
+#      replaced). No small DeepSeek-V2-tokenizer draft exists locally, so this variant is
+#      measured on the Qwen3 target only and is recorded as not-applicable for DeepSeek.
+
+name: speculative
+runner: llama-cli
+flags: ["-fa", "off", "-ctk", "f16", "-ctv", "f16"]
+draft: models/Qwen3-0.6B-Q4_K_M.gguf
+draft_flags: ["--spec-draft-n-max", "3"]
+applicable_models: [qwen3-4b]
+doc: >
+  Greedy speculative decoding, target = Qwen3-4B Q4_K_M, draft = Qwen3-0.6B Q4_K_M,
+  up to 3 drafted tokens per step,
+  FlashAttention off, f16 KV cache. Correctness is checked separately by
+  `benchmark.py verify`, which asserts the draft run emits the same tokens as the
+  no-draft run (speculative decoding must be lossless at temperature 0).
+  Relevant papers in the local pack: 2305.09781 (SpecInfer), 2401.15077 (EAGLE).

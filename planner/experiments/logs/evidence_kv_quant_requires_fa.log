@@ -1,0 +1,3 @@
+llama_init_from_model: quantized V cache requires flash_attn to be enabled
+llama_bench: error: failed to create context with model 'models/DeepSeek-V2-Lite.Q4_K_M.gguf'
+[

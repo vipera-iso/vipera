@@ -1,0 +1,30 @@
+# Evidence for the claims in REPORT.md that need a line out of a run log.
+# Pulled out of the stored logs mechanically; nothing here is retyped by hand.
+
+## Speculative decoding: the draft is loaded and then never used (REPORT 3.3)
+# grep -n -iE 'speculat|draft' logs/speculative_speculative_qwen3-4b_run1.log
+common_speculative_init_result: loading draft model '/home/user/dev/vipera/models/Qwen3-0.6B-Q4_K_M.gguf'
+
+0.02.666.253 I spec common_specu: no implementations specified for speculative decoding
+launching slot : {"id":0,"n_ctx":512,"speculative":false,"is_processing":false}
+# sampler list: speculative.types":"none
+
+## ... so both arms report the same decoder timings (REPORT 3.3)
+# the decoder's own numbers, from the response JSON llama-cli prints under -v
+    control (no -md) : predicted_n=32 predicted_ms=2102.482 per_token_ms=67.822 per_second=14.74
+    draft on (-md)   : predicted_n=32 predicted_ms=2137.033 per_token_ms=68.937 per_second=14.51
+    draft counters in the response: none - the speculative path produced none
+
+## KV quantization cannot be isolated from the attention kernel (REPORT 3.4)
+# reproduced on demand, exit 1: llama-bench ... -fa off -ck q8_0 -cv q8_0
+llama_init_from_model: quantized V cache requires flash_attn to be enabled
+
+## The 30B target cannot load (REPORT 4.1)
+# journalctl -k | grep 'Killed process.*llama-cli'
+    Oct 14 08:57:06 arch-nitro kernel: Out of memory: Killed process 25812 (llama-cli) total-vm:18817072kB, anon-rss:11854268kB, file-rss:3028kB, shmem-rss:0kB, UID:1000 pgtables:23588kB oom_score_adj:0
+
+## FlashAttention order swap (REPORT 3.1) - full record in logs/evidence_fa_order_check.log
+# llama-bench ... {-fa off|-fa on -ck f16 -cv f16}, interleaved A/B/A/B/A/B/A/B on DeepSeek-V2-Lite
+    fa=off: [22.422397, 22.431758, 22.293645, 22.177974]  median 22.36
+    fa=on : [23.323682, 23.456686, 23.430269, 23.243326]  median 23.38
+    speedup 1.046x   pairs won by fa=on: 4/4
