@@ -781,7 +781,8 @@ def build_parser() -> argparse.ArgumentParser:
     rn.add_argument("model")
     rn.add_argument("--target", help="hardware profile (TOML); required unless --manifest is given")
     rn.add_argument("--manifest", help="reuse an existing *.vipera.json instead of planning")
-    rn.add_argument("--binary", help="llama-cli executable (default: ~/dev/llama.cpp/build/bin/llama-cli)")
+    rn.add_argument("--binary", help="llama-cli executable (default: ~/dev/vipera.cpp/build/bin/llama-cli, "
+                                      "falling back to ~/dev/llama.cpp/build/bin/llama-cli)")
     rn.add_argument("--context", type=int, default=2048)
     rn.add_argument("--n-predict", type=int, default=32)
     rn.add_argument("--prompt", default="The capital of France is")

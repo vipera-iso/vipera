@@ -658,7 +658,12 @@ def resolve_binary(binary: str) -> str:
 
 
 def default_binary() -> str:
-    candidate = os.path.expanduser("~/dev/llama.cpp/build/bin/llama-cli")
-    if os.path.exists(candidate):
-        return candidate
+    # The runtime is the fork in vipera.cpp, not upstream llama.cpp: it carries the
+    # planning report and the tiled matmul this project measures. Upstream is only a
+    # fallback for a box that has no fork build, and PATH is the last resort.
+    for candidate in ("~/dev/vipera.cpp/build/bin/llama-cli",
+                      "~/dev/llama.cpp/build/bin/llama-cli"):
+        path = os.path.expanduser(candidate)
+        if os.path.exists(path):
+            return path
     return "llama-cli"
