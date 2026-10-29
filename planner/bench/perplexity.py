@@ -126,10 +126,16 @@ DEFAULT_MARGIN = 128
 #: router cannot select an expert the mask drops, which is the arithmetic of a
 #: model whose slabs were deleted - so this measures pruning without building it.
 PRUNE_ENV = "LLAMA_MOE_PRUNE"
+#: What the mask does to a pruned expert's *weight*: `renorm` (default) divides the
+#: surviving probabilities by the kept mass, like a model whose slabs were deleted;
+#: `keep-scale` only blocks selection and leaves the weights at their unmasked
+#: values, so the layer keeps the scale the full model gave it.
+MODE_ENV = "LLAMA_MOE_PRUNE_MODE"
+PRUNE_MODES = ("renorm", "keep-scale")
 
 
 def environment(*, policy: str | None = None, margin: int | None = None,
-                prune_mask: str | None = None) -> dict | None:
+                prune_mask: str | None = None, mask_mode: str | None = None) -> dict | None:
     """The environment vipera's llama.cpp patches read, or None when nothing is set.
 
     Kept apart from `run_perplexity` so the plumbing can be tested without spawning
@@ -145,6 +151,10 @@ def environment(*, policy: str | None = None, margin: int | None = None,
         env = {**(env or os.environ), MARGIN_ENV: str(margin)}
     if prune_mask is not None:
         env = {**(env or os.environ), PRUNE_ENV: prune_mask}
+    if mask_mode is not None:
+        if mask_mode not in PRUNE_MODES:
+            raise ValueError(f"unknown mask mode {mask_mode!r}; expected one of {PRUNE_MODES}")
+        env = {**(env or os.environ), MODE_ENV: mask_mode}
     return env
 
 
@@ -153,12 +163,13 @@ def run_perplexity(binary: str, model: str, *, corpus: str, chunks: int | None =
                    timeout: float | None = None, stride: int | None = None,
                    keep: int | None = None, context_shift: bool = False,
                    policy: str | None = None, margin: int | None = None,
-                   prune_mask: str | None = None) -> dict:
+                   prune_mask: str | None = None, mask_mode: str | None = None) -> dict:
     cmd = build_command(binary, model, corpus=corpus, chunks=chunks, context=context,
                         threads=threads, ngl=ngl, stride=stride, keep=keep,
                         context_shift=context_shift)
 
-    env = environment(policy=policy, margin=margin, prune_mask=prune_mask)
+    env = environment(policy=policy, margin=margin, prune_mask=prune_mask,
+                      mask_mode=mask_mode)
 
     started = time.monotonic()
     try:
@@ -174,7 +185,8 @@ def run_perplexity(binary: str, model: str, *, corpus: str, chunks: int | None =
               "context": context, "corpus": os.path.basename(corpus),
               "stride": stride, "keep": keep, "context_shift": context_shift,
               "policy": policy, "margin": margin,
-              "prune_mask": os.path.basename(prune_mask) if prune_mask else None}
+              "prune_mask": os.path.basename(prune_mask) if prune_mask else None,
+              "mask_mode": mask_mode}
     scored, shifts = parse_stream_stats(output)
     if scored is not None:
         report["scored_tokens"] = scored
