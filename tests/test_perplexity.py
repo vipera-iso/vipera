@@ -2,8 +2,10 @@ import unittest
 
 from bench.perplexity import (
     EVICTION_POLICIES,
+    MODE_ENV,
     POLICY_ENV,
     PRUNE_ENV,
+    PRUNE_MODES,
     build_command,
     compare_stream,
     difference_sigmas,
@@ -108,6 +110,18 @@ class TestPruneMask(unittest.TestCase):
 
     def test_nothing_set_leaves_the_environment_alone(self):
         self.assertIsNone(environment())
+
+    def test_the_mask_mode_selects_what_the_mask_does_to_the_weights(self):
+        self.assertEqual(MODE_ENV, "LLAMA_MOE_PRUNE_MODE")
+        self.assertEqual(PRUNE_MODES, ("renorm", "keep-scale"))
+        env = environment(prune_mask="/tmp/mask.txt", mask_mode="keep-scale")
+        self.assertEqual(env[MODE_ENV], "keep-scale")
+        self.assertEqual(env[PRUNE_ENV], "/tmp/mask.txt")
+
+    def test_an_unknown_mask_mode_is_refused_before_spawning(self):
+        # a typo must not silently measure the full model and be reported as a result
+        with self.assertRaises(ValueError):
+            environment(mask_mode="keep_scale")
 
     def test_the_mask_stacks_with_a_policy(self):
         env = environment(policy="surprise", prune_mask="/tmp/mask.txt")

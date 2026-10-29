@@ -42,7 +42,7 @@ import os
 import sys
 import tempfile
 
-from bench.perplexity import run_perplexity
+from bench.perplexity import PRUNE_MODES, run_perplexity
 from vipera.arch import Architecture
 from vipera.prune import (
     keep_sets,
@@ -159,12 +159,18 @@ def spearman(xs: list[float], ys: list[float]) -> float:
 def run_sweep(binary: str, model: str, *, corpus: str, routing, n_experts: int,
               fractions: list[float], chunks: int | None, context: int,
               threads: int | None, seed: int = 0, timeout: float | None = None,
-              workdir: str | None = None) -> dict:
-    """Baseline plus every arm, all on the same corpus/context/chunk count."""
+              workdir: str | None = None, mask_mode: str = "renorm") -> dict:
+    """Baseline plus every arm, all on the same corpus/context/chunk count.
+
+    `mask_mode` is what the mask does to the surviving weights: `renorm` (a pruned
+    model), or `keep-scale` (selection blocked, weights left at their full-model
+    values) - the one-parameter stand-in for healing.
+    """
     baseline = run_perplexity(binary, model, corpus=corpus, chunks=chunks,
                               context=context, threads=threads, ngl=0, timeout=timeout)
     report: dict = {"baseline": baseline, "context": context, "chunks": chunks,
-                    "corpus": os.path.basename(corpus), "arms": []}
+                    "corpus": os.path.basename(corpus), "mask_mode": mask_mode,
+                    "arms": []}
     if not baseline.get("ok"):
         report["ok"] = False
         return report
@@ -177,7 +183,7 @@ def run_sweep(binary: str, model: str, *, corpus: str, routing, n_experts: int,
         write_mask(path, arm["keep"])
         run = run_perplexity(binary, model, corpus=corpus, chunks=chunks,
                              context=context, threads=threads, ngl=0,
-                             timeout=timeout, prune_mask=path)
+                             timeout=timeout, prune_mask=path, mask_mode=mask_mode)
         row = {
             "arm": arm["arm"],
             "policy": arm["policy"],
@@ -185,6 +191,7 @@ def run_sweep(binary: str, model: str, *, corpus: str, routing, n_experts: int,
             "keep_per_layer": arm["keep_per_layer"],
             "kept_mass": round(arm["kept_mass"], 4),
             "mask": os.path.basename(path),
+            "mask_mode": mask_mode,
             "ok": bool(run.get("ok")),
             "ppl": run.get("ppl"),
             "ppl_stderr": run.get("ppl_stderr"),
@@ -219,6 +226,8 @@ def format_report(report: dict) -> str:
     lines.append(f"corpus        {report['corpus']}  ({report['chunks']} chunks, "
                  f"ctx {report['context']})")
     lines.append(f"baseline      PPL {baseline['ppl']:.4f} +/- {baseline['ppl_stderr']:.5f}")
+    if report.get("mask_mode"):
+        lines.append(f"mask mode     {report['mask_mode']}")
     lines.append("")
     lines.append(f"{'arm':<16}{'kept':>6}{'mass':>8}{'PPL':>12}{'vs base':>10}{'sigma':>8}")
     for row in report["arms"]:
@@ -258,6 +267,10 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--fractions", default="0.125,0.25,0.5",
                    help="comma-separated keep-fractions (share of the pool per layer)")
     p.add_argument("--seed", type=int, default=0, help="seed for the uniform arm")
+    p.add_argument("--mask-mode", choices=list(PRUNE_MODES), default="renorm",
+                   help="renorm: the survivors renormalise (a pruned model). "
+                        "keep-scale: block selection only, keep the full-model weights "
+                        "- the cheap stand-in for healing")
     p.add_argument("--threads", type=int, default=None)
     p.add_argument("--timeout", type=float, default=None)
     p.add_argument("--workdir", default=None, help="where the mask files are written")
@@ -281,7 +294,8 @@ def main(argv: list[str] | None = None) -> int:
     report = run_sweep(args.bin, args.model, corpus=args.corpus, routing=routing,
                        n_experts=arch.n_experts, fractions=fractions, chunks=args.chunks,
                        context=args.context, threads=args.threads, seed=args.seed,
-                       timeout=args.timeout, workdir=args.workdir)
+                       timeout=args.timeout, workdir=args.workdir,
+                       mask_mode=args.mask_mode)
     print(format_report(report))
 
     if args.json_path:

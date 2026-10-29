@@ -108,6 +108,11 @@ class TestFormatReport(unittest.TestCase):
         self.assertIn("does NOT predict", text)
         self.assertIn("MISS", text)
 
+    def test_the_mask_mode_is_named_because_it_changes_what_is_measured(self):
+        report = self._report()
+        report["mask_mode"] = "keep-scale"
+        self.assertIn("mask mode     keep-scale", format_report(report))
+
     def test_a_failed_baseline_short_circuits(self):
         text = format_report({"baseline": {"ok": False, "error": "timeout"}, "arms": []})
         self.assertIn("baseline FAILED: timeout", text)
