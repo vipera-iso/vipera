@@ -1,5 +1,5 @@
 diff --git a/src/llama-graph.cpp b/src/llama-graph.cpp
-index 2bc3a29..d93b3a9 100644
+index 2bc3a29..3c1bddc 100644
 --- a/src/llama-graph.cpp
 +++ b/src/llama-graph.cpp
 @@ -1,5 +1,7 @@
@@ -10,7 +10,7 @@ index 2bc3a29..d93b3a9 100644
  #include "llama-impl.h"
  #include "llama-model.h"
  #include "llama-moe-cache.h"
-@@ -19,11 +21,135 @@
+@@ -19,11 +21,151 @@
  
  #include <cassert>
  #include <cmath>
@@ -47,6 +47,13 @@ index 2bc3a29..d93b3a9 100644
 +// second GGUF, which is what makes it usable for a perplexity sweep.
 +struct vipera_prune_table {
 +    std::map<int, std::vector<int>> keep;
++    // LLAMA_MOE_PRUNE_MODE=keep-scale leaves the surviving probabilities at their
++    // unmasked values, so the FFN output keeps the scale the full model gave it
++    // and the layer is merely *missing* the pruned experts' contribution. The
++    // default (renorm) renormalises over the survivors, which is what deleting
++    // the slabs computes. The two differ only in where the mask is added: before
++    // the softmax for renorm, to the selection probabilities for keep-scale.
++    bool keep_scale = false;
 +};
 +
 +static const vipera_prune_table & vipera_moe_prune_table() {
@@ -109,7 +116,16 @@ index 2bc3a29..d93b3a9 100644
 +        }
 +        fclose(f);
 +
-+        LLAMA_LOG_INFO("%s: pruning %zu MoE layer(s) from %s\n", __func__, t.keep.size(), path);
++        const char * mode = getenv("LLAMA_MOE_PRUNE_MODE");
++        if (mode != nullptr && strcmp(mode, "keep-scale") == 0) {
++            t.keep_scale = true;
++        } else if (mode != nullptr && mode[0] != '\0' && strcmp(mode, "renorm") != 0) {
++            LLAMA_LOG_ERROR("%s: unknown LLAMA_MOE_PRUNE_MODE '%s'; expected renorm "
++                            "or keep-scale. Measuring as renorm.\n", __func__, mode);
++        }
++
++        LLAMA_LOG_INFO("%s: pruning %zu MoE layer(s) from %s (%s)\n", __func__, t.keep.size(),
++                       path, t.keep_scale ? "keep-scale" : "renorm");
 +        return t;
 +    }();
 +    return table;
@@ -146,7 +162,7 @@ index 2bc3a29..d93b3a9 100644
  
  // dedup helpers
  
-@@ -1412,6 +1538,8 @@ void llm_graph_result::reset() {
+@@ -1412,6 +1554,8 @@ void llm_graph_result::reset() {
      fused_nodes.clear();
      hdmd_inputs.clear();
  
@@ -155,7 +171,7 @@ index 2bc3a29..d93b3a9 100644
      buf_compute_meta.resize(ggml_tensor_overhead()*max_nodes + ggml_graph_overhead_custom(max_nodes, false));
  
      ggml_init_params params = {
-@@ -1429,6 +1557,11 @@ void llm_graph_result::set_inputs(const llama_ubatch * ubatch) {
+@@ -1429,6 +1573,11 @@ void llm_graph_result::set_inputs(const llama_ubatch * ubatch) {
      for (auto & input : inputs) {
          input->set_input(ubatch);
      }
@@ -167,26 +183,47 @@ index 2bc3a29..d93b3a9 100644
  }
  
  void llm_graph_result::set_outputs(const llm_graph_params & params) {
-@@ -2197,6 +2330,19 @@ ggml_tensor * llm_graph_context::build_moe_ffn(
+@@ -2197,6 +2346,25 @@ ggml_tensor * llm_graph_context::build_moe_ffn(
          cb(logits, "ffn_moe_logits_biased", il);
      }
  
-+    // vipera: keep an expert that a pruning experiment deleted out of the top-k by
-+    // driving its logit to -1e30 before the softmax; a pruned expert's probability
-+    // is then exactly 0, so the surviving weights renormalise as in a pruned model.
++    // vipera: keep an expert that a pruning experiment deleted out of the top-k.
++    // In `renorm` mode the mask is added to the logits *before* the softmax, so a
++    // pruned expert's probability is exactly 0 and the survivors renormalise as in
++    // a model whose slabs were deleted. In `keep-scale` mode it is added to the
++    // selection probabilities further down instead, which stops selection without
++    // changing the weights: the layer keeps the scale the full model gave it.
++    ggml_tensor * prune_mask = nullptr;
 +    if (vipera_moe_prune_keep(il) != nullptr) {
-+        ggml_tensor * prune_mask = ggml_new_tensor_1d(ctx0, GGML_TYPE_F32, n_expert);
++        prune_mask = ggml_new_tensor_1d(ctx0, GGML_TYPE_F32, n_expert);
 +        ggml_set_input(prune_mask);
 +        // the graph owns the tensor; the result keeps the handle so set_inputs can
 +        // write the bytes once the scheduler has allocated them
 +        res->prune_masks.emplace_back(il, prune_mask);
-+        logits = ggml_add(ctx0, logits, prune_mask);
-+        cb(logits, "ffn_moe_logits_pruned", il);
++        if (!vipera_moe_prune_table().keep_scale) {
++            logits = ggml_add(ctx0, logits, prune_mask);
++            cb(logits, "ffn_moe_logits_pruned", il);
++        }
 +    }
 +
      ggml_tensor * probs = nullptr;
      switch (gating_op) {
          case LLAMA_EXPERT_GATING_FUNC_TYPE_SOFTMAX:
+@@ -2239,6 +2407,14 @@ ggml_tensor * llm_graph_context::build_moe_ffn(
+         cb(selection_probs, "ffn_moe_probs_biased", il);
+     }
+ 
++    // vipera: `keep-scale` mode - block selection here, where the expert *weights*
++    // (read from `probs`, not from this tensor) are untouched. The surviving
++    // weights therefore sum to the retained mass instead of 1.
++    if (prune_mask != nullptr && vipera_moe_prune_table().keep_scale) {
++        selection_probs = ggml_add(ctx0, selection_probs, prune_mask);
++        cb(selection_probs, "ffn_moe_probs_pruned", il);
++    }
++
+     // select top n_group_used expert groups
+     // https://huggingface.co/deepseek-ai/DeepSeek-V3/blob/e815299b0bcbac849fa540c768ef21845365c9eb/modeling_deepseek.py#L440-L457
+     if (hparams.n_expert_groups > 1 && n_tokens > 0) {
 diff --git a/src/llama-graph.h b/src/llama-graph.h
 index f66bedb..c7eed1c 100644
 --- a/src/llama-graph.h
