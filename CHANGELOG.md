@@ -52,13 +52,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   nobody.
 
 ### Fixed
-
 - **The Windows CI job is green again.**
   `test_the_config_file_is_not_world_readable` asserted POSIX mode bits on a
   platform that has none: `os.chmod` there only toggles the read-only
   attribute, and permissions come from the ACL inherited from the directory.
   The test now skips on win32 with that reason; the POSIX guarantee itself is
   unchanged and still asserted on Linux and macOS.
+- **`parallel` now costs KV, in the plan and in the banner.** llama.cpp splits
+  one `-c` window across `-np` slots, so N slots need `-c ctx × N` for each
+  request to keep the planned window — and N caches on the card. The planner
+  priced one, so `parallel: 4` offloaded layers a 4 GB card could not hold, then
+  walked them back at load time while the banner kept reporting the optimistic
+  split. `plan(parallel=…)` multiplies `kv_cache_gb` and both host footprints by
+  the slot count, `Plan.parallel` carries it, `server_command` takes `-c`/`-np`
+  from the plan instead of the config, and only a backend that opens slots
+  (`serves_slots`) is charged — the in-process engine has one context.
+- **`model import --name` could write outside the model store.** `../../escaped`
+  produced `models/../../escaped.gguf`, outside `VIPERA_HOME`, and registered
+  that path as the model. The alias is one path component now: separators become
+  dashes, leading and trailing dots go, and a name with nothing left falls back
+  to the file's stem, so `Qwen2.5-7B-Instruct` is untouched.
+- **A split GGUF reports its parameter count once.** Every shard carries the full
+  KV block (`gguf_set_kv` in `tools/gguf-split`), so summing
+  `general.parameter_count` reported a 2-shard 70B as 140B in `model list`,
+  `model inspect` and `/api/show`'s `parameter_size`.
 - **Shaping could orphan a tool result.** When history had to be dropped, the
   oldest messages were deleted one at a time, so an `assistant(tool_calls)`
   turn could go while its `tool` replies stayed behind; Hermes/Qwen chat
