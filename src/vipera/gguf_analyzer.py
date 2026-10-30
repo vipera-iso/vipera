@@ -360,9 +360,14 @@ def _merge_analysis(parts: list[dict[str, Any]], model_path: Path) -> dict[str, 
         "attn_bytes",
         "fixed_bytes",
         "tensor_count",
-        "n_params",
     ):
         meta[key] = _add(key)
+    # Not additive: `general.parameter_count` describes the whole model, and
+    # gguf-split copies the entire KV block into every shard (`gguf_set_kv` in
+    # tools/gguf-split). Summing it reported a 2-shard 70B as 140B.
+    meta["n_params"] = max(
+        (int(part["metadata"].get("n_params") or 0) for part in parts), default=0
+    )
 
     for list_key in ("expert_layer_bytes", "ffn_layer_bytes"):
         width = max(len(part["metadata"].get(list_key) or []) for part in parts)

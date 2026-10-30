@@ -702,6 +702,46 @@ def test_split_model_merges_layer_and_category_tables(tmp_path, monkeypatch):
     assert len(result["tensor_map"]) == 3
 
 
+class ParamsShardReader(FakeReader):
+    """A shard that carries a parameter count, like every real split shard does."""
+
+    def __init__(self, tensors, params):
+        super().__init__()
+        self.tensors = tensors
+        self.fields["general.parameter_count"] = FakeField(params)
+
+
+def test_split_model_counts_parameters_once(tmp_path, monkeypatch):
+    """`general.parameter_count` is not additive across shards.
+
+    gguf-split copies the whole KV block into every shard (`gguf_set_kv` in
+    tools/gguf-split), so each file describes the whole model. Summing it
+    reported a 2-shard 70B as 140B in `model list` and in /api/show's
+    `parameter_size`.
+    """
+    shards = {
+        "tiny-00001-of-00002.gguf": ParamsShardReader(
+            [FakeTensor("blk.0.attn_q.weight", 12, [128, 128], 100, 16_384)], 70_000_000_000
+        ),
+        "tiny-00002-of-00002.gguf": ParamsShardReader(
+            [FakeTensor("blk.1.attn_q.weight", 12, [128, 128], 150, 16_384)], 70_000_000_000
+        ),
+    }
+    module = types.ModuleType("gguf")
+    module.GGUFReader = lambda path: shards[Path(path).name]
+    monkeypatch.setitem(sys.modules, "gguf", module)
+    first = tmp_path / "tiny-00001-of-00002.gguf"
+    first.write_bytes(b"x")
+    (tmp_path / "tiny-00002-of-00002.gguf").write_bytes(b"x")
+
+    meta = analyze_gguf(str(first))["metadata"]
+
+    assert meta["n_params"] == 70_000_000_000
+    # The sizes around it stay additive: they are per-shard on this file system.
+    assert meta["file_size_bytes"] == 2
+    assert meta["tensor_count"] == 2
+
+
 def test_split_model_keeps_what_the_header_declares_missing(tmp_path, monkeypatch):
     """A partial download still analyzes; the shortfall is visible."""
     module = types.ModuleType("gguf")
