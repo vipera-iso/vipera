@@ -278,14 +278,139 @@ def _as_text(value: Any) -> str | None:
     return str(value)
 
 
+# A split GGUF names its shards `...-00001-of-00002.gguf`. llama.cpp opens
+# shard 1 and follows `split.count` itself, so a file that *works* is not
+# evidence that the numbers describing it are complete.
+_SHARD_RE = re.compile(r"-(\d{5})-of-(\d{5})\.gguf$", re.IGNORECASE)
+
+
+def _shard_paths(model_path: Path) -> list[Path]:
+    """Every shard of a split GGUF, in order; ``[model_path]`` otherwise.
+
+    Discovery is by filename, because that is what llama.cpp relies on too.
+    Symlinks are resolved first: `vipera model add` links shard 1 into the model
+    store under a name of its own, and the pattern only survives on the target.
+
+    A declared shard count larger than the siblings on disk keeps whatever is
+    there: a partially downloaded split must still analyze, and the caller can
+    see the shortfall in ``split_count`` against ``split_declared``.
+    """
+    real_path = model_path.resolve()
+    match = _SHARD_RE.search(real_path.name)
+    if match is None or int(match.group(2)) <= 1:
+        return [model_path]
+    prefix = real_path.name[: match.start()]
+    siblings = sorted(real_path.parent.glob(f"{prefix}-*-of-{match.group(2)}.gguf"))
+    return siblings or [model_path]
+
+
 def analyze_gguf(path: str) -> dict[str, Any]:
-    """Return metadata, tensor map, and size breakdown for a GGUF file.
+    """Return metadata, tensor map, and size breakdown for a GGUF model.
+
+    A split model is analyzed **whole**: every shard is read and the per-layer
+    tables are summed, so ``expert_bytes`` and ``file_size_bytes`` describe the
+    same thing. They did not before, and on a two-shard 58 GB model the planner
+    compared a whole-file size against one shard's expert bytes: it saw 14.5 GB
+    of "non-expert" weights where there are 2.6 GB, concluded the dense side
+    could never fit in VRAM, and planned the model CPU-only.
 
     The return value is JSON-friendly except for integer layer keys, which are
     kept as integers for convenient sorting. It raises ``GGUFAnalysisError``
     with an actionable message when the file or the optional ``gguf`` package
     is unavailable.
     """
+    model_path = Path(path).expanduser()
+    shards = _shard_paths(model_path)
+    if len(shards) == 1:
+        result = _analyze_single(str(model_path))
+        declared = _declared_shards(model_path)
+        if declared > 1:
+            # A split whose later shards are not on disk yet still analyzes, but
+            # says so: the sums below describe what is here, not the model.
+            result["metadata"]["split_count"] = 1
+            result["metadata"]["split_declared"] = declared
+        return result
+    return _merge_analysis([_analyze_single(str(shard)) for shard in shards], model_path)
+
+
+def _declared_shards(model_path: Path) -> int:
+    """The shard count the file name declares, or 1 for a single-file model."""
+    match = _SHARD_RE.search(model_path.resolve().name)
+    return int(match.group(2)) if match else 1
+
+
+def _merge_analysis(parts: list[dict[str, Any]], model_path: Path) -> dict[str, Any]:
+    """One analysis for a split model, summed across its shards.
+
+    Descriptions come from the first shard (every shard carries the same
+    header), sizes are summed, and the per-layer lists are added index by
+    index, which is what makes ``expert_layer_bytes`` cover the layers that
+    live in the later shards.
+    """
+    first = parts[0]
+    meta = dict(first["metadata"])
+
+    def _add(key: str) -> int:
+        return sum(int(part["metadata"].get(key) or 0) for part in parts)
+
+    for key in (
+        "file_size_bytes",
+        "expert_bytes",
+        "shared_expert_bytes",
+        "attn_bytes",
+        "fixed_bytes",
+        "tensor_count",
+        "n_params",
+    ):
+        meta[key] = _add(key)
+
+    for list_key in ("expert_layer_bytes", "ffn_layer_bytes"):
+        width = max(len(part["metadata"].get(list_key) or []) for part in parts)
+        meta[list_key] = [
+            sum(int((part["metadata"].get(list_key) or [0] * width)[i] or 0) for part in parts)
+            for i in range(width)
+        ]
+    meta["expert_layers"] = sum(1 for value in meta["expert_layer_bytes"] if value > 0)
+    meta["split_count"] = len(parts)
+
+    quant_sizes: dict[str, int] = defaultdict(int)
+    quant_counts: dict[str, int] = defaultdict(int)
+    category_sizes: dict[str, int] = defaultdict(int)
+    layer_sizes: dict[int | None, int] = defaultdict(int)
+    warnings: list[dict[str, str]] = []
+    for part in parts:
+        for key, value in part["quant_sizes"].items():
+            quant_sizes[key] += int(value)
+        for key, value in part["quant_counts"].items():
+            quant_counts[key] += int(value)
+        for key, value in part["category_sizes"].items():
+            category_sizes[key] += int(value)
+        for key, value in part["layer_distribution"].items():
+            layer_sizes[key] += int(value)
+        warnings.extend(part["warnings"])
+    if quant_sizes:
+        meta["dominant_quant"] = max(quant_sizes, key=lambda key: quant_sizes[key])
+    truncated = (
+        any(part.get("warnings_truncated") for part in parts) or len(warnings) > _MAX_WARNINGS
+    )
+
+    return {
+        "path": str(model_path),
+        "metadata": meta,
+        "tensor_map": [tensor for part in parts for tensor in part["tensor_map"]],
+        "layer_distribution": dict(
+            sorted(layer_sizes.items(), key=lambda kv: (kv[0] is None, kv[0] or 0))
+        ),
+        "category_sizes": dict(category_sizes),
+        "quant_sizes": dict(quant_sizes),
+        "quant_counts": dict(quant_counts),
+        "warnings": warnings[:_MAX_WARNINGS],
+        "warnings_truncated": truncated,
+    }
+
+
+def _analyze_single(path: str) -> dict[str, Any]:
+    """Metadata, tensor map, and size breakdown for one GGUF file."""
     model_path = Path(path).expanduser()
     if not model_path.is_file():
         raise GGUFAnalysisError(f"file not found: {model_path}")

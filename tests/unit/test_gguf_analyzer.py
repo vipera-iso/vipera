@@ -1,6 +1,7 @@
 import struct
 import sys
 import types
+from pathlib import Path
 
 import pytest
 
@@ -625,3 +626,154 @@ def test_analyze_splits_attention_from_the_movable_dense_ffn(tmp_path, mocked_de
     assert meta["ffn_layer_bytes"] == [200 + 210 + 220]
     assert meta["attn_bytes"] == 100 + 20 + 20 + 60 + 10
     assert meta["fixed_bytes"] == 500 + 400
+
+
+class FakeShardReader(FakeReader):
+    """One shard's worth of tensors, so two of them can stand in for a split."""
+
+    def __init__(self, tensors):
+        super().__init__()
+        self.tensors = tensors
+
+
+def test_split_model_is_analyzed_as_one_model(tmp_path, monkeypatch):
+    """A 2-shard file must be described whole, not one shard at a time.
+
+    On a real two-shard gpt-oss-120b the planner compared the whole-file size
+    against shard 1's expert bytes, saw 14.5 GB of "non-expert" weights where
+    there are 2.6 GB, and planned the model CPU-only. Every table below is
+    summed for the same reason.
+    """
+    shards = {
+        "tiny-00001-of-00002.gguf": [
+            FakeTensor("blk.0.ffn_down_exps.weight", 12, [128, 256, 4], 300, 131_072),
+            FakeTensor("blk.0.attn_q.weight", 12, [128, 128], 100, 16_384),
+        ],
+        "tiny-00002-of-00002.gguf": [
+            FakeTensor("blk.1.ffn_down_exps.weight", 12, [128, 256, 4], 400, 131_072),
+            FakeTensor("blk.1.attn_q.weight", 12, [128, 128], 150, 16_384),
+        ],
+    }
+    module = types.ModuleType("gguf")
+    module.GGUFReader = lambda path: FakeShardReader(shards[Path(path).name])
+    monkeypatch.setitem(sys.modules, "gguf", module)
+
+    first = tmp_path / "tiny-00001-of-00002.gguf"
+    first.write_bytes(b"x" * 10)
+    second = tmp_path / "tiny-00002-of-00002.gguf"
+    second.write_bytes(b"x" * 20)
+
+    meta = analyze_gguf(str(first))["metadata"]
+
+    assert meta["split_count"] == 2
+    assert meta["file_size_bytes"] == 30
+    assert meta["expert_bytes"] == 300 + 400
+    assert meta["expert_layer_bytes"] == [300, 400]
+    assert meta["expert_layers"] == 2
+    # The layer-resident total, experts included (only a model with no experts
+    # reads this field, through the --n-cpu-ffn path).
+    assert meta["attn_bytes"] == 300 + 100 + 400 + 150
+    assert meta["tensor_count"] == 4
+
+
+def test_split_model_merges_layer_and_category_tables(tmp_path, monkeypatch):
+    shards = {
+        "tiny-00001-of-00002.gguf": [
+            FakeTensor("blk.0.attn_q.weight", 12, [128, 128], 100, 16_384),
+            FakeTensor("token_embd.weight", 1, [128, 100], 500, 12_800),
+        ],
+        "tiny-00002-of-00002.gguf": [
+            FakeTensor("blk.1.attn_q.weight", 12, [128, 128], 150, 16_384),
+        ],
+    }
+    module = types.ModuleType("gguf")
+    module.GGUFReader = lambda path: FakeShardReader(shards[Path(path).name])
+    monkeypatch.setitem(sys.modules, "gguf", module)
+    first = tmp_path / "tiny-00001-of-00002.gguf"
+    first.write_bytes(b"x")
+    (tmp_path / "tiny-00002-of-00002.gguf").write_bytes(b"x")
+
+    result = analyze_gguf(str(first))
+
+    assert result["layer_distribution"][0] == 100
+    assert result["layer_distribution"][1] == 150
+    assert result["layer_distribution"][None] == 500
+    assert result["category_sizes"]["attention"] == 250
+    assert len(result["tensor_map"]) == 3
+
+
+def test_split_model_keeps_what_the_header_declares_missing(tmp_path, monkeypatch):
+    """A partial download still analyzes; the shortfall is visible."""
+    module = types.ModuleType("gguf")
+    module.GGUFReader = lambda path: FakeShardReader(
+        [FakeTensor("blk.0.attn_q.weight", 12, [128, 128], 100, 16_384)]
+    )
+    monkeypatch.setitem(sys.modules, "gguf", module)
+    alone = tmp_path / "tiny-00001-of-00002.gguf"
+    alone.write_bytes(b"x")
+
+    meta = analyze_gguf(str(alone))["metadata"]
+
+    assert meta["split_count"] == 1
+    assert meta["split_declared"] == 2
+    assert meta["file_size_bytes"] == 1
+
+
+def test_single_file_model_is_not_reported_as_a_split(tmp_path, mocked_gguf):
+    path = tmp_path / "model.gguf"
+    path.write_bytes(b"")
+
+    meta = analyze_gguf(str(path))["metadata"]
+
+    assert "split_count" not in meta
+
+
+def test_read_meta_takes_the_whole_model_size_for_a_split(tmp_path, monkeypatch):
+    """`size_bytes` is the planner's budget for the model, so it is the sum."""
+    analysis = {
+        "metadata": {
+            "n_layers": 2,
+            "file_size_bytes": 900,
+            "expert_bytes": 0,
+            "expert_layer_bytes": [0, 0],
+        }
+    }
+    monkeypatch.setattr("vipera.gguf_analyzer.analyze_gguf", lambda p: analysis)
+    path = tmp_path / "tiny-00001-of-00002.gguf"
+    path.write_bytes(b"x" * 5)
+
+    meta = model_cmd._read_meta(path)
+
+    assert meta["size_bytes"] == 900
+
+
+def test_shard_discovery_survives_a_symlink_into_the_model_store(tmp_path, monkeypatch):
+    """`vipera model add` links shard 1 under a name of its own.
+
+    The link's name carries no `-00001-of-00002`, so discovery has to resolve it
+    before matching - otherwise the linked copy is analyzed as if it were the
+    whole model, which is how the store got a 49 GB description of a 62 GB file.
+    """
+    store = tmp_path / "store"
+    store.mkdir()
+    shards = {
+        "tiny-00001-of-00002.gguf": [
+            FakeTensor("blk.0.ffn_down_exps.weight", 12, [128, 256, 4], 300, 131_072)
+        ],
+        "tiny-00002-of-00002.gguf": [
+            FakeTensor("blk.1.ffn_down_exps.weight", 12, [128, 256, 4], 400, 131_072)
+        ],
+    }
+    for name, size in (("tiny-00001-of-00002.gguf", 10), ("tiny-00002-of-00002.gguf", 20)):
+        (store / name).write_bytes(b"x" * size)
+    link = store / "tiny-linked.gguf"
+    link.symlink_to(store / "tiny-00001-of-00002.gguf")
+    module = types.ModuleType("gguf")
+    module.GGUFReader = lambda path: FakeShardReader(shards[Path(path).name])
+    monkeypatch.setitem(sys.modules, "gguf", module)
+
+    meta = analyze_gguf(str(link))["metadata"]
+
+    assert meta["split_count"] == 2
+    assert meta["expert_bytes"] == 700
+    assert meta["expert_layer_bytes"] == [300, 400]

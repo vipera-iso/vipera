@@ -528,10 +528,27 @@ def test_moe_plan_honours_explicit_ubatch():
 
 
 def test_moe_plan_needs_per_layer_expert_sizes():
+    """Without them there is no *partial* expert placement - but -cmoe still is.
+
+    `_moe_cpu_layers` fits a suffix of expert layers and needs the per-layer
+    bytes to do it. Sending every expert to the CPU needs no such arithmetic,
+    so a model the analyzer described coarsely still gets attention on the card
+    instead of a CPU-only plan.
+    """
     meta = dict(_LFM_MOE_META)
     meta.pop("expert_layer_bytes")
 
     p = plan(meta, _hw(gpu_name="GTX 1650", vram_total_gb=4.0, vram_free_gb=3.64))
+
+    assert p.moe_cpu_layers == meta["n_layers"]
+    assert p.requires_server is True
+
+
+def test_moe_plan_keeps_the_classic_split_without_expert_sizes_or_a_card():
+    meta = dict(_LFM_MOE_META)
+    meta.pop("expert_layer_bytes")
+
+    p = plan(meta, _hw())
 
     assert p.moe_cpu_layers == -1
     assert p.requires_server is False
@@ -702,3 +719,73 @@ def test_tensor_split_ram_estimate_charges_only_the_cpu_ffn_blocks():
 
     assert p.n_cpu_ffn == 36
     assert p.ram_estimate_gb == pytest.approx(36 * 132 / 1024 + 2.0, abs=0.02)
+
+
+# gpt-oss-120b Q2_K as it exists on the test box: two shards, 62.6 GB total,
+# 60 GB of it routed experts, ~2.6 GB everything else. The non-expert side is
+# small enough for a 4 GB card; the expert pool is 15x the machine's RAM.
+_GPTOSS_MOE_LAYER_BYTES = [int(60.0e9 / 36)] * 36
+_GPTOSS_MOE_META = {
+    "n_layers": 36,
+    "n_heads": 64,
+    "n_kv_heads": 8,
+    "head_dim": 64,
+    "kv_layers": 36,
+    "context_length": 131072,
+    "size_bytes": int(62.6e9),
+    "expert_bytes": sum(_GPTOSS_MOE_LAYER_BYTES),
+    "expert_layer_bytes": _GPTOSS_MOE_LAYER_BYTES,
+    "expert_layers": 36,
+}
+
+
+def test_spill_moe_keeps_every_expert_on_the_cpu_and_attention_on_the_gpu():
+    """A MoE model bigger than RAM is not a CPU-only model.
+
+    `_moe_cpu_layers` only ever buys expert layers, so on a spill it returns
+    None and the model used to land on a classic split of one or two whole
+    layers - expert slabs included, which are bytes read 4 times in 128 - or on
+    CPU-only, which reads every attention block from RAM on every token.
+    """
+    hw = _hw(
+        gpu_name="GTX 1650",
+        vram_total_gb=4.0,
+        vram_free_gb=3.64,
+        ram_total_gb=15.4,
+        ram_free_gb=10.6,
+    )
+    p = plan(_GPTOSS_MOE_META, hw, ctx=8192, kv_cache="q4_0")
+
+    assert p.moe_cpu_layers == 36  # every routed expert stays in RAM == -cmoe
+    assert p.gpu_layers == 36
+    assert p.requires_server is True
+    assert p.note == "MoE: all 36 expert layers on CPU, attention on GPU"
+    # The expert pool is still host-side, and that is the number to quote when
+    # explaining why the model streams from disk; only KV and the compute
+    # buffers must actually be resident.
+    assert p.ram_estimate_gb > 55
+    assert p.host_resident_gb < 3
+
+
+def test_spill_moe_without_room_for_the_dense_side_stays_classic():
+    hw = _hw(gpu_name="GTX 1650", vram_total_gb=4.0, vram_free_gb=1.0)
+    p = plan(_GPTOSS_MOE_META, hw, ctx=8192, kv_cache="q4_0")
+
+    assert p.moe_cpu_layers == -1
+    assert p.gpu_layers == 0
+    assert p.note.startswith("CPU ONLY")
+
+
+def test_spill_moe_needs_a_card_and_experts():
+    without_gpu = plan(_GPTOSS_MOE_META, _hw(), ctx=8192, kv_cache="q4_0")
+    assert without_gpu.moe_cpu_layers == -1
+
+    dense = {k: v for k, v in _GPTOSS_MOE_META.items() if not k.startswith("expert")}
+    dense["size_bytes"] = 3 * _GIB
+    no_experts = plan(
+        dense,
+        _hw(gpu_name="GTX 1650", vram_total_gb=4.0, vram_free_gb=3.64),
+        ctx=8192,
+        kv_cache="q4_0",
+    )
+    assert no_experts.moe_cpu_layers == -1

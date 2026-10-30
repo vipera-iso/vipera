@@ -108,6 +108,12 @@ def _read_meta(path: Path, name: str | None = None) -> dict:
         # of each layer; without them the planner keeps to the classic split.
         meta["attn_bytes"] = int(am.get("attn_bytes") or 0)
         meta["fixed_bytes"] = int(am.get("fixed_bytes") or 0)
+        # A split model's shards are one artifact. The analyzer sums them, and
+        # the planner has to budget against that sum: `path.stat().st_size` is
+        # shard 1, and mixing it with whole-model component tables (or the
+        # other way round) is how a model with 2.6 GB of non-expert weights got
+        # described as 14.5 GB and planned CPU-only.
+        meta["size_bytes"] = int(am.get("file_size_bytes") or path.stat().st_size)
         layer_ffn = am.get("ffn_layer_bytes") or []
         if isinstance(layer_ffn, list):
             meta["ffn_layer_bytes"] = [int(value) for value in layer_ffn]

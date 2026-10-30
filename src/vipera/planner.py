@@ -240,6 +240,92 @@ def _host_ubatch(hw: HardwareInfo, small_box: int) -> int:
     return _HOST_UBATCH
 
 
+def _moe_experts_on_cpu_plan(
+    meta: dict,
+    hw: HardwareInfo,
+    *,
+    n_layers: int,
+    kv_layers: int,
+    ctx: int,
+    kv_cache: str,
+    kv_cache_k: str | None,
+    kv_cache_v: str | None,
+    flash_attn: bool,
+    n_batch: int,
+    n_ubatch: int,
+    cpu_threads: int,
+    note: str,
+    footprint: "_HostFootprint | None" = None,
+) -> Plan | None:
+    """Every routed expert in RAM, every attention block on the card.
+
+    `-ncmoe n_layers` is exactly llama.cpp's `-cmoe`, and this is the plan for a
+    MoE model whose dense side fits in VRAM while its expert pool does not.
+    Measured on LFM2.5-8B-A1B (Q4_K weights, Q3_K experts, ctx 8192, GTX 1650):
+    CPU-only **37.1 t/s**, experts-on-CPU **49.9 t/s**, the full MoE split
+    69.3 t/s. A plan that cannot place experts still gets **+35%** from placing
+    attention.
+
+    On gpt-oss-120b Q2_K (58 GB of weights, 15 GiB RAM, 4 GB card) the routed
+    experts are 96% of the file and the non-expert side is ~2.6 GB, so this
+    plan moves roughly 1.4 GB of the ~3.3 GB read per token off the host - the
+    whole always-active side of the model - and leaves ~0.8 GB of the card for
+    an expert pool. The classic split spends the same card on one or two whole
+    layers, expert slabs included, which is bytes read 4 times in 128.
+
+    Returns None when the model has no routed experts, there is no GPU, or the
+    dense side does not fit; the caller then keeps its own plan.
+    """
+    if getattr(hw, "vram_total_gb", 0) <= 0:
+        return None
+
+    expert_bytes = int(meta.get("expert_bytes") or 0)
+    size_bytes = int(meta.get("size_bytes") or 0)
+    if expert_bytes <= 0 or size_bytes <= expert_bytes:
+        return None
+
+    ubatch = n_ubatch if n_ubatch > 0 else min(n_batch, _DENSE_UBATCH)
+    dense_gb = (size_bytes - expert_bytes) / 1024**3
+    # Same K/V averaging the classic path uses, so a plan that only overrides
+    # one side is priced for the side it actually allocates.
+    kv_gb = (
+        _estimate_kv_cache_gb(meta, ctx, kv_cache_k or kv_cache)
+        + _estimate_kv_cache_gb(meta, ctx, kv_cache_v or kv_cache)
+    ) / 2
+    overhead_gb = _MOE_OVERHEAD_BASE_GB + _MOE_OVERHEAD_PER_UB_GB * ubatch
+    spare_gb = hw.vram_free_gb - dense_gb - kv_gb - overhead_gb - _MOE_VRAM_RESERVE_GB
+    if spare_gb < 0:
+        return None
+
+    return Plan(
+        gpu_layers=n_layers,
+        cpu_threads=cpu_threads,
+        context=ctx,
+        kv_cache=kv_cache,
+        # Attention runs on the card, where flash attention is the fast path.
+        flash_attn=flash_attn,
+        n_batch=n_batch,
+        offload_kqv=True,
+        # With the whole expert pool host-side these only move for a profile
+        # that computed them; `lowmem` leaves the footprint unestimated, which
+        # is what its callers already expect.
+        use_mlock=footprint.use_mlock if footprint else False,
+        note=note,
+        ram_estimate_gb=footprint.ram_estimate_gb if footprint else 0.0,
+        host_resident_gb=footprint.resident_gb if footprint else 0.0,
+        kv_cache_gb=kv_gb,
+        kv_layers=kv_layers,
+        moe_cpu_layers=n_layers,
+        n_ubatch=ubatch,
+        # What is left after the dense side is what an expert pool lives in;
+        # see _MOE_CACHE_MIN_SPARE_GB for why a small spare keeps it off.
+        moe_cache_mib=_moe_cache_mib(spare_gb),
+        n_layers=n_layers,
+        kv_cache_k=kv_cache_k or "",
+        kv_cache_v=kv_cache_v or "",
+    )
+
+
 def _lowmem_moe_plan(
     meta: dict,
     hw: HardwareInfo,
@@ -252,55 +338,29 @@ def _lowmem_moe_plan(
 ) -> Plan | None:
     """`lowmem` for a MoE model: every routed expert in RAM, attention on the card.
 
-    "No expert on the GPU" is not the same as "no GPU". On a MoE model the routed
-    experts are the bulk of the file, and the attention side is small enough to fit
-    beside the reserve of a 4 GB card. Measured on LFM2.5-8B-A1B (Q4_K weights, Q3_K
-    experts, ctx 8192, GTX 1650): CPU-only **37.1 t/s**, experts-on-CPU **49.9 t/s**,
-    the full MoE split 69.3 t/s. So the profile can honour its promise - no expert
-    weight in VRAM - and still be 35% faster than the plan it used to return.
-
-    `-ncmoe n_layers` is exactly llama.cpp's `-cmoe`.
-
-    Returns None when the model has no routed experts, there is no GPU, or the dense
-    side does not fit; the caller then keeps the CPU-only plan.
+    "No expert on the GPU" is not the same as "no GPU". Measured on
+    LFM2.5-8B-A1B: CPU-only **37.1 t/s**, experts-on-CPU **49.9 t/s**, the full
+    MoE split 69.3 t/s - so the profile can honour its promise (no expert weight
+    in VRAM) and still be 35% faster than the plan it used to return. The profile
+    keeps its small context and small batch; `_moe_experts_on_cpu_plan` holds the
+    placement decision both this and the `auto` profile use.
     """
-    if getattr(hw, "vram_total_gb", 0) <= 0:
-        return None
-
-    expert_bytes = int(meta.get("expert_bytes") or 0)
-    size_bytes = int(meta.get("size_bytes") or 0)
-    if expert_bytes <= 0 or size_bytes <= expert_bytes:
-        return None
-
     lowmem_ctx = min(ctx, 2048)
     ubatch = min(n_batch, 64)
-    dense_gb = (size_bytes - expert_bytes) / 1024**3
-    kv_gb = _estimate_kv_cache_gb(meta, lowmem_ctx, "f16")
-    overhead_gb = _MOE_OVERHEAD_BASE_GB + _MOE_OVERHEAD_PER_UB_GB * ubatch
-    spare_gb = hw.vram_free_gb - dense_gb - kv_gb - overhead_gb - _MOE_VRAM_RESERVE_GB
-    if spare_gb < 0:
-        return None
-
-    return Plan(
-        gpu_layers=n_layers,
-        cpu_threads=cpu_threads,
-        context=lowmem_ctx,
+    return _moe_experts_on_cpu_plan(
+        meta,
+        hw,
+        n_layers=n_layers,
+        kv_layers=kv_layers,
+        ctx=lowmem_ctx,
         kv_cache="f16",
-        # Attention now runs on the card, where flash attention is the fast path.
+        kv_cache_k=None,
+        kv_cache_v=None,
         flash_attn=True,
         n_batch=ubatch,
-        offload_kqv=True,
-        use_mlock=False,
-        note=f"MoE: experts on CPU, attention on GPU ({n_layers}/{n_layers} layers, Low Memory)",
-        kv_cache_gb=kv_gb,
-        kv_layers=kv_layers,
-        moe_cpu_layers=n_layers,
         n_ubatch=ubatch,
-        # This is the configuration the expert pool is for: every routed expert
-        # is in RAM and the card has room left over after attention. On the
-        # reference 4 GB card the spare is ~0 and the pool stays off.
-        moe_cache_mib=_moe_cache_mib(spare_gb),
-        n_layers=n_layers,
+        cpu_threads=cpu_threads,
+        note=f"MoE: experts on CPU, attention on GPU ({n_layers}/{n_layers} layers, Low Memory)",
     )
 
 
@@ -763,6 +823,46 @@ def plan(
         )
         if candidate_ffn is not None:
             n_cpu_ffn = candidate_ffn
+
+    # A MoE model whose expert pool cannot be placed at all - the spill case, a
+    # file far larger than RAM - still has a plan: the routed experts on the CPU
+    # and the always-active side (attention, norms, embeddings) on the card.
+    # `_moe_cpu_layers` only ever buys expert layers, so it returns None here and
+    # without this the model fell back to a classic split of one or two whole
+    # layers (their expert slabs included) or to CPU-only, both of which read
+    # every attention block from system RAM on every token.
+    if want_gpu and moe_cpu_layers < 0 and int(meta.get("expert_bytes") or 0) > 0:
+        experts_on_cpu = _moe_experts_on_cpu_plan(
+            meta,
+            hw,
+            n_layers=n_layers,
+            kv_layers=kv_layers,
+            ctx=ctx,
+            kv_cache=kv_cache,
+            kv_cache_k=kv_cache_k,
+            kv_cache_v=kv_cache_v,
+            flash_attn=flash_attn_on_gpu,
+            n_batch=n_batch,
+            n_ubatch=dense_ubatch,
+            cpu_threads=cpu_threads,
+            note=f"MoE: all {n_layers} expert layers on CPU, attention on GPU",
+            footprint=_host_footprint(
+                meta,
+                hw,
+                n_layers=n_layers,
+                kv_layers=kv_layers,
+                model_size_gb=model_size_gb,
+                layer_gb=layer_gb,
+                kv_cache_gb=kv_cache_gb,
+                per_layer_kv_gb=per_layer_kv_gb,
+                gpu_layers=n_layers,
+                moe_cpu_layers=n_layers,
+                n_cpu_ffn=-1,
+                no_kv_offload=no_kv_offload,
+            ),
+        )
+        if experts_on_cpu is not None:
+            return experts_on_cpu
 
     if gpu_layers == 0:
         offload_kqv = False

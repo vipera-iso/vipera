@@ -1,0 +1,150 @@
+{
+  "alias": "gpt-oss-120b-q2k",
+  "model_path": "/home/user/.vipera/models/gpt-oss-120b-Q2_K/gpt-oss-120b-Q2_K-00001-of-00002.gguf",
+  "started": "2026-10-27T23:41:35+00:00",
+  "ctx": 8192,
+  "tokens_per_run": 32,
+  "repeats": 3,
+  "hardware": {
+    "gpu": "NVIDIA GeForce GTX 1650",
+    "vram_total_gb": 4.0,
+    "vram_free_gb": 3.641845703125,
+    "ram_total_gb": 15.408405303955078,
+    "ram_free_gb": 10.92020034790039,
+    "cpu_cores": 4
+  },
+  "arms": [
+    {
+      "arm": "classic",
+      "note": "Hybrid: 2/36 layers",
+      "argv": [
+        "/home/user/.vipera/bin/llama-server",
+        "-m",
+        "/home/user/.vipera/models/gpt-oss-120b-Q2_K/gpt-oss-120b-Q2_K-00001-of-00002.gguf",
+        "--host",
+        "127.0.0.1",
+        "--port",
+        "8791",
+        "-c",
+        "8192",
+        "-ngl",
+        "2",
+        "-t",
+        "4",
+        "-b",
+        "512",
+        "-ub",
+        "512",
+        "-fa",
+        "on",
+        "--jinja",
+        "-np",
+        "1",
+        "-fit",
+        "off",
+        "-ctk",
+        "q4_0",
+        "-ctv",
+        "q4_0"
+      ],
+      "load_s": 62.1,
+      "warmup_ttft_s": 125.67,
+      "runs": [
+        {
+          "ttft_s": 11.07,
+          "gen_s": 32.84,
+          "tokens": 32
+        },
+        {
+          "ttft_s": 10.67,
+          "gen_s": 36.02,
+          "tokens": 32
+        },
+        {
+          "ttft_s": 10.93,
+          "gen_s": 31.85,
+          "tokens": 32
+        }
+      ],
+      "gen_tps_median": 0.974,
+      "gen_tps_all": [
+        0.974,
+        0.888,
+        1.005
+      ],
+      "prefill_tps_median": 11.35,
+      "read_gib_per_token": 0.8269,
+      "major_faults_per_token": 0.0,
+      "peak_rss_gib": 11.84,
+      "vram_used_mib": 2932,
+      "log": "/tmp/sweep-spill-classic.log"
+    },
+    {
+      "arm": "attention",
+      "note": "MoE: all 36 expert layers on CPU, attention on GPU",
+      "argv": [
+        "/home/user/.vipera/bin/llama-server",
+        "-m",
+        "/home/user/.vipera/models/gpt-oss-120b-Q2_K/gpt-oss-120b-Q2_K-00001-of-00002.gguf",
+        "--host",
+        "127.0.0.1",
+        "--port",
+        "8791",
+        "-c",
+        "8192",
+        "-ngl",
+        "37",
+        "-t",
+        "4",
+        "-b",
+        "512",
+        "-ub",
+        "512",
+        "-fa",
+        "on",
+        "--jinja",
+        "-np",
+        "1",
+        "-fit",
+        "off",
+        "-ncmoe",
+        "36",
+        "-ctk",
+        "q4_0",
+        "-ctv",
+        "q4_0"
+      ],
+      "load_s": 58.1,
+      "warmup_ttft_s": 72.33,
+      "runs": [
+        {
+          "ttft_s": 6.6,
+          "gen_s": 22.1,
+          "tokens": 32
+        },
+        {
+          "ttft_s": 6.91,
+          "gen_s": 27.31,
+          "tokens": 32
+        },
+        {
+          "ttft_s": 13.07,
+          "gen_s": 52.99,
+          "tokens": 32
+        }
+      ],
+      "gen_tps_median": 1.172,
+      "gen_tps_all": [
+        1.448,
+        1.172,
+        0.604
+      ],
+      "prefill_tps_median": 17.94,
+      "read_gib_per_token": 0.8894,
+      "major_faults_per_token": 0.0,
+      "peak_rss_gib": 11.86,
+      "vram_used_mib": 1900,
+      "log": "/tmp/sweep-spill-attention.log"
+    }
+  ]
+}
