@@ -139,6 +139,25 @@ def _read_meta(path: Path, name: str | None = None) -> dict:
     return meta
 
 
+#: Separators turn an alias into a path rather than a file name inside the store.
+_ALIAS_SEPARATORS = re.compile(r"[\\/]+")
+
+
+def _safe_alias(base: str | None) -> str:
+    """One file name inside the model store, or "" when nothing usable is left.
+
+    The alias is used as ``MODELS_DIR/<alias>.gguf``, so a user-supplied
+    ``--name ../../x`` wrote the copy outside the store (and outside
+    ``VIPERA_HOME``) and then registered that path as the model. Separators
+    become dashes, leading and trailing dots/spaces/dashes go — which leaves
+    ``Qwen2.5-7B-Instruct`` untouched — and ``.``/``..`` vanish, so callers fall
+    back to the file's own stem.
+    """
+    name = _ALIAS_SEPARATORS.sub("-", str(base or "")).strip()
+    name = name.strip(" .-_")
+    return "" if name in {"", ".", ".."} else name
+
+
 def _unique_alias(base: str, *, ignore: Path | None = None) -> str:
     """Return an alias whose registry entry and file are both free.
 
@@ -146,7 +165,9 @@ def _unique_alias(base: str, *, ignore: Path | None = None) -> str:
     have downloaded it straight to its final name, and that must not count as
     a collision with itself.
     """
-    alias = base
+    # Every caller feeds this a name it got from a person or a file path; the
+    # sanitizer is here as the one choke point, not only at the call sites.
+    alias = _safe_alias(base) or "model"
     n = 2
     while True:
         candidate = MODELS_DIR / f"{alias}.gguf"
@@ -201,7 +222,7 @@ def _import_from_source(source, ref: str, name: str | None) -> None:
             raise typer.Exit(1) from exc
 
     animated_loading_bar("importing gguf", 1.0)
-    base_alias = (name or Path(path).stem).removesuffix(".gguf")
+    base_alias = (_safe_alias(name) or Path(path).stem).removesuffix(".gguf")
     alias = _unique_alias(base_alias, ignore=Path(path))
     meta = _read_meta(Path(path))
     add_model(alias, path, meta, source=source.NAME, source_ref=ref)
@@ -239,7 +260,7 @@ def import_model(
         console.print(f"file not found: {src_path}")
         raise typer.Exit(1)
 
-    base_alias = (alias_name or src_path.stem).removesuffix(".gguf")
+    base_alias = (_safe_alias(alias_name) or src_path.stem).removesuffix(".gguf")
     alias = _unique_alias(base_alias)
     dst = MODELS_DIR / f"{alias}.gguf"
 

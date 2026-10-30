@@ -177,6 +177,52 @@ def test_import_accepts_a_local_prefix(isolated_home, monkeypatch):
     assert spec.source == "local"
 
 
+@pytest.mark.parametrize("name", ["../../escaped", "sub/model", "..", ""])
+def test_import_name_never_writes_outside_the_models_dir(isolated_home, monkeypatch, name):
+    """`--name` is user input, and it used to reach the filesystem verbatim.
+
+    `models/../..` is outside the store and outside VIPERA_HOME, so the copy
+    landed wherever the name pointed and the registry recorded that path. The
+    alias has to be one path component.
+    """
+    models = isolated_home / "models"
+    src = isolated_home / "source.gguf"
+    src.write_bytes(b"x")
+    monkeypatch.setattr(model_cmd, "MODELS_DIR", models)
+    monkeypatch.setattr(
+        model_cmd, "_read_meta", lambda path, name=None: {"size_bytes": 1, "quant": "?"}
+    )
+    monkeypatch.setattr(model_cmd, "animated_loading_bar", lambda *a, **k: None)
+
+    model_cmd.import_model(str(src), name=name)
+
+    copies = [p for p in isolated_home.rglob("*.gguf") if p != src]
+    assert copies, "the import did not copy anything"
+    for copy in copies:
+        assert copy.parent == models
+    spec = reg_mod.get_model(copies[0].stem)
+    assert spec is not None
+    assert spec.path.resolve().parent == models.resolve()
+    assert "/" not in spec.alias and ".." not in spec.alias
+
+
+def test_import_name_keeps_a_name_people_actually_type(isolated_home, monkeypatch):
+    """Sanitizing must not rename the models users import every day."""
+    models = isolated_home / "models"
+    src = isolated_home / "blob.gguf"
+    src.write_bytes(b"x")
+    monkeypatch.setattr(model_cmd, "MODELS_DIR", models)
+    monkeypatch.setattr(
+        model_cmd, "_read_meta", lambda path, name=None: {"size_bytes": 1, "quant": "?"}
+    )
+    monkeypatch.setattr(model_cmd, "animated_loading_bar", lambda *a, **k: None)
+
+    model_cmd.import_model(str(src), name="Qwen2.5-7B-Instruct")
+
+    assert (models / "Qwen2.5-7B-Instruct.gguf").exists()
+    assert reg_mod.get_model("Qwen2.5-7B-Instruct") is not None
+
+
 def test_read_meta_reads_quant_from_original_filename(tmp_path):
     model = tmp_path / "tmp-model.gguf"
     model.write_bytes(b"")
