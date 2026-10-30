@@ -37,7 +37,10 @@ DEFAULT_CONFIG = {
     "backend": "auto",
     # Parallel slots on the server backend. 1 keeps one context, which is what
     # a 4 GB card can hold; raise it for agent workloads with concurrent
-    # requests (each slot gets ctx/parallel of the window).
+    # requests. Each slot keeps the full planned window, so the child runs at
+    # `-c ctx x parallel` and the planner charges that many KV caches — on a
+    # 4 GB card the second slot is usually the difference between 17 layers and
+    # 13. Only the server backend has slots; the in-process engine ignores it.
     "parallel": 1,
     # HTTP layers to mount: `openai` for /v1/*, `ollama` for /api/*.
     "protocols": "openai",

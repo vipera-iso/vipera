@@ -8,7 +8,7 @@ import psutil
 import typer
 
 from vipera.backends.protocol import ChatEngine
-from vipera.backends.registry import create_engine, resolve_backend
+from vipera.backends.registry import create_engine, resolve_backend, serves_slots
 from vipera.config import VIPERA_HOME, load_config
 from vipera.hardware import detect
 from vipera.keepalive import parse_keep_alive
@@ -118,6 +118,9 @@ def _announce_plan(label: str, info: ModelSpec, p, backend: str) -> None:
     kv_label = cache_k if cache_k == cache_v else f"K {cache_k} / V {cache_v}"
     if p.kv_cache_gb > 0:
         kv_label = f"{kv_label}  {p.kv_cache_gb:.2f} GB"
+        if p.parallel > 1:
+            # The figure covers every slot's cache, not one window.
+            kv_label = f"{kv_label}  ({p.parallel} slots)"
     if not p.offload_kqv and offload_layers > 0:
         kv_label = f"{kv_label}  (system RAM)"
 
@@ -251,6 +254,10 @@ def start(
     ctx = _resolve_option(ctx, cfg["ctx"])
     bench = _resolve_option(bench, False)
     backend = cfg.get("backend", "inprocess")
+    # KV is priced per slot, so the planner has to know how many the child will
+    # open. The in-process engine has one context, so it never pays for them —
+    # and neither does a CPU-only box whose `auto` resolves away from the server.
+    parallel = max(1, int(cfg.get("parallel", 1) or 1)) if serves_slots(backend) else 1
     max_loaded = int(_resolve_option(max_loaded, cfg.get("max_loaded", 2)))
     keep_alive = _resolve_option(keep_alive, cfg.get("keep_alive", "5m"))
     api_key = _resolve_option(api_key, cfg.get("api_key"))
@@ -330,6 +337,7 @@ def start(
                 no_kv_offload=cfg.get("no_kv_offload", False),
                 n_batch=cfg.get("n_batch", 512),
                 n_ubatch=cfg.get("n_ubatch", 0),
+                parallel=parallel,
             )
         except ValueError as e:
             console.print(f"[{C_RED}] ✗ {e}[/]")

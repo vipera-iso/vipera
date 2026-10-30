@@ -5,7 +5,7 @@ from rich import box
 from rich.table import Table
 
 from vipera.backends.protocol import ChatEngine
-from vipera.backends.registry import create_engine
+from vipera.backends.registry import create_engine, serves_slots
 from vipera.config import load_config
 from vipera.hardware import detect
 from vipera.optimize.tuning import TuningStore
@@ -146,6 +146,9 @@ def run(
     # prompt-lookup draft measured -29%), so the setting only exists here as
     # context for reading the numbers: the server backend applies it itself.
     spec = cfg.get("spec_type", "none") if backend == "server" else "off"
+    # Slots cost KV, so the plan has to price them; a single-context backend
+    # pays for none of them.
+    parallel = max(1, int(cfg.get("parallel", 1) or 1)) if serves_slots(backend) else 1
     console.print()
     ledger(
         [
@@ -187,6 +190,7 @@ def run(
             no_kv_offload=cfg.get("no_kv_offload", False),
             n_batch=cfg.get("n_batch", 512),
             n_ubatch=cfg.get("n_ubatch", 0),
+            parallel=parallel,
         )
 
         engine = None

@@ -254,7 +254,7 @@ def server_command(
     moe_cache_supported: bool | None = None,
     embeddings: bool = False,
     embeddings_supported: bool | None = None,
-    parallel: int = 1,
+    parallel: int | None = None,
 ) -> list[str]:
     """Translate a Plan into llama-server flags.
 
@@ -262,7 +262,8 @@ def server_command(
     is not one of the hard-coded ones; it is harmless for plain chat.
 
     `load_mode_supported`, `fit_supported` and `spec_type_supported` skip the
-    `--help` probes; `None` probes the binary.
+    `--help` probes; `None` probes the binary. `parallel` defaults to the plan's
+    own slot count, which is the number its KV figure was priced for.
 
     `spec_type` is llama-server's own speculative decoding. Measured on the
     reference 4 GB card (Hermes-4-14B Q3_K_M, 17/40 layers): `ngram-map-k`
@@ -289,6 +290,7 @@ def server_command(
     # the reference 4 GB card); -b must be at least as large as -ub.
     ubatch = plan.n_ubatch or min(plan.n_batch, 512)
     batch = max(plan.n_batch, ubatch)
+    slots = max(1, plan.parallel if parallel is None else int(parallel))
     command = [
         binary,
         "-m",
@@ -300,7 +302,7 @@ def server_command(
         "-c",
         # -c is the whole KV window, shared by all slots, so N slots need N
         # times the window to give each request the context it planned for.
-        str(plan.context * max(1, parallel)),
+        str(plan.context * slots),
         "-ngl",
         str(gpu_layers),
         "-t",
@@ -316,7 +318,7 @@ def server_command(
     # Always explicit: llama.cpp builds here default to 4 slots, and a slot only
     # gets 1/N of `-c`, so a plan that promised 4096 tokens would hand each
     # request 1024. Passing -np 1 is what makes `-c` mean what the planner said.
-    command.extend(["-np", str(max(1, parallel))])
+    command.extend(["-np", str(slots)])
     if fit_supported is None:
         fit_supported = _supports_fit(binary)
     if fit_supported:
@@ -480,8 +482,10 @@ class ServerEngine:
         self._moe_cache_supported = supports_moe_cache(self._binary)
         cfg = config.load_config()
         # Slots: >1 lets the gateway run that many requests at once through
-        # llama.cpp's continuous batching (see build_app's semaphore).
-        self.parallel = max(1, int(cfg.get("parallel", 1) or 1))
+        # llama.cpp's continuous batching (see build_app's semaphore). Taken from
+        # the plan, which already charged that many KV caches — reading the
+        # config again here is how `-c` used to outgrow what was planned.
+        self.parallel = max(1, int(plan.parallel or 1))
         self._spec_type = cfg.get("spec_type", "none")
         self._spec_type_supported = supports_spec_type(self._binary)
         self.supports_embeddings = bool(cfg.get("embeddings", False)) and supports_embeddings(

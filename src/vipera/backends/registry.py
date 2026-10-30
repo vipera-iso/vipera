@@ -45,6 +45,19 @@ def _gpu_server_available() -> bool:
     return available
 
 
+def serves_slots(backend: str) -> bool:
+    """Whether this backend opens llama-server slots, which multiply the window.
+
+    Only the llama-server child splits `-c` across `-np` slots, so only its plans
+    may charge KV per slot (see ``plan(parallel=...)``). `auto` resolves through
+    the same cached probe ``resolve_backend`` uses: a CPU-only box serves from the
+    in-process engine, which has one context whatever `parallel` says.
+    """
+    if backend == "auto":
+        return _gpu_server_available()
+    return backend == "server"
+
+
 def resolve_backend(plan: Plan, backend: str) -> tuple[str, Plan]:
     """Return a backend that can actually execute ``plan``.
 

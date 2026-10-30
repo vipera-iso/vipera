@@ -474,6 +474,24 @@ def test_auto_is_probed_once_per_process(monkeypatch):
     assert len(calls) == 1
 
 
+def test_slots_are_only_charged_for_a_backend_that_opens_them(monkeypatch):
+    """Only llama-server splits `-c` across slots, so only it may charge for them.
+
+    `auto` resolves through the same cached GPU probe `resolve_backend` uses, so
+    a CPU-only box plans one window even with `parallel: 4` in the config — its
+    in-process engine has exactly one context.
+    """
+    from vipera.backends import registry
+
+    monkeypatch.setattr(registry, "_gpu_server_available", lambda: True)
+    assert registry.serves_slots("auto") is True
+    assert registry.serves_slots("server") is True
+    assert registry.serves_slots("inprocess") is False
+
+    monkeypatch.setattr(registry, "_gpu_server_available", lambda: False)
+    assert registry.serves_slots("auto") is False
+
+
 def test_tensor_split_load_attempts_step_ffn_back_then_go_cpu():
     plan = _plan(
         gpu_layers=17,

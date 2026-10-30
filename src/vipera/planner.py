@@ -48,6 +48,12 @@ class Plan:
     # -1 means "no tensor split". Like moe_cpu_layers, this is a server flag, so
     # the classic gpu_layers field stays valid for the in-process fallback.
     n_cpu_ffn: int = -1
+    # llama-server slots (`-np`) the memory figures cover. llama.cpp splits one
+    # `-c` window across slots, so N slots need `-c ctx x N` for each request to
+    # keep the planned window, and N caches on the card: kv_cache_gb and both
+    # host footprints already include that multiplication. 1 is a single window,
+    # which is what the in-process engine has.
+    parallel: int = 1
 
     @property
     def requires_server(self) -> bool:
@@ -256,6 +262,7 @@ def _moe_experts_on_cpu_plan(
     cpu_threads: int,
     note: str,
     footprint: "_HostFootprint | None" = None,
+    parallel: int = 1,
 ) -> Plan | None:
     """Every routed expert in RAM, every attention block on the card.
 
@@ -291,7 +298,7 @@ def _moe_experts_on_cpu_plan(
     kv_gb = (
         _estimate_kv_cache_gb(meta, ctx, kv_cache_k or kv_cache)
         + _estimate_kv_cache_gb(meta, ctx, kv_cache_v or kv_cache)
-    ) / 2
+    ) / 2 * max(1, parallel)
     overhead_gb = _MOE_OVERHEAD_BASE_GB + _MOE_OVERHEAD_PER_UB_GB * ubatch
     spare_gb = hw.vram_free_gb - dense_gb - kv_gb - overhead_gb - _MOE_VRAM_RESERVE_GB
     if spare_gb < 0:
@@ -323,6 +330,7 @@ def _moe_experts_on_cpu_plan(
         n_layers=n_layers,
         kv_cache_k=kv_cache_k or "",
         kv_cache_v=kv_cache_v or "",
+        parallel=max(1, parallel),
     )
 
 
@@ -335,6 +343,7 @@ def _lowmem_moe_plan(
     ctx: int,
     n_batch: int,
     cpu_threads: int,
+    parallel: int = 1,
 ) -> Plan | None:
     """`lowmem` for a MoE model: every routed expert in RAM, attention on the card.
 
@@ -361,6 +370,7 @@ def _lowmem_moe_plan(
         n_ubatch=ubatch,
         cpu_threads=cpu_threads,
         note=f"MoE: experts on CPU, attention on GPU ({n_layers}/{n_layers} layers, Low Memory)",
+        parallel=parallel,
     )
 
 
@@ -656,9 +666,16 @@ def plan(
     kv_cache_k: str | None = None,
     kv_cache_v: str | None = None,
     no_kv_offload: bool = False,
+    parallel: int = 1,
 ) -> Plan:
     if profile not in _VALID_PROFILES:
         raise PlannerError(f"unknown profile '{profile}' (valid: {', '.join(_VALID_PROFILES)})")
+
+    # Slots multiply the KV cache, not the window a request gets: llama-server
+    # splits one `-c` across `-np` slots, so keeping each request at `ctx` costs
+    # `ctx x slots`. Charging it here is what keeps the VRAM figure (and the
+    # layer count derived from it) honest when `parallel` is raised.
+    slots = max(1, int(parallel or 1))
 
     # -ctk and -ctv are independent flags; each side falls back to the combined
     # kv_cache, so a config that only sets kv_cache plans exactly as before.
@@ -692,6 +709,7 @@ def plan(
             ctx=ctx,
             n_batch=n_batch,
             cpu_threads=cpu_threads,
+            parallel=slots,
         )
         if lowmem_moe is not None:
             return lowmem_moe
@@ -713,6 +731,7 @@ def plan(
             kv_layers=kv_layers,
             kv_cache_k="f16",
             kv_cache_v="f16",
+            parallel=slots,
         )
 
     want_gpu = has_gpu and profile != "cpu"
@@ -739,7 +758,7 @@ def plan(
     # though ~9 layers actually fit. Budget both weights and KV per layer.
     kv_cache_gb = (
         _estimate_kv_cache_gb(meta, ctx, kv_k) + _estimate_kv_cache_gb(meta, ctx, kv_v)
-    ) / 2
+    ) / 2 * slots
     # Charge each KV-bearing layer, not each layer: on a hybrid stack most
     # layers hold a fixed recurrent state and never pay for context. With
     # `--no-kv-offload` the whole cache stays in system RAM, so the card is
@@ -845,6 +864,7 @@ def plan(
             n_batch=n_batch,
             n_ubatch=dense_ubatch,
             cpu_threads=cpu_threads,
+            parallel=slots,
             note=f"MoE: all {n_layers} expert layers on CPU, attention on GPU",
             footprint=_host_footprint(
                 meta,
@@ -936,4 +956,5 @@ def plan(
         n_ubatch=moe_ubatch if moe_cpu_layers >= 0 else dense_ubatch,
         n_layers=n_layers,
         n_cpu_ffn=n_cpu_ffn,
+        parallel=slots,
     )

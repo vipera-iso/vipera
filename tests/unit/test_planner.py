@@ -119,6 +119,40 @@ def test_f16_kv_still_offloads_some_layers():
     assert p.gpu_layers == 5
 
 
+def test_each_slot_is_charged_to_the_kv_budget():
+    """`-np N` makes llama.cpp allocate N caches (`-c ctx x N`).
+
+    The planner priced one window, so a 4-slot gateway offloaded layers the card
+    could not hold, walked them back at load time, and left the banner printing
+    the optimistic split. The window a request gets is still `ctx`; only its cost
+    multiplies.
+    """
+    hw = _hw(gpu_name="GTX 1650", vram_total_gb=4.0, vram_free_gb=3.7)
+    one = plan(_HERMES_META, hw, ctx=8192, kv_cache="q8_0")
+    four = plan(_HERMES_META, hw, ctx=8192, kv_cache="q8_0", parallel=4)
+
+    assert one.parallel == 1
+    assert four.parallel == 4
+    assert four.kv_cache_gb == pytest.approx(one.kv_cache_gb * 4)
+    assert four.context == 8192
+    assert four.gpu_layers < one.gpu_layers
+
+
+def test_slots_raise_the_resident_host_footprint():
+    # Same multiplication on the CPU side: with no card there is no per-layer
+    # split, so the whole 4-window cache is resident. `check_host_ram` refuses on
+    # this number.
+    meta = {"n_layers": 32, "size_bytes": 4 * _GIB}
+    one = plan(meta, _hw(), parallel=1)
+    four = plan(meta, _hw(), parallel=4)
+
+    assert four.kv_cache_gb == pytest.approx(one.kv_cache_gb * 4)
+    assert four.host_resident_gb > one.host_resident_gb
+    assert four.ram_estimate_gb > one.ram_estimate_gb
+    # A nonsensical slot count is one window, never zero.
+    assert plan(meta, _hw(), parallel=0).parallel == 1
+
+
 def test_no_flash_attention_costs_layers():
     # Without FA llama.cpp allocates a full KQ matrix per batch, so the same card
     # offloads fewer layers. Measured on the reference box: 14 layers with FA at

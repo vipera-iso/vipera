@@ -848,6 +848,25 @@ def test_server_command_has_no_ncffn_without_a_tensor_split():
     assert command[command.index("-ngl") + 1] == "17"
 
 
+def test_server_command_takes_the_slot_count_from_the_plan():
+    """The plan already charged N windows, so the child must open N slots.
+
+    Reading the count from the config here instead is what let `-c` grow past
+    the KV cache the planner had priced; an explicit argument still wins so the
+    ladder and the tests can ask for a different child.
+    """
+    command = sb.server_command("/bin/llama-server", "/m.gguf", _plan(context=8192, parallel=4), 1)
+
+    assert command[command.index("-c") + 1] == str(8192 * 4)
+    assert command[command.index("-np") + 1] == "4"
+
+    explicit = sb.server_command(
+        "/bin/llama-server", "/m.gguf", _plan(context=8192, parallel=1), 1, parallel=2
+    )
+    assert explicit[explicit.index("-c") + 1] == str(8192 * 2)
+    assert explicit[explicit.index("-np") + 1] == "2"
+
+
 def test_tensor_split_plan_gives_up_cuda_graphs():
     """Same reasoning as the classic hybrid: the budget went to placement.
 

@@ -1,7 +1,7 @@
 import typer
 
 from vipera.backends.protocol import ChatEngine
-from vipera.backends.registry import create_engine
+from vipera.backends.registry import create_engine, serves_slots
 from vipera.config import load_config
 from vipera.hardware import detect
 from vipera.optimize.tuning import apply_tuning
@@ -46,6 +46,13 @@ def _build(model: str) -> ChatEngine:
         no_kv_offload=cfg.get("no_kv_offload", False),
         n_batch=cfg.get("n_batch", 512),
         n_ubatch=cfg.get("n_ubatch", 0),
+        # One slot per window: only the server backend splits `-c`, and its plan
+        # is the one that has to price the extra caches.
+        parallel=(
+            max(1, int(cfg.get("parallel", 1) or 1))
+            if serves_slots(cfg.get("backend", "inprocess"))
+            else 1
+        ),
     )
     if cfg.get("tuning", True):
         p = apply_tuning(p, model, hw)
