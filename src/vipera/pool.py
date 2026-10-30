@@ -38,6 +38,21 @@ class UnknownModelError(KeyError):
         self.available = available
 
 
+class ModelWaitTimeout(TimeoutError):
+    """A request waited too long for a model to load or for a free slot.
+
+    Loading takes minutes, so this is a wide bound rather than a fast fail. It
+    exists because the wait used to be unbounded: a wedged load, or one stream
+    that never closes and keeps the only engine in use, parked every later
+    request for the lifetime of the process. The HTTP layer reports it as a 503.
+    """
+
+    def __init__(self, name: str, seconds: float) -> None:
+        super().__init__(f"waited {seconds:.0f}s for model '{name}' to load, or for a slot to free")
+        self.name = name
+        self.seconds = seconds
+
+
 def engine_health(engine: ChatEngine) -> str:
     """One engine's own health word; a backend without a probe counts as alive."""
     probe = getattr(engine, "health", None)
@@ -67,6 +82,11 @@ class ModelPool:
         max_loaded: int = 2,
         keep_alive: float | None = 300.0,
         reap_interval: float = 1.0,
+        # How long one acquire() may wait for another thread's load, or for a
+        # resident engine to finish serving. Generous on purpose: a 58 GB load
+        # off a spinning disk is minutes. Finite so a stuck load cannot hold the
+        # queue open forever.
+        acquire_timeout: float = 600.0,
     ) -> None:
         if not paths:
             raise ValueError("a pool needs at least one model")
@@ -75,6 +95,7 @@ class ModelPool:
         self._max_loaded = max(1, int(max_loaded))
         self._keep_alive = keep_alive
         self._reap_interval = max(0.05, float(reap_interval))
+        self._acquire_timeout = max(0.05, float(acquire_timeout))
         self._loaded: OrderedDict[str, ChatEngine] = OrderedDict()
         # How many in-flight requests hold each engine. Eviction skips these.
         self._in_use: dict[str, int] = {}
@@ -113,9 +134,12 @@ class ModelPool:
         """Return (engine, alias), loading and evicting idle engines as needed.
 
         This blocks while the model loads and while every resident engine is
-        serving; callers on an event loop must run it in a worker thread.
+        serving — for at most ``acquire_timeout`` seconds, then it raises
+        ``ModelWaitTimeout``. Callers on an event loop must run it in a worker
+        thread.
         """
         alias = self.resolve(name)
+        deadline = time.monotonic() + self._acquire_timeout
         while True:
             evicted: ChatEngine | None = None
             with self._cond:
@@ -129,7 +153,7 @@ class ModelPool:
                     self._requested_ttl.pop(alias, None)
                     return engine, alias
                 if alias in self._loading:
-                    self._cond.wait()
+                    self._wait_for_progress(alias, deadline)
                     continue
                 if len(self._loaded) + len(self._loading) >= self._max_loaded:
                     victim = next(
@@ -138,7 +162,7 @@ class ModelPool:
                     if victim is None:
                         # Every resident model is serving a request. Closing one
                         # here would free a context llama.cpp is still using.
-                        self._cond.wait()
+                        self._wait_for_progress(alias, deadline)
                         continue
                     evicted = self._loaded.pop(victim)
                     self._in_use.pop(victim, None)
@@ -283,6 +307,20 @@ class ModelPool:
                 engine.close()
         if self._reaper.is_alive() and self._reaper is not threading.current_thread():
             self._reaper.join(timeout=5)
+
+    def _wait_for_progress(self, alias: str, deadline: float) -> None:
+        """Wait for another thread, or give up once the acquire deadline passes.
+
+        Called with ``self._cond`` held. A closed pool fails immediately instead
+        of parking the caller until its deadline: shutdown notifies the waiters
+        and nothing will ever load again.
+        """
+        if self._stop.is_set():
+            raise RuntimeError("the model pool is closed")
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise ModelWaitTimeout(alias, self._acquire_timeout)
+        self._cond.wait(remaining)
 
     def _alias_for_locked(self, engine: ChatEngine) -> str | None:
         for alias, loaded in self._loaded.items():

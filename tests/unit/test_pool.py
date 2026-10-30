@@ -4,7 +4,7 @@ from datetime import UTC, datetime
 
 import pytest
 
-from vipera.pool import ModelPool, UnknownModelError
+from vipera.pool import ModelPool, ModelWaitTimeout, UnknownModelError
 
 
 class FakeEngine:
@@ -28,6 +28,30 @@ def pool(loads):
         return FakeEngine(alias)
 
     return ModelPool({"a": "/tmp/a.gguf", "b": "/tmp/b.gguf"}, factory, max_loaded=2)
+
+
+def test_acquire_gives_up_when_a_load_never_finishes():
+    # A wedged load used to park every later request for the life of the process:
+    # the wait had no deadline at all.
+    entered = threading.Event()
+    release = threading.Event()
+
+    def slow_factory(alias, path):
+        entered.set()
+        release.wait(10)
+        return FakeEngine(alias)
+
+    pool = ModelPool({"a": "/a"}, slow_factory, acquire_timeout=0.05)
+    loader = threading.Thread(target=pool.acquire, args=("a",), daemon=True)
+    loader.start()
+    try:
+        assert entered.wait(5)
+        with pytest.raises(ModelWaitTimeout):
+            pool.acquire("a")
+    finally:
+        release.set()
+        loader.join(5)
+        pool.close()
 
 
 def test_ids_lists_every_configured_model(pool):
