@@ -7,7 +7,7 @@ from fastapi.testclient import TestClient
 from vipera.protocols import security
 
 
-def _app(*, api_key=None, cors=None) -> FastAPI:
+def _app(*, api_key=None, cors=None, max_body_bytes=None) -> FastAPI:
     """A stand-in gateway: the two protocol shapes plus the open probe path."""
     app = FastAPI()
 
@@ -23,7 +23,13 @@ def _app(*, api_key=None, cors=None) -> FastAPI:
     def ollama_chat():
         return {"ok": True}
 
-    security.install(app, api_key=api_key, cors=cors)
+    @app.post("/v1/echo")
+    async def echo(payload: dict):
+        # Declaring a body is what makes FastAPI read the request stream; a route
+        # that ignores its body can never trip the cap.
+        return {"ok": True}
+
+    security.install(app, api_key=api_key, cors=cors, max_body_bytes=max_body_bytes)
     return app
 
 
@@ -157,7 +163,6 @@ def test_cors_origins_normalizes_the_config_value(value, expected):
 
 def test_key_check_and_cors_work_together():
     client = TestClient(_app(api_key="secret", cors="*"))
-
     rejected = client.post("/v1/chat/completions", headers={"Origin": "http://anywhere.example"})
     accepted = client.post(
         "/v1/chat/completions",
@@ -169,3 +174,44 @@ def test_key_check_and_cors_work_together():
     assert rejected.status_code == 401
     assert rejected.headers["access-control-allow-origin"] == "*"
     assert accepted.status_code == 200
+
+
+def test_an_oversized_body_is_refused_before_it_is_read():
+    client = TestClient(_app(max_body_bytes=64))
+
+    response = client.post("/v1/echo", json={"text": "x" * 200})
+
+    assert response.status_code == 413
+    assert response.json()["error"]["code"] == "request_too_large"
+
+
+def test_a_streamed_body_is_cut_off_at_the_cap():
+    # A chunked request carries no Content-Length, so counting the bytes the app
+    # actually reads is the only way to bound it.
+    client = TestClient(_app(max_body_bytes=64))
+
+    def chunks():
+        for _ in range(10):
+            yield b"x" * 32
+
+    response = client.post("/v1/echo", content=chunks())
+
+    assert response.status_code == 413
+
+
+def test_a_body_within_the_cap_is_untouched():
+    client = TestClient(_app(max_body_bytes=4096))
+
+    assert client.post("/v1/echo", json={"text": "hello"}).status_code == 200
+
+
+def test_a_413_still_carries_the_cors_headers():
+    # Same reason as the 401 above: a browser must be able to read the refusal.
+    client = TestClient(_app(max_body_bytes=64, cors="*"))
+
+    response = client.post(
+        "/v1/echo", content=b"x" * 200, headers={"Origin": "http://anywhere.example"}
+    )
+
+    assert response.status_code == 413
+    assert response.headers["access-control-allow-origin"] == "*"

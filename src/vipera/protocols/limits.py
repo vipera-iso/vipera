@@ -21,3 +21,8 @@ MAX_PROMPT_CHARS = 500_000
 #: Inputs per embedding call, and the characters across all of them.
 MAX_EMBED_INPUTS = 256
 MAX_EMBED_CHARS = 1_000_000
+#: Largest HTTP request body accepted, as received. The bounds above are checked
+#: after parsing, which means the body has already been read into memory — this
+#: is the one that stops the read. 16 MiB covers MAX_EMBED_CHARS in its worst
+#: JSON form (1M non-ASCII characters escape to 6 bytes each) with room to spare.
+MAX_BODY_BYTES = 16 * 1024 * 1024
