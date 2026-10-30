@@ -296,9 +296,13 @@ def _moe_experts_on_cpu_plan(
     # Same K/V averaging the classic path uses, so a plan that only overrides
     # one side is priced for the side it actually allocates.
     kv_gb = (
-        _estimate_kv_cache_gb(meta, ctx, kv_cache_k or kv_cache)
-        + _estimate_kv_cache_gb(meta, ctx, kv_cache_v or kv_cache)
-    ) / 2 * max(1, parallel)
+        (
+            _estimate_kv_cache_gb(meta, ctx, kv_cache_k or kv_cache)
+            + _estimate_kv_cache_gb(meta, ctx, kv_cache_v or kv_cache)
+        )
+        / 2
+        * max(1, parallel)
+    )
     overhead_gb = _MOE_OVERHEAD_BASE_GB + _MOE_OVERHEAD_PER_UB_GB * ubatch
     spare_gb = hw.vram_free_gb - dense_gb - kv_gb - overhead_gb - _MOE_VRAM_RESERVE_GB
     if spare_gb < 0:
@@ -757,8 +761,10 @@ def plan(
     # 14B/Q4 model on a 4 GB card look like it had 0.2 GB free (0 layers) even
     # though ~9 layers actually fit. Budget both weights and KV per layer.
     kv_cache_gb = (
-        _estimate_kv_cache_gb(meta, ctx, kv_k) + _estimate_kv_cache_gb(meta, ctx, kv_v)
-    ) / 2 * slots
+        (_estimate_kv_cache_gb(meta, ctx, kv_k) + _estimate_kv_cache_gb(meta, ctx, kv_v))
+        / 2
+        * slots
+    )
     # Charge each KV-bearing layer, not each layer: on a hybrid stack most
     # layers hold a fixed recurrent state and never pay for context. With
     # `--no-kv-offload` the whole cache stays in system RAM, so the card is
