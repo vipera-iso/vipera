@@ -1,4 +1,5 @@
 import pytest
+import typer
 
 from vipera import config as cfg_mod
 from vipera import gguf_analyzer
@@ -13,6 +14,7 @@ def isolated_home(tmp_path, monkeypatch):
     monkeypatch.setenv("VIPERA_HOME", str(tmp_path))
     monkeypatch.setattr(cfg_mod, "VIPERA_HOME", tmp_path)
     monkeypatch.setattr(cfg_mod, "MODELS_DIR", tmp_path / "models")
+    monkeypatch.setattr(model_cmd, "MODELS_DIR", tmp_path / "models")
     monkeypatch.setattr(cfg_mod, "LOGS_DIR", tmp_path / "logs")
     monkeypatch.setattr(cfg_mod, "REGISTRY_FILE", tmp_path / "registry.json")
     monkeypatch.setattr(cfg_mod, "CONFIG_FILE", tmp_path / "config.json")
@@ -397,3 +399,152 @@ def test_read_meta_defaults_the_per_tensor_split_to_zeros(tmp_path, monkeypatch)
     assert meta["attn_bytes"] == 0
     assert meta["ffn_layer_bytes"] == []
     assert meta["fixed_bytes"] == 0
+
+
+class _NoPrompt:
+    """Stands in for rich's Prompt: asking in a script is a bug."""
+
+    @staticmethod
+    def ask(*args, **kwargs):
+        raise AssertionError("prompted in a non-interactive run")
+
+
+class _NotAConsole:
+    def isatty(self):
+        return False
+
+
+def _fake_hf(monkeypatch, files, seen):
+    """Wire the hf source to a canned repo list and a no-op download."""
+    from vipera.sources.protocol import SearchResult
+
+    monkeypatch.setattr(
+        model_cmd.hf_source,
+        "search",
+        lambda query, limit=10: [
+            SearchResult(ref="org/first-gguf"),
+            SearchResult(ref="org/second-gguf"),
+        ][:limit],
+    )
+    monkeypatch.setattr(model_cmd.hf_source, "resolve", lambda ref: files)
+
+    def fake_download(ref, file, dest):
+        seen["download"] = (ref, file.path)
+        dest.mkdir(parents=True, exist_ok=True)
+        path = dest / file.path
+        path.write_bytes(b"gguf")
+        return path
+
+    monkeypatch.setattr(model_cmd.hf_source, "download", fake_download)
+    monkeypatch.setattr(
+        model_cmd, "_read_meta", lambda path, name=None: {"size_bytes": 4, "quant": "Q4_K_M"}
+    )
+    monkeypatch.setattr(model_cmd, "animated_loading_bar", lambda *a, **k: None)
+
+
+def test_search_takes_the_first_hit_when_yes_is_set(isolated_home, monkeypatch, capsys):
+    from vipera.sources.protocol import FileInfo
+
+    seen = {}
+    _fake_hf(monkeypatch, [FileInfo(path="first-q4_k_m.gguf", size_bytes=4)], seen)
+    monkeypatch.setattr(model_cmd, "Prompt", _NoPrompt())
+    monkeypatch.setattr(model_cmd, "IntPrompt", _NoPrompt())
+
+    model_cmd.search_model("qwen tiny", True)
+
+    assert seen["download"] == ("org/first-gguf", "first-q4_k_m.gguf")
+    out = capsys.readouterr().out
+    # The file the download just wrote is not a collision with itself.
+    assert "registered first-q4_k_m and set it as default" in out
+
+
+def test_search_yes_without_a_keyword_downloads_the_starter_model(
+    isolated_home, monkeypatch, capsys
+):
+    from vipera.sources.protocol import FileInfo
+
+    seen = {}
+    _fake_hf(
+        monkeypatch,
+        [
+            FileInfo(path=model_cmd.STARTER_FILE, size_bytes=4),
+            FileInfo(path="another-q8_0.gguf", size_bytes=4),
+        ],
+        seen,
+    )
+    monkeypatch.setattr(model_cmd, "Prompt", _NoPrompt())
+    monkeypatch.setattr(model_cmd, "IntPrompt", _NoPrompt())
+
+    model_cmd.search_model(None, True)
+
+    assert seen["download"] == (model_cmd.STARTER_REPO, model_cmd.STARTER_FILE)
+    stem = model_cmd.STARTER_FILE.removesuffix(".gguf")
+    assert f"registered {stem} and set it as default" in capsys.readouterr().out
+
+
+def test_import_picks_the_file_whose_name_contains_the_pattern(isolated_home, monkeypatch, capsys):
+    from vipera.sources.protocol import FileInfo
+
+    seen = {}
+    _fake_hf(
+        monkeypatch,
+        [
+            FileInfo(path="model-q8_0.gguf", size_bytes=4),
+            FileInfo(path="model-q4_k_m.gguf", size_bytes=4),
+        ],
+        seen,
+    )
+    monkeypatch.setattr(model_cmd, "Prompt", _NoPrompt())
+    monkeypatch.setattr(model_cmd, "IntPrompt", _NoPrompt())
+
+    model_cmd.import_model("hf:org/repo", file="q4_k_m")
+
+    assert seen["download"] == ("org/repo", "model-q4_k_m.gguf")
+
+
+def test_import_reports_every_available_file_when_the_pattern_misses(
+    isolated_home, monkeypatch, capsys
+):
+    from vipera.sources.protocol import FileInfo
+
+    seen = {}
+    _fake_hf(
+        monkeypatch,
+        [
+            FileInfo(path="model-q8_0.gguf", size_bytes=4),
+            FileInfo(path="model-q4_k_m.gguf", size_bytes=4),
+        ],
+        seen,
+    )
+
+    with pytest.raises(typer.Exit):
+        model_cmd.import_model("hf:org/repo", file="q2")
+
+    out = capsys.readouterr().out
+    assert "no file" in out and "q2" in out
+    assert "model-q4_k_m.gguf" in out
+    assert "download" not in seen
+
+
+def test_import_without_a_tty_takes_the_first_file_instead_of_prompting(
+    isolated_home, monkeypatch, capsys
+):
+    from vipera.sources.protocol import FileInfo
+
+    seen = {}
+    _fake_hf(
+        monkeypatch,
+        [
+            FileInfo(path="model-q4_k_m.gguf", size_bytes=4),
+            FileInfo(path="model-q8_0.gguf", size_bytes=4),
+        ],
+        seen,
+    )
+    monkeypatch.setattr(model_cmd, "Prompt", _NoPrompt())
+    monkeypatch.setattr(model_cmd, "IntPrompt", _NoPrompt())
+    monkeypatch.setattr(model_cmd.sys, "stdin", _NotAConsole())
+
+    model_cmd.import_model("hf:org/repo")
+
+    assert seen["download"] == ("org/repo", "model-q4_k_m.gguf")
+    assert "model-q4_k_m.gguf" in capsys.readouterr().out

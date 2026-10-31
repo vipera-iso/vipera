@@ -221,6 +221,7 @@ concurrently.
 |---|---|
 | `VIPERA_HOME` | Root storage directory. Read at import time. |
 | `VIPERA_LLAMA_BIN` | Directory searched for `llama-server` (and the quantize tools). |
+| `VIPERA_AUTO_FETCH` | `0`/`false`/`no` stops a first-run `vipera` from downloading the starter model and makes it exit 1 with the install hints instead. Default: fetch. |
 
 Nothing else is configurable via the environment. In particular, `HOST` and
 `PORT` have no effect; use `vipera serve start --host/--port` or the config

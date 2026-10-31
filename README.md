@@ -27,6 +27,7 @@ Vipera measures the machine, budgets VRAM and RAM **per layer**, and hands
 `llama.cpp` a plan it can justify:
 
 ```bash
+vipera system setup         # install the runtime this machine needs
 vipera system doctor        # what the machine actually has
 vipera serve start          # plan, load, serve
 curl localhost:8686/health  # {"status": "ok", "model": "..."}

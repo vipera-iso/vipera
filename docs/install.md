@@ -155,11 +155,19 @@ Expected:
 - `gguf` shows `PASS`.
 - The GPU line shows `WARN` on a CPU-only machine. That is normal.
 - If the runtime is missing, `doctor` now prints the exact install command.
+- `vipera system setup` runs it for you: it installs the binding (with the
+  right GPU backend for the card it found) and `gguf`. `--dry-run` shows the
+  commands first. On a GPU box this is the whole "rebuild for CUDA/HIP" step.
 
 ## Step 5 — Get a model
 
+A first `vipera` already fetches a small starter model, so this step is optional.
+To pick a different one:
+
 ```bash
-vipera model search
+vipera model search                 # interactive
+vipera model search qwen2.5 -y      # first match, no menu
+vipera model import hf:owner/repo --file q4_k_m
 ```
 
 This is interactive:

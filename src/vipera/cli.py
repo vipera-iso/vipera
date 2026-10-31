@@ -1,3 +1,5 @@
+import os
+
 import typer
 
 from vipera import __version__
@@ -36,6 +38,7 @@ def show_help():
             ("vipera", "start the gateway with the default model"),
             ("vipera -s", "start the gateway and pick a model first"),
             ("vipera model search", "search Hugging Face and download a GGUF"),
+            ("vipera model search qwen -y", "take the first match, no menu"),
             ("vipera chat repl", "chat against a local model"),
         ]
     )
@@ -65,6 +68,7 @@ def show_help():
     section("system")
     catalog(
         [
+            ("vipera system setup", "install the binding this machine needs"),
             ("vipera system doctor", "hardware, runtime, and library check"),
             ("vipera system config", "read or change config.json keys"),
         ]
@@ -93,13 +97,20 @@ def main(
 
     installed = list_models()
     if not installed:
-        note(
-            "no models installed yet.\n"
-            "  vipera model search            download one from Hugging Face\n"
-            "  vipera model import <path>     import a local .gguf",
-            tone="error",
-        )
-        raise typer.Exit(1)
+        # The first run of a fresh install is the one place where asking is
+        # wrong: fetch a small model so `vipera` alone ends in a gateway. Set
+        # VIPERA_AUTO_FETCH=0 to keep the old "install a model first" exit.
+        if os.environ.get("VIPERA_AUTO_FETCH", "1").lower() not in {"0", "false", "no"}:
+            model_cmd.fetch_starter()
+            installed = list_models()
+        if not installed:
+            note(
+                "no models installed yet.\n"
+                "  vipera model search            download one from Hugging Face\n"
+                "  vipera model import <path>     import a local .gguf",
+                tone="error",
+            )
+            raise typer.Exit(1)
 
     cfg = load_config()
     model = cfg.get("default_model")

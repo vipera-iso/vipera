@@ -2,6 +2,7 @@ import re
 import shlex
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 import typer
@@ -38,6 +39,34 @@ from vipera.ui import (
 )
 
 app = typer.Typer()
+
+
+#: What `search` fetches when nobody says otherwise: ~1 GB, runs on a CPU.
+STARTER_REPO = "Qwen/Qwen2.5-1.5B-Instruct-GGUF"
+STARTER_FILE = "qwen2.5-1.5b-instruct-q4_k_m.gguf"
+
+
+def _interactive() -> bool:
+    """True when a person is at the terminal and can answer a prompt.
+
+    `vipera | tee log`, a cron job and a unit test all have a stdin that is not
+    a terminal; a menu there waits forever for input nobody will type.
+    """
+    try:
+        return bool(sys.stdin) and sys.stdin.isatty()
+    except (AttributeError, ValueError):
+        return False
+
+
+def _pick_file(files, want: str | None):
+    """The file matching `want`, else the first one, else None."""
+    if want:
+        needle = want.lower()
+        for f in files:
+            if needle in f.path.lower():
+                return f
+        return None
+    return files[0]
 
 
 _QUANT_RE = re.compile(
@@ -178,7 +207,7 @@ def _unique_alias(base: str, *, ignore: Path | None = None) -> str:
         n += 1
 
 
-def _import_from_source(source, ref: str, name: str | None) -> None:
+def _import_from_source(source, ref: str, name: str | None, want: str | None = None) -> None:
     """Resolve, download and register one file from a non-local source."""
     ensure_dirs()
     with console.status(f"[{C_ACCENT}] Resolving {ref}…"):
@@ -192,8 +221,16 @@ def _import_from_source(source, ref: str, name: str | None) -> None:
         console.print(f"[{C_RED}] ✗ No model files at {ref}[/]")
         raise typer.Exit(1)
 
-    selected = files[0]
-    if len(files) > 1:
+    selected = _pick_file(files, want)
+    if selected is None:
+        console.print(f"[{C_RED}] ✗ no file in {ref} matches `{want}`[/]")
+        for f in files:
+            console.print(f"    [{C_DIM}]{f.path}[/]")
+        raise typer.Exit(1)
+
+    # An explicit --file is an answer to the menu, not a hint: only ask when
+    # the caller gave no answer and a person is there to give one.
+    if not want and len(files) > 1 and _interactive():
         t = Table(
             box=box.SIMPLE_HEAD,
             title=f"files in {ref}",
@@ -210,6 +247,8 @@ def _import_from_source(source, ref: str, name: str | None) -> None:
         if choice < 1 or choice > len(files):
             raise typer.Exit(1)
         selected = files[choice - 1]
+    elif not want and len(files) > 1:
+        console.print(f"[{C_DIM}]   no tty, taking {selected.path}[/]")
 
     with console.status(f"[{C_ACCENT}] Fetching {selected.path}…"):
         try:
@@ -242,16 +281,20 @@ def _import_from_source(source, ref: str, name: str | None) -> None:
 def import_model(
     src: str = typer.Argument(..., help="A .gguf path, a URL, or an hf:/local: reference"),
     name: str = typer.Option(None, "--name", "-n", help="Alias for the model"),
+    file: str = typer.Option(
+        None, "--file", "-f", help="Pick the repository file whose name contains this"
+    ),
 ):
     """Import a .gguf from a path, or download one from a source."""
     # Direct callers pass the OptionInfo default, not a string.
     alias_name = name if isinstance(name, str) and name else None
+    want = file if isinstance(file, str) and file else None
     source, ref = for_ref(src)
     if source is not None:
         if source.NAME == "local":
             src = ref
         else:
-            _import_from_source(source, ref, alias_name)
+            _import_from_source(source, ref, alias_name, want)
             return
 
     ensure_dirs()
@@ -284,14 +327,84 @@ def import_model(
     )
 
 
+def _fetch_and_register(repo: str, file) -> None:
+    """Download one file from `repo`, register it and make it the default."""
+    console.print(f"\n[{C_ACCENT}] ▸ Downloading: {file.path}[/]")
+    try:
+        downloaded_path = hf_source.download(repo, file, MODELS_DIR)
+        console.print("download complete")
+        animated_loading_bar("finalising", 0.5)
+
+        base_alias = Path(downloaded_path).stem
+        # The download already wrote the file under its final name; a collision
+        # with itself would rename every fresh model to `<name>-2`.
+        alias = _unique_alias(base_alias, ignore=Path(downloaded_path))
+        meta = _read_meta(Path(downloaded_path))
+        add_model(
+            alias,
+            downloaded_path,
+            meta,
+            source=hf_source.NAME,
+            source_ref=repo,
+        )
+
+        cfg = load_config()
+        cfg["default_model"] = alias
+        save_config(cfg)
+
+        param_str = f"{meta.get('n_params', 0) / 1e9:.2f}B · " if meta.get("n_params") else ""
+        console.print(f"registered {alias} and set it as default")
+        console.print(
+            f"    [{C_DIM}]└─ {param_str}{meta['size_bytes'] / 1e9:.2f} GB  ·  {meta['quant']}[/]"
+        )
+        console.print(
+            f"\n[{C_ACCENT}] ▸ Just run [bold]vipera[/bold] and this model will be pre-selected.\n"
+        )
+    except KeyboardInterrupt:
+        console.print(f"\n[{C_YELLOW}] ⚠ Download cancelled.[/]")
+        raise typer.Exit(1) from None
+    except Exception as e:
+        console.print(f"download failed: {e}")
+        raise typer.Exit(1) from e
+
+
+def fetch_starter() -> None:
+    """Install the small default model, no questions asked."""
+    ensure_dirs()
+    console.print(
+        f"[{C_ACCENT}] ▸ no model chosen, fetching the starter model "
+        f"[{C_TEXT}]{STARTER_REPO.split('/')[-1]}[/]"
+    )
+    with console.status(f"[{C_ACCENT}] Resolving {STARTER_REPO}…"):
+        try:
+            files = hf_source.resolve(STARTER_REPO)
+        except Exception as e:
+            console.print(f"could not reach Hugging Face: {e}")
+            raise typer.Exit(1) from e
+    if not files:
+        console.print(f"[{C_RED}] ✗ No model files at {STARTER_REPO}[/]")
+        raise typer.Exit(1)
+    _fetch_and_register(STARTER_REPO, _pick_file(files, STARTER_FILE) or files[0])
+
+
 @app.command("search")
-def search_model():
+def search_model(
+    query: str = typer.Argument(None, help="Keyword, e.g. `qwen2.5 7b`"),
+    yes: bool = typer.Option(False, "--yes", "-y", help="Take the first result, ask nothing"),
+):
     """Search and download GGUF models from Hugging Face."""
     ensure_dirs()
-    note("search Hugging Face for GGUFs. a keyword is enough, e.g. `qwen2.5 7b`.")
-    query = Prompt.ask(f"[{C_ACCENT}]   keyword[/]")
     if not query:
-        return
+        # A script, a pipe or the first run of `vipera` has no one to ask; the
+        # starter model is the answer, so the command still ends with a runnable
+        # gateway instead of a menu.
+        if yes or not _interactive():
+            fetch_starter()
+            return
+        note("search Hugging Face for GGUFs. a keyword is enough, e.g. `qwen2.5 7b`.")
+        query = Prompt.ask(f"[{C_ACCENT}]   keyword[/]")
+        if not query:
+            return
 
     with console.status(f"[{C_ACCENT}] Searching for '{query}'…"):
         try:
@@ -314,10 +427,15 @@ def search_model():
         t.add_row(f"[{i + 1}]", m.ref, f"{m.downloads:,}" if m.downloads else "0")
     console.print(t)
 
-    choice = IntPrompt.ask(f"\n[{C_ACCENT}] ▸ Select a model ID[/]", default=1)
-    if choice < 1 or choice > len(models):
-        raise typer.Exit(1)
-    selected_repo = models[choice - 1].ref
+    selected_repo = models[0].ref
+    if not yes:
+        if not _interactive():
+            console.print(f"[{C_DIM}]   no tty, taking {selected_repo}[/]")
+        else:
+            choice = IntPrompt.ask(f"\n[{C_ACCENT}] ▸ Select a model ID[/]", default=1)
+            if choice < 1 or choice > len(models):
+                raise typer.Exit(1)
+            selected_repo = models[choice - 1].ref
 
     with console.status(f"[{C_ACCENT}] Fetching files…"):
         try:
@@ -329,58 +447,31 @@ def search_model():
         console.print("no .gguf files in that repository")
         raise typer.Exit(1)
 
-    ft = Table(
-        box=box.SIMPLE_HEAD,
-        title=f"files in {selected_repo}",
-        title_style=C_DIM,
-        title_justify="left",
-    )
-    ft.add_column("id", style=C_DIM, justify="center")
-    ft.add_column("file name", style=C_TEXT)
-    ft.add_column("size", style=C_DIM, justify="right")
-    for i, f in enumerate(files):
-        size = _format_bytes(f.size_bytes) if f.size_bytes else "?"
-        ft.add_row(f"[{i + 1}]", f.path, size)
-    console.print(ft)
-
-    fc = IntPrompt.ask(f"\n[{C_ACCENT}] ▸ Select a file ID to download[/]", default=1)
-    if fc < 1 or fc > len(files):
-        raise typer.Exit(1)
-    selected_file = files[fc - 1]
-
-    console.print(f"\n[{C_ACCENT}] ▸ Downloading: {selected_file.path}[/]")
-    try:
-        downloaded_path = hf_source.download(selected_repo, selected_file, MODELS_DIR)
-        console.print("download complete")
-        animated_loading_bar("finalising", 0.5)
-
-        base_alias = Path(downloaded_path).stem
-        alias = _unique_alias(base_alias)
-        meta = _read_meta(Path(downloaded_path))
-        add_model(
-            alias,
-            downloaded_path,
-            meta,
-            source=hf_source.NAME,
-            source_ref=selected_repo,
+    selected_file = files[0]
+    if not yes:
+        ft = Table(
+            box=box.SIMPLE_HEAD,
+            title=f"files in {selected_repo}",
+            title_style=C_DIM,
+            title_justify="left",
         )
+        ft.add_column("id", style=C_DIM, justify="center")
+        ft.add_column("file name", style=C_TEXT)
+        ft.add_column("size", style=C_DIM, justify="right")
+        for i, f in enumerate(files):
+            size = _format_bytes(f.size_bytes) if f.size_bytes else "?"
+            ft.add_row(f"[{i + 1}]", f.path, size)
+        console.print(ft)
 
-        cfg = load_config()
-        cfg["default_model"] = alias
-        save_config(cfg)
+        if not _interactive():
+            console.print(f"[{C_DIM}]   no tty, taking {selected_file.path}[/]")
+        else:
+            fc = IntPrompt.ask(f"\n[{C_ACCENT}] ▸ Select a file ID to download[/]", default=1)
+            if fc < 1 or fc > len(files):
+                raise typer.Exit(1)
+            selected_file = files[fc - 1]
 
-        param_str = f"{meta.get('n_params', 0) / 1e9:.2f}B · " if meta.get("n_params") else ""
-        console.print(f"registered {alias} and set it as default")
-        console.print(
-            f"    [{C_DIM}]└─ {param_str}{meta['size_bytes'] / 1e9:.2f} GB  ·  {meta['quant']}[/]"
-        )
-        console.print(
-            f"\n[{C_ACCENT}] ▸ Just run [bold]vipera[/bold] and this model will be pre-selected.\n"
-        )
-    except KeyboardInterrupt:
-        console.print(f"\n[{C_YELLOW}] ⚠ Download cancelled.[/]")
-    except Exception as e:
-        console.print(f"download failed: {e}")
+    _fetch_and_register(selected_repo, selected_file)
 
 
 @app.command("add")

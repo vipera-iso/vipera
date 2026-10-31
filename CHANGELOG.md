@@ -5,6 +5,25 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- **`vipera system setup` installs the runtime this machine needs.** It reads
+  the same probe as `doctor` and runs the pip command that used to be a hint:
+  `llama-cpp-python` with `CMAKE_ARGS=-DGGML_CUDA=on`/`-DGGML_HIP=on`/
+  `-DGGML_SYCL=on` for the card it found, `--force-reinstall` when the binding
+  is CPU-only, and `gguf` when that is missing. `--dry-run` prints the commands
+  and the environment first; a complete runtime prints `nothing to install`.
+- **A first `vipera` fetches a starter model.** An empty registry used to exit
+  1 with a hint; it now downloads `Qwen/Qwen2.5-1.5B-Instruct-GGUF` (~1 GB),
+  registers it and starts the gateway, so one command ends in a working
+  endpoint. `VIPERA_AUTO_FETCH=0` keeps the old exit.
+- **`model search` and `model import` run without a terminal.** `search` takes
+  a `KEYWORD` argument and `--yes` (first repository, first file; no keyword
+  means the starter model), and `import` takes `--file PATTERN` to answer the
+  file menu. With no TTY and no flags they take the first choice and print it
+  instead of waiting for input nobody will type.
+
 ## [1.4.0] - 2026-10-28
 
 ### Added

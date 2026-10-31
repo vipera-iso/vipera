@@ -21,8 +21,8 @@ pytestmark = pytest.mark.e2e
 
 @pytest.fixture
 def run_cli(tmp_path):
-    def _run(*args: str, home=None) -> subprocess.CompletedProcess[str]:
-        env = dict(os.environ)
+    def _run(*args: str, home=None, env=None) -> subprocess.CompletedProcess[str]:
+        env = {**os.environ, **(env or {})}
         env["VIPERA_HOME"] = str(home or tmp_path)
         # Windows runners default to cp1252; the CLI prints box-drawing glyphs.
         # The child writes UTF-8, so the parent must decode the pipes as UTF-8
@@ -65,8 +65,10 @@ def test_unknown_command_exits_nonzero(run_cli):
     assert result.returncode != 0
 
 
-def test_empty_home_exits_with_a_hint_not_a_traceback(run_cli):
-    result = run_cli()
+def test_empty_home_exits_with_a_hint_when_fetching_is_off(run_cli):
+    # VIPERA_AUTO_FETCH=0 is what a script or CI uses to keep the old exit; the
+    # default (fetch a starter model) is covered by the unit test on cli.main.
+    result = run_cli(env={"VIPERA_AUTO_FETCH": "0"})
 
     combined = (result.stdout + result.stderr).lower()
     assert "Traceback" not in result.stderr

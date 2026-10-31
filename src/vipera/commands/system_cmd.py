@@ -3,6 +3,7 @@ import os
 import platform
 import subprocess
 import sys
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import typer
@@ -34,6 +35,137 @@ _BACKEND_BUILD = {
     # SYCL needs the oneAPI compilers on PATH before the build starts.
     "intel": "source /opt/intel/oneapi/setvars.sh\nCMAKE_ARGS='-DGGML_SYCL=on'",
 }
+
+
+#: What `system setup` puts in the environment before it calls pip, per vendor.
+_PIP_BUILD = {
+    "nvidia": {"CMAKE_ARGS": "-DGGML_CUDA=on"},
+    "amd": {"CMAKE_ARGS": "-DGGML_HIP=on"},
+    "intel": {"CMAKE_ARGS": "-DGGML_SYCL=on"},
+}
+
+
+@dataclass(frozen=True)
+class Backend:
+    """What `system setup` has to install, given the machine it found."""
+
+    vendor: str = "none"
+    binding: bool = False
+    rebuild: bool = False
+    gguf: bool = False
+    env: dict[str, str] = field(default_factory=dict)
+
+    @property
+    def steps(self) -> list[tuple[list[str], dict[str, str] | None]]:
+        steps: list[tuple[list[str], dict[str, str] | None]] = []
+        if self.binding:
+            cmd = [sys.executable, "-m", "pip", "install"]
+            if self.rebuild:
+                cmd += ["--force-reinstall", "--no-cache-dir"]
+            steps.append(([*cmd, "llama-cpp-python"], self.env or None))
+        if self.gguf:
+            steps.append(([sys.executable, "-m", "pip", "install", "gguf"], None))
+        return steps
+
+
+def _vendor_from_name(name: str) -> str:
+    """Best-effort vendor from the GPU name, for probes that report "none"."""
+    lowered = name.lower()
+    if any(word in lowered for word in ("nvidia", "geforce", "quadro", "tesla", "rtx")):
+        return "nvidia"
+    if any(word in lowered for word in ("amd", "radeon", "instinct")):
+        return "amd"
+    if "intel" in lowered or "arc" in lowered:
+        return "intel"
+    return "none"
+
+
+def _state() -> tuple[bool, bool, bool]:
+    """(binding importable, binding offloads, gguf importable), from a probe."""
+    try:
+        import llama_cpp
+    except ImportError:
+        return False, False, _importable("gguf")
+    probe = getattr(llama_cpp, "llama_supports_gpu_offload", None)
+    try:
+        offload = bool(probe()) if probe else False
+    except Exception:
+        offload = False
+    return True, offload, _importable("gguf")
+
+
+def _importable(module: str) -> bool:
+    try:
+        __import__(module)
+    except ImportError:
+        return False
+    return True
+
+
+def _plan_setup(hw) -> Backend:
+    has_binding, offloads, has_gguf = _state()
+    vendor = hw.gpu_vendor
+    if vendor in ("", "none"):
+        vendor = _vendor_from_name(hw.gpu_name or "")
+    # Metal is compiled into the default wheel, and a CPU-only machine has no
+    # backend to pick: only the vendors with an opt-in CMake flag get one.
+    env = _PIP_BUILD.get(vendor, {})
+    want_gpu = bool(env) and hw.gpu_name not in (None, "None")
+    return Backend(
+        vendor=vendor,
+        binding=not has_binding or (want_gpu and not offloads),
+        rebuild=has_binding,
+        gguf=not has_gguf,
+        env=env if want_gpu else {},
+    )
+
+
+@app.command("setup")
+def setup(
+    dry_run: bool = typer.Option(
+        False, "--dry-run", help="Print the commands without running them"
+    ),
+):
+    """Install the inference binding and GGUF reader this machine needs."""
+    hw = detect()
+    plan = _plan_setup(hw)
+    steps = plan.steps
+
+    if not steps:
+        console.print(
+            f"[{C_GREEN}] ✓ nothing to install[/] — the runtime for this machine is complete."
+        )
+        return
+
+    console.print(f"[{C_DIM}]backend[/] {plan.vendor}")
+    for cmd, env in steps:
+        if env:
+            for key, value in env.items():
+                console.print(f"[{C_DIM}]  {key}={value}[/]")
+        console.print(f"[{C_TEXT}]  {' '.join(cmd)}[/]")
+
+    # Direct callers pass the OptionInfo default, not a bool.
+    if dry_run is True:
+        return
+
+    for cmd, env in steps:
+        try:
+            subprocess.run(cmd, env={**os.environ, **env} if env else None, check=True)
+        except OSError as exc:
+            console.print(f"[{C_RED}] ✗ could not run pip: {exc}[/]")
+            raise typer.Exit(1) from exc
+        except subprocess.CalledProcessError as exc:
+            console.print(
+                f"[{C_RED}] ✗ pip exited {exc.returncode}[/]\n"
+                "A GPU build needs the toolchain for this card (nvcc, hipcc or the "
+                "oneAPI compilers) on PATH."
+            )
+            raise typer.Exit(1) from exc
+
+    console.print(
+        f"[{C_GREEN}] ✓ installed[/]\n"
+        f"[{C_DIM}]next: `vipera system doctor` to confirm, then `vipera` to start.[/]"
+    )
 
 
 def _short_path(path: str) -> str:

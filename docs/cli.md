@@ -23,7 +23,10 @@ vipera [OPTIONS] COMMAND [ARGS]...
 With no subcommand, `vipera` boots the gateway:
 
 1. Prints the banner.
-2. If the registry is empty, prints a warning and exits with status 1.
+2. If the registry is empty, fetches a small starter model
+   (`Qwen/Qwen2.5-1.5B-Instruct-GGUF`, ~1 GB) and registers it. Set
+   `VIPERA_AUTO_FETCH=0` to skip that and exit with status 1 and the install
+   hints instead — the right choice for a script or CI.
 3. Selects a model:
    - `--select` → always show the picker.
    - `default_model` set and `--select` absent → use it.
@@ -43,7 +46,7 @@ vipera help       # rich usage guide
 Manage GGUF artifacts and the local registry. Importing or downloading a model
 sets it as `default_model`.
 
-### `vipera model import SRC [--name ALIAS]`
+### `vipera model import SRC [--name ALIAS] [--file PATTERN]`
 
 Import a `.gguf` into `$VIPERA_HOME/models/`, read its metadata, register it,
 and make it the default.
@@ -52,13 +55,14 @@ and make it the default.
 |---|---|
 | `SRC` | A `.gguf` path, a source reference (see below), or an `http(s)://` URL. |
 | `-n`, `--name` | Alias. Defaults to the file stem (with a trailing `.gguf` removed). |
+| `-f`, `--file` | Take the repository file whose name contains this (e.g. `q4_k_m`). Case-insensitive; a pattern that matches nothing exits 1 and lists the files. |
 
 Source references select where the file comes from:
 
 | Reference | Source | Behaviour |
 |---|---|---|
 | `local:~/Downloads/m.gguf` | `local` | Same as passing the path. |
-| `hf:owner/repo` | `hf` | Lists the repo's GGUFs and asks which one to fetch. |
+| `hf:owner/repo` | `hf` | Lists the repo's GGUFs and asks which one to fetch; `--file` answers that question, and without a TTY the first file is taken. |
 | `ollama:name:tag` | `ollama` | Imports a model Ollama already pulled. |
 | `https://…/m.gguf` | `url` | Downloads the file. |
 
@@ -91,9 +95,16 @@ reference rather than a path:
 vipera model add ollama:qwen2.5:7b
 ```
 
-### `vipera model search`
+### `vipera model search [KEYWORD] [--yes]`
 
-Interactive Hugging Face search and download.
+Hugging Face search and download.
+
+| Argument/Option | Description |
+|---|---|
+| `KEYWORD` | What to search for. With `--yes`, the first repository and its first file are taken. Omit it with `--yes` to fetch the starter model. |
+| `-y`, `--yes` | Ask nothing: take the first result, then the first file. |
+
+With a terminal and no arguments, the command is interactive:
 
 1. Prompts for a keyword.
 2. Queries Hugging Face for up to 10 repositories tagged `gguf`, sorted by the
@@ -104,9 +115,9 @@ Interactive Hugging Face search and download.
    filename.
 5. Sets it as `default_model` and suggests running `vipera`.
 
-There are no non-interactive flags; this command is for humans. Connection
-failures and downloads that raise are reported and the command exits (download
-errors print a message without re-raising).
+Without a terminal (`vipera model search | tee log`, CI, a unit test) there is
+nobody to answer the menus, so the first result and its first file are taken
+and the choice is printed. A download that raises exits 1.
 
 ### `vipera model inspect PATH [--tensors]`
 
@@ -336,6 +347,23 @@ fallback, not the plan that was requested.
 
 ## `vipera system`
 
+### `vipera system setup [--dry-run]`
+
+Install the runtime this machine actually needs, instead of asking the user to
+read `doctor` output and copy commands:
+
+- `llama-cpp-python` missing → `pip install llama-cpp-python`.
+- A GPU is present but the binding is CPU-only (`gpu offload: CPU-only build`)
+  → `pip install --force-reinstall --no-cache-dir llama-cpp-python` with the
+  backend for that card: `CMAKE_ARGS=-DGGML_CUDA=on` (NVIDIA),
+  `-DGGML_HIP=on` (AMD), `-DGGML_SYCL=on` (Intel). Apple Silicon needs no flag:
+  Metal is in the default wheel.
+- `gguf` missing → `pip install gguf`.
+
+`--dry-run` prints the commands and the environment they would run with.
+Already complete → prints `nothing to install` and exits 0. A failed pip exits
+1 and says which toolchain (nvcc, hipcc, oneAPI) the build needs on `PATH`.
+
 ### `vipera system doctor`
 
 Print a diagnostics panel with three sections and a PASS/WARN/FAIL summary:
@@ -377,3 +405,6 @@ See [configuration.md](configuration.md) for keys, types, and coercion rules.
 - The model picker is interactive and requires a TTY-like stdin. Commands that
   may invoke it (`chat`, `bench`) accept `--model`/positional arguments to avoid
   the prompt.
+- Outside a terminal, `model search` and `model import hf:…` take the first
+  choice rather than waiting for input, and the no-argument `vipera` fetches the
+  starter model (see `VIPERA_AUTO_FETCH` in [configuration.md](configuration.md)).
