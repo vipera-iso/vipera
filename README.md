@@ -15,6 +15,10 @@ model does not quite fit.
 [![License: MIT](https://img.shields.io/badge/license-MIT-yellow.svg)](LICENSE)
 [![Status: beta](https://img.shields.io/badge/status-beta-orange)](CHANGELOG.md)
 
+<img src="docs/assets/demo.gif" alt="vipera system doctor, then serve start, status and stop" width="720" />
+
+<sub><code>vipera system doctor</code> → <code>serve start</code> → <code>serve status</code> → <code>serve stop</code></sub>
+
 </div>
 
 ## The problem it solves

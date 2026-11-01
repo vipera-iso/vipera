@@ -35,9 +35,14 @@
   <text x="234" y="210" font-family="Inter, 'DejaVu Sans', sans-serif" font-size="26"
         fill="#94A3B8">A local AI gateway that plans before it runs.</text>
 
-  <text x="64" y="520" font-family="Inter, 'DejaVu Sans', sans-serif" font-size="28"
-        font-weight="600" fill="#F1F5F9">One .gguf in, an OpenAI-compatible server out.</text>
-  <text x="64" y="562" font-family="'JetBrainsMono NF', ui-monospace, monospace" font-size="20"
+  <!-- Two lines, not one: the sentence is 750 px wide at 28 px, so a single
+       line runs under the terminal mock at x=720 and loses "server out" in the
+       rasterized card. Each line here stays left of it (207 and 535 px). -->
+  <text x="64" y="496" font-family="Inter, 'DejaVu Sans', sans-serif" font-size="28"
+        font-weight="600" fill="#F1F5F9">One .gguf in,</text>
+  <text x="64" y="532" font-family="Inter, 'DejaVu Sans', sans-serif" font-size="28"
+        font-weight="600" fill="#F1F5F9">an OpenAI-compatible server out.</text>
+  <text x="64" y="574" font-family="'JetBrainsMono NF', ui-monospace, monospace" font-size="20"
         fill="#64748B">GGUF-native · SSE streaming · hardware-aware planner</text>
 
   <!-- terminal mock, lower right -->
