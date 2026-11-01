@@ -64,9 +64,11 @@ jobs:
           vipera serve stop --yes || true
 
       - name: Record GIF
-        # No `|| true`: a recording that fails leaves the committed GIF on an
-        # old version, which is exactly the bug this job exists to prevent.
-        run: vhs docs/assets/demo.tape
+        # `make demo`, not bare `vhs`: the tape writes demo-raw.mp4, and the GIF
+        # is the downscaled palette conversion in this target. Running vhs alone
+        # left demo.gif untouched, which is the other half of why this job never
+        # changed anything. No `|| true` either: a failed recording must show.
+        run: make demo
 
       - name: Compress if needed
         run: |
