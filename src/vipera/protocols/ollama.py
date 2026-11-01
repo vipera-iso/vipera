@@ -31,8 +31,8 @@ from vipera.protocols.gateway import Gateway
 from vipera.protocols.limits import MAX_EMBED_CHARS, MAX_EMBED_INPUTS, MAX_PROMPT_CHARS
 from vipera.protocols.streaming import (
     Lease,
-    iter_chunks,
     leased_iterator,
+    relay_chunks,
     run_leased,
 )
 from vipera.registry import get_model
@@ -327,11 +327,19 @@ async def _shape(gateway: Gateway, active, messages: list[dict], kwargs: dict):
     )
 
 
-def _count(gateway: Gateway, messages: list[dict], kwargs: dict, payload, shaping) -> None:
-    """Record prefix reuse for one finished request."""
+async def _count(gateway: Gateway, messages: list[dict], kwargs: dict, payload, shaping) -> None:
+    """Record prefix reuse for one finished request.
+
+    Off the event loop: ``note()`` hashes the whole reusable prefix, which is
+    O(prompt) work that only feeds the counters on ``/health``.
+    """
     if gateway.optimizer is not None:
-        gateway.optimizer.note(
-            messages, tools=kwargs.get("tools"), payload=payload, shaping=shaping
+        await asyncio.to_thread(
+            gateway.optimizer.note,
+            messages,
+            tools=kwargs.get("tools"),
+            payload=payload,
+            shaping=shaping,
         )
 
 
@@ -455,7 +463,7 @@ def mount(app: FastAPI, gateway: Gateway) -> None:
                     )
                 except Exception as exc:
                     return _backend_failure(exc, "chat")
-                _count(gateway, messages, kwargs, result, shaping)
+                await _count(gateway, messages, kwargs, result, shaping)
                 elapsed = time.perf_counter() - started
                 choice = (result.get("choices") or [{}])[0]
                 message = _with_tool_calls(dict(choice.get("message") or {}))
@@ -522,7 +530,7 @@ def mount(app: FastAPI, gateway: Gateway) -> None:
                     )
                 except Exception as exc:
                     return _backend_failure(exc, "chat")
-                _count(gateway, messages, kwargs, result, shaping)
+                await _count(gateway, messages, kwargs, result, shaping)
                 elapsed = time.perf_counter() - started
                 choice = (result.get("choices") or [{}])[0]
                 content = (choice.get("message") or {}).get("content") or ""
@@ -667,7 +675,7 @@ async def _stream_chat(
     finish_reason = None
     tool_calls: dict[int, dict] = {}
     try:
-        chunks = iter_chunks(
+        chunks = relay_chunks(
             gateway.lock,
             _stream_factory(lease, lambda: active.chat(messages, stream=True, **kwargs)),
             on_start=lease.start if lease is not None else None,
@@ -708,7 +716,7 @@ async def _stream_chat(
                 "done": False,
             }
         )
-    _count(gateway, messages, kwargs, {"usage": usage} if usage else None, shaping)
+    await _count(gateway, messages, kwargs, {"usage": usage} if usage else None, shaping)
     elapsed = time.perf_counter() - started
     yield _line(
         _final_body(
@@ -738,7 +746,7 @@ async def _stream_generate(
     usage = None
     finish_reason = None
     try:
-        chunks = iter_chunks(
+        chunks = relay_chunks(
             gateway.lock,
             _stream_factory(lease, lambda: active.chat(messages, stream=True, **kwargs)),
             on_start=lease.start if lease is not None else None,
@@ -766,7 +774,7 @@ async def _stream_generate(
         yield _line({"error": str(exc)})
         return
 
-    _count(gateway, messages, kwargs, {"usage": usage} if usage else None, shaping)
+    await _count(gateway, messages, kwargs, {"usage": usage} if usage else None, shaping)
     elapsed = time.perf_counter() - started
     yield _line(
         _final_body(

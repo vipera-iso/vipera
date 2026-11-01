@@ -88,6 +88,41 @@ def _free_port() -> int:
         return int(sock.getsockname()[1])
 
 
+#: `--help` output per binary, keyed by (path, mtime, size).
+#:
+#: Every `supports_*` probe below shells out to the binary, and that pays the
+#: model library's start-up (CUDA init included) each time: five probes per
+#: engine, and a pool serving three models paid for fifteen. The answer cannot
+#: change while the file is the same, so it is keyed by the file's identity
+#: instead of by the engine instance that asked.
+_HELP_CACHE: dict[tuple[str, int, int], str] = {}
+
+
+def _help_text(binary: str) -> str | None:
+    """`binary --help` as one string, or None when the binary cannot be probed.
+
+    A binary that cannot be stat'ed is still probed, just not cached: the cached
+    answer is only trustworthy when the file it came from can be identified.
+    """
+    key: tuple[str, int, int] | None = None
+    try:
+        stat = Path(binary).stat()
+        key = (binary, int(stat.st_mtime), int(stat.st_size))
+        cached = _HELP_CACHE.get(key)
+        if cached is not None:
+            return cached
+    except OSError:
+        key = None
+    try:
+        probe = subprocess.run([binary, "--help"], capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    text = f"{probe.stdout}{probe.stderr}"
+    if key is not None:
+        _HELP_CACHE[key] = text
+    return text
+
+
 def _supports_load_mode(binary: str) -> bool:
     """Whether this llama-server knows `--load-mode`.
 
@@ -97,11 +132,8 @@ def _supports_load_mode(binary: str) -> bool:
     One `--help` run per spawn is cheaper than a failed child, and the caller
     may skip the probe entirely by passing the answer in.
     """
-    try:
-        probe = subprocess.run([binary, "--help"], capture_output=True, text=True, timeout=30)
-    except (OSError, subprocess.SubprocessError):
-        return False
-    return "--load-mode" in f"{probe.stdout}{probe.stderr}"
+    text = _help_text(binary)
+    return text is not None and "--load-mode" in text
 
 
 def supports_n_cpu_moe(binary: str) -> bool:
@@ -111,12 +143,8 @@ def supports_n_cpu_moe(binary: str) -> bool:
     must know before choosing the server backend. Some builds print the short
     form, others only the long one; accept either.
     """
-    try:
-        probe = subprocess.run([binary, "--help"], capture_output=True, text=True, timeout=30)
-    except (OSError, subprocess.SubprocessError):
-        return False
-    help_text = f"{probe.stdout}{probe.stderr}"
-    return "-ncmoe" in help_text or "--n-cpu-moe" in help_text
+    text = _help_text(binary)
+    return text is not None and ("-ncmoe" in text or "--n-cpu-moe" in text)
 
 
 def supports_n_cpu_ffn(binary: str) -> bool:
@@ -126,12 +154,8 @@ def supports_n_cpu_ffn(binary: str) -> bool:
     choosing the server backend, because a build without the flag exits after
     allocating the model and the child would never serve a request.
     """
-    try:
-        probe = subprocess.run([binary, "--help"], capture_output=True, text=True, timeout=30)
-    except (OSError, subprocess.SubprocessError):
-        return False
-    help_text = f"{probe.stdout}{probe.stderr}"
-    return "-ncffn" in help_text or "--n-cpu-ffn" in help_text
+    text = _help_text(binary)
+    return text is not None and ("-ncffn" in text or "--n-cpu-ffn" in text)
 
 
 def probe_devices(binary: str) -> str | None:
@@ -189,11 +213,8 @@ def supports_moe_cache(binary: str) -> bool:
     it exits on an unknown option, and the pool is only an optimisation, so the
     planner sets `Plan.moe_cache_mib` either way and the flag is dropped here.
     """
-    try:
-        probe = subprocess.run([binary, "--help"], capture_output=True, text=True, timeout=30)
-    except (OSError, subprocess.SubprocessError):
-        return False
-    return "--moe-cache-mib" in f"{probe.stdout}{probe.stderr}"
+    text = _help_text(binary)
+    return text is not None and "--moe-cache-mib" in text
 
 
 def supports_spec_type(binary: str) -> bool:
@@ -202,11 +223,8 @@ def supports_spec_type(binary: str) -> bool:
     Older builds have neither the flag nor the n-gram drafters, and passing an
     unknown option kills the child, so the flag is only added after a probe.
     """
-    try:
-        probe = subprocess.run([binary, "--help"], capture_output=True, text=True, timeout=30)
-    except (OSError, subprocess.SubprocessError):
-        return False
-    return "--spec-type" in f"{probe.stdout}{probe.stderr}"
+    text = _help_text(binary)
+    return text is not None and "--spec-type" in text
 
 
 def _supports_fit(binary: str) -> bool:
@@ -217,12 +235,8 @@ def _supports_fit(binary: str) -> bool:
     planner's ngl/ncmoe placement, so Vipera turns it off — but only on builds
     that understand the flag.
     """
-    try:
-        probe = subprocess.run([binary, "--help"], capture_output=True, text=True, timeout=30)
-    except (OSError, subprocess.SubprocessError):
-        return False
-    help_text = f"{probe.stdout}{probe.stderr}"
-    return "-fit" in help_text or "--fit" in help_text
+    text = _help_text(binary)
+    return text is not None and ("-fit" in text or "--fit" in text)
 
 
 def supports_embeddings(binary: str) -> bool:
@@ -233,12 +247,8 @@ def supports_embeddings(binary: str) -> bool:
     request against such a child segfaulted on the reference build, so both
     flags are required and passed together.
     """
-    try:
-        probe = subprocess.run([binary, "--help"], capture_output=True, text=True, timeout=30)
-    except (OSError, subprocess.SubprocessError):
-        return False
-    help_text = f"{probe.stdout}{probe.stderr}"
-    return "--embeddings" in help_text and "--pooling" in help_text
+    text = _help_text(binary)
+    return text is not None and "--embeddings" in text and "--pooling" in text
 
 
 def server_command(

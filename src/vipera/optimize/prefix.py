@@ -18,7 +18,15 @@ from __future__ import annotations
 import hashlib
 import json
 import threading
+from collections import OrderedDict
 from typing import Any
+
+#: How many distinct prefixes are remembered for the hit-rate counter.
+#:
+#: This is a diagnostic, not a cache: past a few thousand distinct prefixes the
+#: rate reports what the recent window looks like, and a set that only ever
+#: grows in a gateway that runs for days is a leak rather than a feature.
+_MAX_SEEN = 4096
 
 
 def reusable_prefix(messages: list[dict], tools: list[dict] | None = None) -> dict[str, Any]:
@@ -90,7 +98,7 @@ class PrefixStats:
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
-        self._seen: set[str] = set()
+        self._seen: OrderedDict[str, None] = OrderedDict()
         self.reset()
 
     def reset(self) -> None:
@@ -116,7 +124,11 @@ class PrefixStats:
         with self._lock:
             hit = bool(key) and key in self._seen
             if key:
-                self._seen.add(key)
+                # Re-insert to mark it recent; the oldest key goes when full.
+                self._seen[key] = None
+                self._seen.move_to_end(key)
+                if len(self._seen) > _MAX_SEEN:
+                    self._seen.popitem(last=False)
             self.requests += 1
             self.prefix_hits += int(hit)
             self.prompt_tokens += max(0, int(prompt_tokens))

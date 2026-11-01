@@ -188,8 +188,11 @@ def shape(
 
     # 2. Still over: give up the oldest history, whole messages at a time. The
     # system block and the current turn stay: losing either changes the answer,
-    # not just its length.
-    while estimate_tokens(shaped) > message_budget and turn_start > head_end:
+    # not just its length. The total is carried instead of re-measuring the
+    # whole list after every drop: the loop drops one exchange per pass, so
+    # re-measuring made a 200-message history 200 full walks of 200 messages.
+    total = estimate_tokens(shaped)
+    while total > message_budget and turn_start > head_end:
         # Drop a whole exchange: an assistant turn that called tools plus the
         # tool messages that answer it. Deleting them one at a time can leave a
         # `tool` message whose `assistant(tool_calls)` is gone, and the chat
@@ -198,6 +201,7 @@ def shape(
         while end < turn_start and shaped[end].get("role") == "tool":
             end += 1
         dropped += end - head_end
+        total -= sum(_content_tokens(m) for m in shaped[head_end:end])
         del shaped[head_end:end]
         turn_start -= end - head_end
 
@@ -205,15 +209,19 @@ def shape(
     # its head and tail so the instructions and the actual question survive, and
     # stop as soon as the request fits or nothing more can be removed.
     for _ in range(len(shaped)):
-        excess = estimate_tokens(shaped) - message_budget
+        excess = total - message_budget
         if excess <= 0:
             break
         target = next(
             (i for i in range(len(shaped) - 1, -1, -1) if _content(shaped[i])),
             None,
         )
-        if target is None or not _shrink(shaped[target], excess):
+        if target is None:
             break
+        before = _content_tokens(shaped[target])
+        if not _shrink(shaped[target], excess):
+            break
+        total += _content_tokens(shaped[target]) - before
         truncated += 1
 
     return Shaping(
