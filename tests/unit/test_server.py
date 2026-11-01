@@ -1089,3 +1089,21 @@ def test_relay_surfaces_a_reader_error():
         return lock.locked()
 
     assert asyncio.run(_run()) is False
+
+
+def test_chat_reports_its_own_speed_and_health_accumulates_it():
+    """A user should not need a benchmark to see tok/s: the answer carries it."""
+    client = TestClient(build_app(FakeEngine(), "test-model"))
+
+    body = client.post(
+        "/v1/chat/completions",
+        json={"messages": [{"role": "user", "content": "hi"}]},
+    ).json()
+
+    assert body["timings"]["prompt_n"] == 3
+    assert body["timings"]["predicted_n"] == 2
+
+    health = client.get("/health").json()
+    assert health["throughput"]["requests"] == 1
+    assert health["throughput"]["completion_tokens"] == 2
+    assert health["throughput"]["last"]["predicted_n"] == 2

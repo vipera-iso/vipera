@@ -13,6 +13,7 @@ from fastapi import FastAPI
 from fastapi.responses import JSONResponse
 
 from vipera import __version__
+from vipera.metrics import Meter
 from vipera.optimize.layer import OptimizeLayer
 from vipera.pool import UnknownModelError, engine_health
 from vipera.protocols import mount, security
@@ -154,8 +155,15 @@ def build_app(
         # stable shows a cache_rate above zero here.
         if optimizer is not None:
             body["optimize"] = optimizer.stats.summary()
+        # Speed the gateway has actually served: the same numbers it prints per
+        # request, so `/health` answers "how fast is it going" without a client
+        # having to time anything.
+        body["throughput"] = meter.snapshot()
         return JSONResponse(body, status_code=503 if broken else 200)
 
+    # Where the protocol layers record each request's timings.
+    meter = Meter()
+    app.state.meter = meter
     app.state.protocols = mount(app, gateway, protocols)
     app.state.gateway = gateway
     return app

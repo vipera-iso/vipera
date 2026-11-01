@@ -17,6 +17,7 @@ from pydantic import BaseModel, Field, model_validator
 from starlette.background import BackgroundTask
 
 from vipera.errors import log_failure
+from vipera.metrics import Stopwatch, Timings
 from vipera.pool import UnknownModelError
 from vipera.protocols.gateway import Gateway
 from vipera.protocols.limits import (
@@ -163,6 +164,62 @@ def _embedding_texts(req: EmbeddingRequest) -> list[str]:
     return texts
 
 
+def _llama_timings(payload: dict) -> Timings | None:
+    """Read the `timings` block llama-server already puts in its response.
+
+    The child measured prefill and decode itself, so its split is better than
+    anything the gateway can reconstruct from a buffered response - it is the
+    same shape `Timings.to_dict()` emits.
+    """
+    block = payload.get("timings")
+    if not isinstance(block, dict):
+        return None
+    prompt_ms = block.get("prompt_ms")
+    decode_ms = block.get("predicted_ms")
+    if prompt_ms is None and decode_ms is None:
+        return None
+    return Timings(
+        prompt_ms=float(prompt_ms or 0.0),
+        decode_ms=float(decode_ms or 0.0),
+        prompt_tokens=block.get("prompt_n"),
+        completion_tokens=block.get("predicted_n"),
+    )
+
+
+def _sniff_usage(frame: bytes | str) -> dict | None:
+    """Pull `usage`/`timings` out of a frame that carries them, and nothing else.
+
+    The pass-through path deliberately never decodes a token frame: it checks
+    for the two keys with a substring test first, so the JSON parse happens at
+    most once per request instead of once per token.
+    """
+    if isinstance(frame, str):
+        frame = frame.encode()
+    if b'"usage"' not in frame and b'"timings"' not in frame:
+        return None
+    text = frame.decode("utf-8", "replace").strip()
+    if text.startswith("data:"):
+        text = text[5:].strip()
+    try:
+        payload = json.loads(text)
+    except json.JSONDecodeError:
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def _report(app: FastAPI, timings: Timings) -> None:
+    """Record one request and say how fast it was.
+
+    Printed rather than logged at INFO: `vipera serve` runs uvicorn at warning
+    level, and the point of the line is that a user sees the speed without
+    running a benchmark.
+    """
+    meter = getattr(app.state, "meter", None)
+    if meter is not None:
+        meter.record(timings)
+    print(f"[vipera] {timings.line()}", flush=True)
+
+
 def mount(app: FastAPI, gateway: Gateway) -> None:
     @app.get("/v1/models")
     def models():
@@ -181,6 +238,7 @@ def mount(app: FastAPI, gateway: Gateway) -> None:
             return problem
         lease = Lease(lambda: gateway.release(active))
         streaming = False
+        watch = Stopwatch()
         try:
             # exclude_none keeps unset optional knobs out of the llama.cpp call
             # so the backend's own defaults apply (e.g. seed=None is not 0).
@@ -236,8 +294,18 @@ def mount(app: FastAPI, gateway: Gateway) -> None:
                                 on_start=lease.start,
                                 on_close=lease.release,
                             )
+                            tail: dict | None = None
                             async for frame in frames:
+                                watch.first_token()
+                                sniffed = _sniff_usage(frame)
+                                if sniffed is not None:
+                                    tail = sniffed
                                 yield frame
+                            watch.finish()
+                            measured = _llama_timings(tail or {}) or watch.timings(
+                                (tail or {}).get("usage")
+                            )
+                            _report(app, measured)
                             if gateway.optimizer is not None:
                                 gateway.optimizer.note(
                                     messages, tools=kwargs.get("tools"), shaping=shaping
@@ -252,6 +320,7 @@ def mount(app: FastAPI, gateway: Gateway) -> None:
                             on_start=lease.start,
                         )
                         async for chunk in chunks:
+                            watch.first_token()
                             if isinstance(chunk, dict) and chunk.get("usage"):
                                 usage = chunk["usage"]
                                 # Never forward usage inside a chunk: the OpenAI
@@ -282,6 +351,8 @@ def mount(app: FastAPI, gateway: Gateway) -> None:
                             payload={"usage": usage} if usage else None,
                             shaping=shaping,
                         )
+                    watch.finish()
+                    _report(app, watch.timings(usage))
                     # OpenAI emits a trailing choices:[] frame when the client
                     # asks for usage. Only possible when the backend reported
                     # any; llama-cpp-python 0.3.x does not, so it is omitted.
@@ -312,6 +383,16 @@ def mount(app: FastAPI, gateway: Gateway) -> None:
                 gateway.optimizer.note(
                     messages, tools=kwargs.get("tools"), payload=result, shaping=shaping
                 )
+            watch.finish()
+            measured = (
+                _llama_timings(result) if isinstance(result, dict) else None
+            ) or watch.timings(result.get("usage") if isinstance(result, dict) else None)
+            _report(app, measured)
+            # Non-streaming callers get the split with the answer. The keys are
+            # llama-server's own, and a backend that already reported them keeps
+            # its numbers rather than being overwritten here.
+            if isinstance(result, dict):
+                result.setdefault("timings", measured.to_dict())
             return result
         finally:
             # Non-stream paths release here when the engine was never reached;

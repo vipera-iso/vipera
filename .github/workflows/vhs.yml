@@ -44,21 +44,41 @@ jobs:
           # /usr/bin and every system command — mkdir included — goes missing).
           echo "${{ github.workspace }}/.venv/bin" >> "$GITHUB_PATH"
 
-      - name: Record GIF
+      - name: Fetch the model the tape records
         run: |
-          mkdir -p ~/.vipera/models
-          # The tape needs a model registered as qwen2.5-0.5b-instruct-q4_k_m;
-          # CI does not download one yet, so recording here is best-effort.
-          vhs docs/assets/demo.tape || true
+          # The tape serves qwen2.5-1.5b-instruct-q4_k_m. Without it in the
+          # registry the recording is a screenful of "model not found", which is
+          # why this job used to be best-effort and the committed GIF froze at
+          # whatever version happened to be installed the day it was recorded.
+          vipera model search --yes
+
+      - name: Warm the model into page cache
+        run: |
+          # The tape sleeps 8 s after `serve start`; a cold 1.1 GB read on a
+          # CI runner is slower than that, and the GIF would record `starting`.
+          vipera serve start --model qwen2.5-1.5b-instruct-q4_k_m --ctx 4096 & sleep 30
+          vipera serve status || true
+          vipera serve stop --yes || true
+
+      - name: Record GIF
+        # No `|| true`: a recording that fails leaves the committed GIF on an
+        # old version, which is exactly the bug this job exists to prevent.
+        run: vhs docs/assets/demo.tape
 
       - name: Compress if needed
         run: |
           if [ -f docs/assets/demo.gif ]; then
             size_kb=$(du -k docs/assets/demo.gif | cut -f1)
-            if [ "$size_kb" -gt 1000 ]; then
+            if [ "$size_kb" -gt 950 ]; then
               gifsicle -O3 --lossy=80 --colors 128 docs/assets/demo.gif -o docs/assets/demo.gif
             fi
           fi
+          # The repo's own budget: `make demo` fails above 972800 bytes, and the
+          # assets workflow caps every file at 2 MB. Fail here, where the
+          # recording was just made, rather than let a fat GIF land.
+          size=$(wc -c < docs/assets/demo.gif)
+          echo "demo.gif: $size bytes"
+          test "$size" -le 1024000
 
       - name: Commit GIF if changed
         run: |
