@@ -24,6 +24,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   file menu. With no TTY and no flags they take the first choice and print it
   instead of waiting for input nobody will type.
 
+### Changed
+- **A dense tensor split now probes for a better one before serving.** The
+  planner prices `-ncffn` from the header plus a reserve, and it charges the
+  whole of `fixed_bytes` to the card even though llama.cpp keeps `token_embd`
+  on the CPU side — so a plan can leave FFN blocks in RAM the card could hold.
+  `moe_probe` (on by default) now covers this path too: up to four more
+  aggressive splits are tried, most aggressive first, and the first one that
+  starts is the one served. Measured on a GTX 1650 4 GB with Qwen2.5-7B Q4_K_M
+  at ctx 4096: the planned 18/28 FFN layers decoded 16.4 t/s, the probed 21/28
+  decodes 17.9 t/s (+9.2%), and the start pays one extra spawn (~1.4 s) when
+  the planned split turns out not to fit. A rung that loads costs nothing
+  extra; the planned split is still tried after every probed one, and the
+  existing ladder down to CPU-only is unchanged.
+
+### Fixed
+- **Full-precision KV no longer reserves 0.9 GB of card for a slow path it did
+  not need.** Flash attention was requested for f16/bf16/f32 caches only above
+  4 GB of VRAM, so on a small card `_NO_FA_RESERVE_GB` was charged and the plan
+  offloaded fewer layers — while measuring *slower* without it: on the reference
+  4 GB card with 7B/Q4_K_M, f16 KV and a 1024-token prompt, fa on decoded 16.96
+  t/s at 18/28 layers against 14.40 for fa off. A GPU plan now asks for FA
+  whatever its KV type; a plan that offloads nothing still keeps it off, because
+  that is where the slow CPU flash-attention path lives. Worth 3 layers at 8K on
+  the reference fixture (9 -> 12 of 40), and it does not change `q8_0` plans,
+  which already had FA.
+
 ## [1.4.0] - 2026-10-28
 
 ### Added

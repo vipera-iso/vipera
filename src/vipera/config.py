@@ -88,12 +88,15 @@ DEFAULT_CONFIG = {
     # backend only; the in-process engine has no equivalent (llama-cpp-python's
     # prompt-lookup draft measured -29% decode on this box).
     "spec_type": "none",
-    # Try a more aggressive MoE expert placement before the planner's own fit
-    # and keep it if it loads: the fit comes from per-layer expert bytes plus a
-    # measured overhead constant, so a card whose real ceiling is higher ends up
-    # with expert layers in RAM that it could have computed. Costs up to two
-    # extra spawns per start, and a probed split sits closer to the graph/compute
-    # cliff than the planned one — turn it off to always start with the fit.
+    # Try a more aggressive tensor placement before the planner's own fit and
+    # keep it if it loads: the fit comes from per-layer bytes plus a measured
+    # overhead constant, so a card whose real ceiling is higher ends up with
+    # expert layers (MoE plans) or dense FFN blocks (tensor split plans) in RAM
+    # that it could have computed. Costs up to two extra spawns per start for a
+    # MoE plan and four for a tensor split, all of them only when an aggressive
+    # rung fails; a probed split sits closer to the graph/compute cliff than the
+    # planned one - turn it off to always start with the fit. The name predates
+    # the dense path and is kept so existing configs keep working.
     "moe_probe": True,
     # The optimization layer (vipera.optimize). `shaping` trims a request that
     # is larger than the loaded context instead of letting llama.cpp cut the

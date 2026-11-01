@@ -115,8 +115,9 @@ def test_f16_kv_still_offloads_some_layers():
     p = plan(_HERMES_META, hw, ctx=65536, kv_cache="f16")
 
     # 10 GB KV / 40 layers = 0.25 GB per layer on top of 0.225 GB of weights:
-    # 2.7 / 0.475 -> 5 layers.
-    assert p.gpu_layers == 5
+    # 3.3 / 0.475 -> 6 layers (the card keeps 0.3 GB + the ubatch, not the
+    # 0.9 GB of no-FA scratch this plan used to reserve).
+    assert p.gpu_layers == 6
 
 
 def test_each_slot_is_charged_to_the_kv_budget():
@@ -153,20 +154,24 @@ def test_slots_raise_the_resident_host_footprint():
     assert plan(meta, _hw(), parallel=0).parallel == 1
 
 
-def test_no_flash_attention_costs_layers():
-    # Without FA llama.cpp allocates a full KQ matrix per batch, so the same card
-    # offloads fewer layers. Measured on the reference box: 14 layers with FA at
-    # 8K/q8_0, 10 without at 8K/f16.
+def test_flash_attention_is_not_gated_on_the_kv_type():
+    # FA used to be requested for full-precision KV only above 4 GB of VRAM -
+    # exactly the card with least to spare. Asking for it off makes llama.cpp
+    # allocate a full KQ matrix per batch (_NO_FA_RESERVE_GB, 0.9 GB, three
+    # layers of this model) and measured slower anyway: on the reference 4 GB
+    # card, 7B/Q4_K_M with f16 KV and a 1024-token prompt, fa on decoded 16.96
+    # t/s at 18/28 layers against 14.40 for fa off.
     hw = _hw(gpu_name="GTX 1650", vram_total_gb=4.0, vram_free_gb=3.64)
     quantized = plan(_HERMES_META, hw, ctx=8192, kv_cache="q8_0")
     full_precision = plan(_HERMES_META, hw, ctx=8192, kv_cache="f16")
 
     assert quantized.flash_attn is True
-    assert full_precision.flash_attn is False
-    assert quantized.gpu_layers > full_precision.gpu_layers
-    # 13 vs 9: the FA reserve is worth more than the f16 cache is cheaper.
+    assert full_precision.flash_attn is True
+    # The quantized cache is still the cheaper of the two per layer, so it
+    # offloads one more - but the 0.9 GB of scratch is no longer the difference
+    # (it used to be 13 against 9).
     assert quantized.gpu_layers == 13
-    assert full_precision.gpu_layers == 9
+    assert full_precision.gpu_layers == 12
 
 
 def test_layer_bytes_metadata_does_not_raise_the_offload():
@@ -179,8 +184,8 @@ def test_layer_bytes_metadata_does_not_raise_the_offload():
     hw = _hw(gpu_name="GTX 1650", vram_total_gb=4.0, vram_free_gb=3.7)
     lean = dict(_HERMES_META, layer_bytes=int(0.1844 * _GIB))
 
-    assert plan(lean, hw, ctx=8192, kv_cache="f16").gpu_layers == 9
-    assert plan(_HERMES_META, hw, ctx=8192, kv_cache="f16").gpu_layers == 9
+    assert plan(lean, hw, ctx=8192, kv_cache="f16").gpu_layers == 12
+    assert plan(_HERMES_META, hw, ctx=8192, kv_cache="f16").gpu_layers == 12
 
 
 def test_ram_estimate_reflects_q8_kv_at_64k():

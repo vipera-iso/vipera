@@ -513,6 +513,45 @@ def test_tensor_split_load_attempts_step_ffn_back_then_go_cpu():
     assert all(candidate.n_cpu_ffn == -1 for candidate in cpu)
 
 
+def test_ffn_probe_tries_more_ffn_on_the_gpu_before_the_planned_split():
+    plan = _plan(
+        gpu_layers=18,
+        n_layers=28,
+        n_cpu_ffn=10,
+        note="Tensor split: 18/28 dense FFN layers on GPU, attention on GPU",
+    )
+
+    probed = load_attempts(plan, probe=True)
+    ncffn = [candidate.n_cpu_ffn for candidate, _ in probed]
+
+    # Most aggressive first - four FFN blocks back on the card - then the fit
+    # itself, then the safe direction, then the CPU stages.
+    assert ncffn[:5] == [6, 7, 8, 9, 10]
+    assert ncffn[5:8] == [11, 12, 28]
+    assert ncffn[-1] == -1
+    # The banner has to travel with the rung, or a probed split is reported as
+    # the planned one.
+    assert probed[0][0].note == "Tensor split: 22/28 dense FFN layers on GPU, attention on GPU"
+
+    # Without the flag the planned split is tried as given: the in-process
+    # engine cannot execute an override plan at all.
+    assert load_attempts(plan)[0][0].n_cpu_ffn == 10
+
+
+def test_ffn_probe_never_asks_for_a_negative_ffn_layer_count():
+    plan = _plan(
+        gpu_layers=18,
+        n_layers=28,
+        n_cpu_ffn=2,
+        note="Tensor split: 26/28 dense FFN layers on GPU, attention on GPU",
+    )
+
+    probed = load_attempts(plan, probe=True)
+
+    # -ncffn counts from layer 0, so 0 is the most aggressive legal value.
+    assert [candidate.n_cpu_ffn for candidate, _ in probed][:2] == [0, 1]
+
+
 def test_moe_probe_tries_more_experts_on_the_gpu_before_the_planned_split():
     plan = _plan(gpu_layers=14, moe_cpu_layers=12, n_layers=24, n_ubatch=896, note="MoE")
 

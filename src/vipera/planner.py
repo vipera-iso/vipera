@@ -742,7 +742,17 @@ def plan(
     # Flash attention is required by quantized KV, and on the GPU it is also the
     # fast path. Decided before the VRAM budget because it changes how much
     # scratch space llama.cpp needs on the card.
-    flash_attn_on_gpu = quantized_kv or hw.vram_total_gb > 4
+    #
+    # It used to be requested for full-precision KV only above 4 GB of VRAM,
+    # which cost twice on exactly the card that has least to spare. Measured on
+    # the reference 4 GB card, 7B/Q4_K_M, f16 KV, 1024-token prompt, hybrid
+    # split: fa on decoded 16.96 t/s at 18/28 layers against 14.40 for fa off,
+    # and 18.57 against 18.15 at 20/28 - so FA was never the slower choice here,
+    # while asking for it off adds `_NO_FA_RESERVE_GB` (0.9 GB) to the reserve,
+    # which is 4-5 layers of a 7B. The CPU flash-attention path is what is slow,
+    # and that is decided at the use site below: a plan that offloads nothing
+    # keeps FA off whatever its KV type.
+    flash_attn_on_gpu = quantized_kv or want_gpu
     reserve_gb = max(_VRAM_RESERVE_BASE_GB, min(1.0, _VRAM_RESERVE_FRACTION * hw.vram_total_gb))
     # Micro-batch first: the prefill compute buffer has to fit beside the
     # weights, and that is what a long prompt runs out of room on.
@@ -911,8 +921,10 @@ def plan(
             # the note has to carry that fact rather than the plain "CPU ONLY".
             ctx = min(ctx, 2048)
     else:
-        # Quantized KV requires flash attention, regardless of VRAM size.
-        flash_attn = flash_attn_on_gpu
+        # Quantized KV requires flash attention, regardless of VRAM size. With
+        # full-precision KV the flag only follows the offload: a plan that puts
+        # no layer on the card would run FA on the CPU, which is the slow path.
+        flash_attn = flash_attn_on_gpu and (quantized_kv or gpu_layers > 0)
         offload_kqv = not no_kv_offload
         n_batch = min(n_batch, 512)
 

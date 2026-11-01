@@ -83,6 +83,20 @@ def layer_ladder(layers: int) -> list[int]:
 #: by every start on every machine, successful or not.
 _MOE_PROBE_STEPS = 2
 
+#: How many dense-FFN blocks the server backend may move back onto the GPU
+#: beyond the planner's own fit, one load attempt each. Same reason as the MoE
+#: probe above, and the same bias: `_tensor_split_ffn_layers` charges the whole
+#: of `fixed_bytes` to the card, but llama.cpp keeps `token_embd` on the CPU
+#: side, so a plan can leave several FFN blocks in RAM that the card could hold.
+#: Measured on a GTX 1650 4 GB with Qwen2.5-7B Q4_K_M, ctx 4096, 641-token
+#: prompt: the planner's 18/28 FFN on the card decoded 16.1 t/s, 20/28 (one step
+#: past the fit) 17.4, 22/28 (four steps) 17.9 - and one step further does not
+#: create a context at all. A failed rung costs ~1.5 s (mmap'd 4.4 GB model, the
+#: failure is the context allocation), so the cap is what a start pays when the
+#: fit is off by more than it can be, not what a healthy start pays: an
+#: aggressive rung that loads is the first and only spawn.
+_FFN_PROBE_STEPS = 4
+
 
 def with_gpu_layers(plan: Plan, layers: int) -> Plan:
     """Same plan at a different offload depth, with a truthful note."""
@@ -134,19 +148,46 @@ def _moe_probe_attempts(plan: Plan, steps: int) -> list[tuple[Plan, str]]:
     return attempts
 
 
+def _ffn_probe_attempts(plan: Plan, steps: int) -> list[tuple[Plan, str]]:
+    """Tensor splits more aggressive than the planner's own fit.
+
+    --n-cpu-ffn counts the layers whose dense FFN stays on the CPU, so a
+    *smaller* value means more FFN blocks on the card. These candidates are
+    tried before the planned split; the first one that loads wins and the rest
+    are never spawned.
+    """
+    attempts: list[tuple[Plan, str]] = []
+    for step in range(steps, 0, -1):
+        n_cpu_ffn = plan.n_cpu_ffn - step
+        if n_cpu_ffn < 0:
+            continue
+        gpu_ffn = plan.n_layers - n_cpu_ffn
+        attempts.append(
+            (
+                with_ffn_on_cpu(plan, n_cpu_ffn),
+                f"tensor split, {gpu_ffn}/{plan.n_layers} FFN layers on GPU (probed)",
+            )
+        )
+    return attempts
+
+
 def load_attempts(plan: Plan, *, probe: bool = False) -> list[tuple[Plan, str]]:
     """Candidate plans for loading, most offload first, ending CPU-only.
 
     ``probe`` is for the server backend, the only one that can execute a
-    tensor-override plan: with it, a MoE plan first tries expert placements
-    *above* the planner's fit (see ``_moe_probe_attempts``) and keeps the most
-    aggressive one that loads. Without it the planned split is tried as given,
-    which is what the in-process engine needs.
+    tensor-override plan: with it, a tensor-override plan first tries placements
+    *above* the planner's fit - more experts on the card for a MoE plan (see
+    ``_moe_probe_attempts``), more dense FFN blocks for a tensor split (see
+    ``_ffn_probe_attempts``) - and keeps the most aggressive one that loads.
+    Without it the planned split is tried as given, which is what the
+    in-process engine needs.
     """
     attempts: list[tuple[Plan, str]] = []
     if plan.requires_server and plan.n_layers > 0:
         if probe and plan.moe_cpu_layers >= 0:
             attempts.extend(_moe_probe_attempts(plan, _MOE_PROBE_STEPS))
+        elif probe and plan.n_cpu_ffn >= 0:
+            attempts.extend(_ffn_probe_attempts(plan, _FFN_PROBE_STEPS))
         attempts.append((plan, "planned split"))
         # The server ladder moves one unit at a time in the safe direction: one
         # expert layer (roughly 190-220 MB on the reference model) or one dense
