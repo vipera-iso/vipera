@@ -1,5 +1,5 @@
 # Regenerate docs/assets/demo.gif with `make demo` from the repository root.
-# Requires: vhs, ttyd, jq, figlet, ffmpeg, and the qwen2.5-0.5b model
+# Requires: vhs, ttyd, jq, figlet, ffmpeg, and the qwen2.5-1.5b model
 # registered locally (vipera model search, or vipera model import <path>).
 #
 # The recording is supersampled: 1800x1200 at 32px, then `make demo` downscales
@@ -36,11 +36,11 @@ Sleep 500ms
 
 Type "vipera system doctor"
 Enter
-Sleep 3s
+Sleep 2500ms
 
-Type "vipera serve start --model qwen2.5-0.5b-instruct-q4_k_m --ctx 4096 >/tmp/vhs-serve.log 2>&1 &"
+Type "vipera serve start --model qwen2.5-1.5b-instruct-q4_k_m --ctx 4096 >/tmp/vhs-serve.log 2>&1 &"
 Enter
-Sleep 5s
+Sleep 6s
 
 Type "vipera serve status"
 Enter
@@ -48,7 +48,7 @@ Sleep 500ms
 
 Type "bash docs/assets/demo-request.sh"
 Enter
-Sleep 4s
+Sleep 3s
 
 Type "vipera serve stop --yes"
 Enter

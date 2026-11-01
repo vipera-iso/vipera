@@ -1,7 +1,11 @@
+import os
 import subprocess
 import sys
 import types
 from dataclasses import replace
+
+import pytest
+import typer
 
 from vipera.commands import system_cmd
 from vipera.hardware import HardwareInfo
@@ -19,6 +23,21 @@ def _gpu_box():
         vram_free_gb=3.6,
         is_apple_silicon=False,
     )
+
+
+def test_quiet_stderr_swallows_descriptor_level_writes(capfd):
+    """ggml prints its device banner on fd 2 from C, so a Python redirect misses it.
+
+    `doctor` is a table; the banner used to land between its rows. The wrapper
+    has to hide the descriptor without leaking it afterwards.
+    """
+    with system_cmd._quiet_stderr():
+        os.write(2, b"ggml_cuda_init: found 1 CUDA devices\n")
+
+    assert "ggml_cuda_init" not in capfd.readouterr().err
+
+    os.write(2, b"after the table\n")
+    assert "after the table" in capfd.readouterr().err
 
 
 def test_doctor_prints_install_hints_when_runtime_missing(monkeypatch, capsys):
@@ -342,3 +361,32 @@ def test_setup_dry_run_prints_the_command_and_runs_nothing(monkeypatch, capsys):
     out = capsys.readouterr().out
     assert "pip" in out
     assert "llama-cpp-python" in out
+
+
+def test_build_server_refuses_a_directory_that_is_not_llama_cpp(tmp_path, capsys):
+    """A wrong --src should say so once, not run cmake against a random tree."""
+    with pytest.raises(typer.Exit):
+        system_cmd.build_server(src=tmp_path)
+    out = capsys.readouterr().out
+    assert "not a llama.cpp checkout" in out
+
+
+def test_build_server_dry_run_plans_the_backend_for_the_card(tmp_path, monkeypatch, capsys):
+    """--dry-run prints the cmake argv and runs nothing, with the card's backend."""
+    (tmp_path / "include").mkdir()
+    (tmp_path / "CMakeLists.txt").write_text("project(llama)\n")
+    (tmp_path / "include" / "llama.h").write_text("\n")
+    monkeypatch.setattr(system_cmd, "detect", lambda: replace(_gpu_box(), gpu_vendor="nvidia"))
+
+    def _boom(*a, **kw):  # pragma: no cover - the assertion is that it is unused
+        raise AssertionError("dry run must not execute cmake")
+
+    monkeypatch.setattr(system_cmd.subprocess, "run", _boom)
+
+    system_cmd.build_server(src=tmp_path, dry_run=True)
+    out = capsys.readouterr().out
+    # Rich wraps the argv at the console width, so assert on the tokens, not on
+    # the spacing between them.
+    assert "-DGGML_CUDA=on" in out
+    assert "--target" in out
+    assert "llama-server" in out

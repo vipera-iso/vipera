@@ -1,6 +1,7 @@
 import contextlib
 import os
 import platform
+import shutil
 import subprocess
 import sys
 from dataclasses import dataclass, field
@@ -9,7 +10,7 @@ from pathlib import Path
 import typer
 from rich.text import Text
 
-from vipera.backends.server import accelerator_device, probe_devices
+from vipera.backends.server import accelerator_device, probe_devices, supports_n_cpu_ffn
 from vipera.config import CONFIG_FILE, DEFAULT_CONFIG, _coerce_strict, load_config, save_config
 from vipera.hardware import detect
 from vipera.optimizer import OptimizerError, find_llama_tool
@@ -205,6 +206,31 @@ def _cuda_venv_hint() -> str | None:
     return str(root) if probe.returncode == 0 else None
 
 
+@contextlib.contextmanager
+def _quiet_stderr():
+    """Silence fd 2 around a C library that logs when it initialises.
+
+    llama-cpp-python's ggml backend prints its device banner from C on fd 2, and
+    no Python-level redirect sees those bytes: they are written by the shared
+    object, not by `sys.stderr`. `doctor` prints a table, so the banner used to
+    land between its rows and read like an error the table itself had reported
+    ("Consider compiling with CMAKE_CUDA_ARCHITECTURES=..."). Swap the
+    descriptor for the null device for the duration of the import and the
+    version query, then put it back.
+    """
+    sys.stderr.flush()
+    saved = os.dup(2)
+    devnull = os.open(os.devnull, os.O_WRONLY)
+    try:
+        os.dup2(devnull, 2)
+        yield
+    finally:
+        os.dup2(saved, 2)
+        os.close(devnull)
+        os.close(saved)
+        sys.stderr.flush()
+
+
 @app.command("doctor")
 def doctor():
     """Run system diagnostics."""
@@ -227,19 +253,20 @@ def doctor():
     llama_missing = False
     gpu_offload = None
     try:
-        import llama_cpp
+        with _quiet_stderr():
+            import llama_cpp
+
+            # A binding compiled without a GPU backend silently ignores
+            # n_gpu_layers: the planner still reports "9/40 layers" while every
+            # layer runs on the CPU. Two virtualenvs on one machine can disagree
+            # here, so this row reports the binding, not the hardware.
+            supports_offload = getattr(llama_cpp, "llama_supports_gpu_offload", None)
+            try:
+                gpu_offload = supports_offload() if supports_offload else None
+            except Exception:
+                gpu_offload = None
 
         row("llama-cpp-python", "installed")
-
-        # A binding compiled without a GPU backend silently ignores
-        # n_gpu_layers: the planner still reports "9/40 layers" while every
-        # layer runs on the CPU. Two virtualenvs on one machine can disagree
-        # here, so this row reports the binding, not the hardware.
-        supports_offload = getattr(llama_cpp, "llama_supports_gpu_offload", None)
-        try:
-            gpu_offload = supports_offload() if supports_offload else None
-        except Exception:
-            gpu_offload = None
 
         if gpu_offload is True:
             row("gpu offload", "compiled in (GPU backend)", "ok", C_GREEN)
@@ -398,3 +425,114 @@ def config_cmd(
     save_config(cfg)
     ledger([(key, str(cfg[key]))])
     note(f"written to {CONFIG_FILE}", tone="ok")
+
+
+#: What to turn on for the card that was found, when building llama.cpp here.
+#: Same mapping `setup` hands to pip as CMAKE_ARGS, kept as a list because these
+#: go straight to a cmake argv.
+_LLAMA_CMAKE_FLAGS = {
+    "nvidia": ["-DGGML_CUDA=on"],
+    "amd": ["-DGGML_HIP=on"],
+    "intel": ["-DGGML_SYCL=on"],
+}
+
+
+@app.command("build-server")
+def build_server(
+    src: Path = typer.Option(..., "--src", help="Path to a llama.cpp checkout (vipera.cpp)"),
+    jobs: int = typer.Option(0, "--jobs", help="Compile jobs; 0 uses every core"),
+    dry_run: bool = typer.Option(
+        False, "--dry-run", help="Print the commands without running them"
+    ),
+):
+    """Build llama-server from a llama.cpp checkout and install it for the gateway.
+
+    The gateway talks to `llama-server`, so the runtime it can use is whatever
+    binary it finds. Pointing it at a checkout means one command instead of a
+    hand-written cmake line: configure with the backend for this card, build the
+    `llama-server` target, and copy it (with the shared libraries it links)
+    into `~/.vipera/bin`, which is the first place `find_llama_tool` looks.
+    """
+    root = Path(src).expanduser().resolve()
+    if not (root / "CMakeLists.txt").is_file() or not (root / "include" / "llama.h").is_file():
+        console.print(
+            f"[{C_RED}] ✗ {root} is not a llama.cpp checkout[/]\n"
+            f"[{C_DIM}]expected CMakeLists.txt and include/llama.h[/]"
+        )
+        raise typer.Exit(1)
+
+    hw = detect()
+    flags = _LLAMA_CMAKE_FLAGS.get(hw.gpu_vendor, [])
+    build = root / "build-vipera"
+    # Direct callers pass the OptionInfo default rather than an int.
+    requested = jobs if isinstance(jobs, int) else 0
+    n_jobs = str(requested if requested > 0 else (os.cpu_count() or 1))
+
+    commands = [
+        [
+            "cmake",
+            "-S",
+            str(root),
+            "-B",
+            str(build),
+            "-DCMAKE_BUILD_TYPE=Release",
+            "-DLLAMA_CURL=OFF",
+            *flags,
+        ],
+        ["cmake", "--build", str(build), "--target", "llama-server", "-j", n_jobs],
+    ]
+
+    console.print(f"[{C_DIM}]source[/] {root}")
+    console.print(f"[{C_DIM}]backend[/] {hw.gpu_vendor or 'cpu only'}")
+    for cmd in commands:
+        console.print(f"[{C_TEXT}]  {' '.join(cmd)}[/]")
+
+    # Direct callers pass the OptionInfo default, not a bool.
+    if dry_run is True:
+        return
+
+    for cmd in commands:
+        try:
+            subprocess.run(cmd, check=True)
+        except OSError as exc:
+            console.print(f"[{C_RED}] ✗ could not run cmake: {exc}[/]")
+            raise typer.Exit(1) from exc
+        except subprocess.CalledProcessError as exc:
+            console.print(
+                f"[{C_RED}] ✗ cmake exited {exc.returncode}[/]\n"
+                "A GPU build needs that vendor's toolchain (nvcc, hipcc or the "
+                "oneAPI compilers) on PATH."
+            )
+            raise typer.Exit(1) from exc
+
+    built_dir = build / "bin"
+    target = built_dir / ("llama-server.exe" if os.name == "nt" else "llama-server")
+    if not target.is_file():
+        console.print(f"[{C_RED}] ✗ the build produced no llama-server in {built_dir}[/]")
+        raise typer.Exit(1)
+
+    # The binary is not self-contained: a CUDA build links libggml*.so beside
+    # it, so installing the executable alone makes it fail at load time with a
+    # message about missing libraries rather than about the flag it cannot run.
+    dest = Path.home() / ".vipera" / "bin"
+    dest.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(target, dest / target.name)
+    for lib in built_dir.iterdir():
+        if lib.is_file() and (lib.name.endswith(".so") or ".so." in lib.name):
+            shutil.copy2(lib, dest / lib.name)
+
+    installed = dest / target.name
+    console.print(f"[{C_GREEN}] ✓ installed[/] {_short_path(str(installed))}")
+
+    devices = probe_devices(str(installed))
+    device_line = accelerator_device(devices)
+    console.print(f"[{C_DIM}]devices[/] {device_line or 'none (the build does not see a GPU)'}")
+    # The fork is what makes `-ncffn` available, and without it the gateway's
+    # tensor-split plans fall back to the classic layer split.
+    if supports_n_cpu_ffn(str(installed)):
+        console.print(f"[{C_DIM}]tensor split[/] -ncffn supported")
+    else:
+        console.print(
+            f"[{C_YELLOW}]tensor split[/] this build has no -ncffn; plans that "
+            "place dense FFN by layer will fall back to the classic split"
+        )

@@ -36,7 +36,7 @@ make assets-vectors  # SVG → PNG only (no terminal recording)
 
 Requirements: `rsvg-convert` (librsvg), `vhs` + `ttyd` for the GIF, `jq` for the
 demo request, and Pillow for the `.ico`. The demo tape serves
-`qwen2.5-0.5b-instruct-q4_k_m` on port 8686; adjust `demo.tape` to your own
+`qwen2.5-1.5b-instruct-q4_k_m` on port 8686; adjust `demo.tape` to your own
 alias before recording.
 
 `docs/assets/demo-request.sh` is the streaming client shown in the GIF. It

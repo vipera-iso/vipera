@@ -27,8 +27,9 @@ favicon:
 ## is what keeps the text crisp once it is shown at 900px.
 ##
 ## A recording's length depends on how long the model takes to load, so the
-## encoded size moves by ~10% between runs. Retry with fewer colours rather
-## than let a fresh GIF trip check-added-large-files (limit 1000 KB).
+## encoded size moves by ~10% between runs. Retry with fewer colours, then with
+## gifsicle's lossy palette pass, rather than let a fresh GIF trip
+## check-added-large-files (limit 1000 KB).
 demo:
 	$(VHS) $(ASSETS)/demo.tape
 	@set -e; for colours in 128 96; do \
@@ -39,6 +40,12 @@ demo:
 	  if [ $$size -le 972800 ]; then echo "demo.gif: $$size bytes ($$colours colours)"; break; fi; \
 	  echo "demo.gif: $$size bytes with $$colours colours, retrying smaller"; \
 	done
+	@size=$$(wc -c < $(ASSETS)/demo.gif); \
+	  if [ $$size -gt 972800 ] && command -v gifsicle >/dev/null 2>&1; then \
+	    gifsicle -O3 --lossy=80 --colors 128 $(ASSETS)/demo.gif -o $(ASSETS)/demo.gif || true; \
+	    size=$$(wc -c < $(ASSETS)/demo.gif); \
+	    echo "demo.gif: $$size bytes (gifsicle -O3 --lossy=80)"; \
+	  fi
 	@size=$$(wc -c < $(ASSETS)/demo.gif); \
 	  test $$size -le 1024000 || { echo "demo.gif is $$size bytes (> 1000 KB); shorten the tape"; exit 1; }
 	rm -f $(ASSETS)/demo-raw.mp4

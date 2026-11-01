@@ -141,6 +141,25 @@ An AMD APU (a Ryzen desktop or mobile chip with integrated graphics) reports
 shared system memory rather than dedicated VRAM; the planner treats it as
 unified memory, and `system doctor` labels it that way.
 
+### Run a llama.cpp build you compile yourself
+
+The `server` backend spawns `llama-server`, so the runtime Vipera uses is
+whatever binary it finds. For a checkout you patch or track yourself
+(`vipera.cpp`), build and install it with one command:
+
+```bash
+vipera system build-server --src ~/vipera.cpp
+```
+
+It configures with the backend for the card `doctor` found (`-DGGML_CUDA=on`,
+`-DGGML_HIP=on` or `-DGGML_SYCL=on`), builds the `llama-server` target, and
+copies the binary together with the `libggml*.so` files it links into
+`~/.vipera/bin` — the first directory `find_llama_tool` searches. It then
+probes what it installed and prints the device line, plus whether the build
+supports `-ncffn`: without that flag, plans that place dense FFN per layer fall
+back to the classic split. `--dry-run` prints the cmake argv instead of running
+it, and `--jobs N` caps the compile.
+
 ## Step 4 — Check the install
 
 ```bash
@@ -150,7 +169,7 @@ vipera system doctor
 
 Expected:
 
-- `vipera --version` prints `vipera 1.1.0`.
+- `vipera --version` prints the package version, e.g. `vipera 1.5.0`.
 - `llama-cpp-python` shows `PASS`.
 - `gguf` shows `PASS`.
 - The GPU line shows `WARN` on a CPU-only machine. That is normal.

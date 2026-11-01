@@ -5,6 +5,28 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- **`vipera system build-server --src <checkout>` installs the llama.cpp you
+  build yourself.** The `server` backend spawns `llama-server`, so the runtime
+  the gateway can use is whatever binary it finds — and until now, pointing it
+  at a patched checkout (`vipera.cpp`) meant a hand-written cmake line plus
+  knowing that the binary is not self-contained. The command configures with
+  the backend for the card it detected, builds the `llama-server` target,
+  copies the binary and the `libggml*.so` beside it into `~/.vipera/bin` (the
+  first directory `find_llama_tool` searches), then probes what it installed
+  and reports the device line and whether `-ncffn` is available. `--dry-run`
+  prints the cmake argv; `--jobs N` caps the compile.
+
+### Fixed
+- **`vipera system doctor` no longer prints the CUDA banner between its rows.**
+  Importing `llama-cpp-python` makes ggml log its device list from C on fd 2,
+  which no `redirect_stderr` can see, so the table was interrupted by five
+  lines ending in "Consider compiling with CMAKE_CUDA_ARCHITECTURES=…" — output
+  that read like a fault the table had reported. The descriptor is swapped for
+  the null device around the import and the offload query only.
+
 ## [1.5.0] - 2026-11-01
 
 ### Added
