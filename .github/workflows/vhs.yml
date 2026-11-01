@@ -17,14 +17,17 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install vhs, ffmpeg, figlet, gifsicle
+      - name: Install vhs, ttyd, ffmpeg, figlet, gifsicle
         run: |
           sudo mkdir -p /etc/apt/keyrings
           curl -fsSL https://repo.charm.sh/apt/gpg.key | sudo gpg --dearmor -o /etc/apt/keyrings/charm.gpg
           echo "deb [signed-by=/etc/apt/keyrings/charm.gpg] https://repo.charm.sh/apt/ * *" \
             | sudo tee /etc/apt/sources.list.d/charm.list
           sudo apt update
-          sudo apt install -y vhs ffmpeg figlet gifsicle
+          # ttyd is vhs's terminal; without it the recording exits 1 at once.
+          # It was missing here and the `|| true` on the record step hid that,
+          # so this job has been a no-op since it was written.
+          sudo apt install -y vhs ttyd ffmpeg figlet gifsicle
 
       - name: Install JetBrains Mono Nerd Font
         run: |
