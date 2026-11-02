@@ -771,8 +771,10 @@ def plan(
     # and 18.57 against 18.15 at 20/28 - so FA was never the slower choice here,
     # while asking for it off adds `_NO_FA_RESERVE_GB` (0.9 GB) to the reserve,
     # which is 4-5 layers of a 7B. The CPU flash-attention path is what is slow,
-    # and that is decided at the use site below: a plan that offloads nothing
-    # keeps FA off whatever its KV type.
+    # and a plan with no layer on the card decides it at the use site below:
+    # there FA follows the KV type instead, because llama.cpp refuses a
+    # quantized V cache without it (and forcing f16 would allocate ~10 GiB of KV
+    # at 64K for a 14B, which does not fit beside this gateway).
     flash_attn_on_gpu = quantized_kv or want_gpu
     reserve_gb = max(_VRAM_RESERVE_BASE_GB, min(1.0, _VRAM_RESERVE_FRACTION * hw.vram_total_gb))
     # Micro-batch first: the prefill compute buffer has to fit beside the
@@ -822,6 +824,37 @@ def plan(
     # profile=cpu forces no offload even when a GPU is present.
     if want_gpu and safe_vram > 0 and layer_total_gb > 0:
         gpu_layers = min(n_layers, int(safe_vram / layer_total_gb))
+
+    # A full offload has nothing left to buy with a smaller cache: every layer is
+    # already on the card, so the bytes a quantized KV saves free no layer, and
+    # the only thing left is the per-token dequantisation. That cost grows with
+    # the cache, which a flat per-element memory price cannot see.
+    #
+    # Measured on the reference 4 GB card, 1.5B Q4_K_M fully offloaded, tg128:
+    #   depth 0      f16 105.02 t/s   q8_0 102.93   (+2.0%)
+    #   depth 4096   f16  90.34       q8_0  81.42   (+11.0%)
+    #   depth 8192   f16  77.98       q8_0  66.39   (+17.5%)
+    # The layer count is the same either way, so the smaller cache buys nothing
+    # and costs more. Only the dtype is switched, only for the quantized set
+    # (f32/bf16 are not part of this measurement), and only when the caller did
+    # not override a side and f16 still fits the same layers.
+    if (
+        gpu_layers == n_layers
+        and gpu_layers > 0
+        and not no_kv_offload
+        and not kv_cache_k
+        and not kv_cache_v
+        and kv_k in _FA_REQUIRED_KV
+        and not meta.get("expert_bytes")
+        and layer_gb > 0
+    ):
+        f16_kv_gb = _total_kv_cache_gb(meta, ctx, "f16", "f16", slots)
+        f16_layer_kv_gb = f16_kv_gb / kv_layers if kv_layers else 0.0
+        if int(safe_vram / (layer_gb + f16_layer_kv_gb)) >= n_layers:
+            kv_k = kv_v = "f16"
+            kv_cache_gb = f16_kv_gb
+            per_layer_kv_gb = f16_layer_kv_gb
+            quantized_kv = False
 
     # The classic split offloads whole layers, so a layer's experts travel with
     # it. MoE models do better by keeping every attention block on the GPU and

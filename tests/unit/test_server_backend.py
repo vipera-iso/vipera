@@ -278,6 +278,85 @@ def test_server_command_passes_spec_type_when_supported():
     assert command[command.index("--spec-type") + 1] == "ngram-map-k"
 
 
+def test_ngram_scan_drafters_get_a_usable_draft_length():
+    # --spec-draft-n-max defaults to 3, which is a draft *model* default; the
+    # scan drafters copy the m tokens following a match, and llama.cpp's own
+    # examples pass 64 for ngram-simple/ngram-map-k.
+    command = sb.server_command(
+        "/bin/llama-server",
+        "/m.gguf",
+        _plan(),
+        1,
+        spec_type="ngram-map-k",
+        spec_type_supported=True,
+        spec_draft_n_max_supported=True,
+    )
+
+    assert command[command.index("--spec-draft-n-max") + 1] == "64"
+
+
+def test_ngram_mod_keeps_its_own_draft_length_knobs():
+    # ngram-mod sizes its drafts with --spec-ngram-mod-n-min/-max (default
+    # 48/64); the docs suggest lowering those for dense models, not overriding
+    # them with the draft-model flag.
+    command = sb.server_command(
+        "/bin/llama-server",
+        "/m.gguf",
+        _plan(),
+        1,
+        spec_type="ngram-mod",
+        spec_type_supported=True,
+        spec_draft_n_max_supported=True,
+    )
+
+    assert "--spec-draft-n-max" not in command
+
+
+def test_draft_length_is_dropped_on_builds_without_the_flag():
+    command = sb.server_command(
+        "/bin/llama-server",
+        "/m.gguf",
+        _plan(),
+        1,
+        spec_type="ngram-simple",
+        spec_type_supported=True,
+        spec_draft_n_max_supported=False,
+    )
+
+    assert command[command.index("--spec-type") + 1] == "ngram-simple"
+    assert "--spec-draft-n-max" not in command
+
+
+def test_a_mixed_spec_list_still_gets_the_draft_length():
+    # --spec-type takes a comma-separated list; one scan drafter is enough.
+    command = sb.server_command(
+        "/bin/llama-server",
+        "/m.gguf",
+        _plan(),
+        1,
+        spec_type="ngram-mod,ngram-map-k",
+        spec_type_supported=True,
+        spec_draft_n_max_supported=True,
+    )
+
+    assert command[command.index("--spec-draft-n-max") + 1] == "64"
+
+
+def test_supports_spec_draft_n_max_reads_the_binary_help(monkeypatch):
+    class _Result:
+        def __init__(self, text):
+            self.stdout = text
+            self.stderr = ""
+
+    monkeypatch.setattr(
+        sb.subprocess, "run", lambda *a, **kw: _Result("--spec-draft-n-max N  max draft")
+    )
+    assert sb.supports_spec_draft_n_max("/bin/llama-server") is True
+
+    monkeypatch.setattr(sb.subprocess, "run", lambda *a, **kw: _Result("--spec-type ngram-mod"))
+    assert sb.supports_spec_draft_n_max("/bin/llama-server") is False
+
+
 def test_server_command_skips_spec_type_when_unset_unsupported_or_none():
     for kwargs in (
         {"spec_type": None, "spec_type_supported": True},
@@ -653,6 +732,39 @@ def test_placement_is_kept_when_the_child_uses_the_gpu(monkeypatch):
 
     assert plan.gpu_layers == 7
     assert plan.offload_kqv is True
+
+
+def test_placement_warns_when_the_build_has_no_kernel_for_the_kv_pair(monkeypatch, capsys):
+    engine = _engine()
+    monkeypatch.setattr(
+        engine,
+        "_log_text",
+        lambda limit=200_000: (
+            "ggml_cuda_flash_attn_ext_vec: no FlashAttention vector kernel compiled "
+            "for K/V types q5_1-q5_1, converting K and V to f16 instead (slow).\n"
+        ),
+    )
+
+    plan = engine._adopt_placement(_plan(gpu_layers=7))
+
+    # Nothing to correct - the types were honoured, the build just has no kernel
+    # - but the slow path must not be silent. Measured: 127 t/s prefill against
+    # 416 for f16 on the reference card.
+    assert plan.gpu_layers == 7
+    out = capsys.readouterr().out
+    assert "q5_1-q5_1" in out
+    assert "GGML_CUDA_FA_QUANTS" in out
+
+
+def test_placement_says_nothing_when_the_kv_pair_has_a_kernel(monkeypatch, capsys):
+    engine = _engine()
+    monkeypatch.setattr(
+        engine, "_log_text", lambda limit=200_000: "llm_load_tensors: offloaded 7/40 layers"
+    )
+
+    engine._adopt_placement(_plan(gpu_layers=7))
+
+    assert capsys.readouterr().out == ""
 
 
 def test_server_command_keeps_one_context_per_slot():

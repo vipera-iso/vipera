@@ -851,3 +851,75 @@ def test_cpu_only_clamp_prices_the_kv_cache_for_the_window_it_keeps():
     assert p.kv_cache_gb == pytest.approx(_estimate_kv_cache_gb(meta, 2048, p.kv_cache))
     # 2 * 32 layers * 8 kv heads * 128 dim * 2048 tokens, q8_0 = 0.125 GiB.
     assert p.kv_cache_gb == pytest.approx(0.125)
+
+
+# --- a quantized cache has to buy a layer to be worth it --------------------
+
+# Qwen2.5-1.5B Q4_K_M as the analyzer reports it: 28 blocks, 2 KV heads.
+_SMALL_DENSE = {
+    "n_layers": 28,
+    "n_heads": 12,
+    "n_kv_heads": 2,
+    "head_dim": 128,
+    "size_bytes": int(1.04 * _GIB),
+}
+
+
+def test_full_offload_keeps_f16_kv_because_quantizing_buys_no_layer():
+    """Nothing to buy with the saved bytes, so only the dequant cost is left.
+
+    Measured on the reference 4 GB card, 1.5B Q4_K_M fully offloaded, tg128:
+    f16 against q8_0 decoded 105.02/102.93 t/s at depth 0, 90.34/81.42 at 4096
+    and 77.98/66.39 at 8192. The gap grows with the cache, which a flat
+    per-element memory price cannot see; the layer count is the same either way.
+    """
+    hw = _hw(gpu_name="GTX 1650", vram_total_gb=4.0, vram_free_gb=3.64)
+    p = plan(_SMALL_DENSE, hw, ctx=8192, kv_cache="q8_0")
+
+    assert p.gpu_layers == p.n_layers
+    assert p.kv_types == ("f16", "f16")
+    assert p.flash_attn is True
+    # `kv_cache` stays the request it was given, as it does for a per-side
+    # override; `kv_types` is what actually runs.
+    assert p.kv_cache == "q8_0"
+    # The banner must not claim a cache the plan does not allocate.
+    assert p.kv_cache_gb == pytest.approx(_estimate_kv_cache_gb(_SMALL_DENSE, 8192, "f16"))
+    assert p.kv_cache_gb == pytest.approx(0.21875)
+
+
+def test_partial_offload_keeps_the_quantized_cache_it_bought_layers_with():
+    # 40 layers on a 4 GB card: q8_0 is worth 13 layers where f16 is worth 12,
+    # so the smaller cache is buying something and must stay.
+    hw = _hw(gpu_name="GTX 1650", vram_total_gb=4.0, vram_free_gb=3.7)
+    p = plan(_HERMES_META, hw, ctx=8192, kv_cache="q8_0")
+
+    assert 0 < p.gpu_layers < p.n_layers
+    assert p.kv_types == ("q8_0", "q8_0")
+
+
+def test_full_offload_keeps_an_explicit_per_side_choice():
+    # An explicit -ctk/-ctv is a decision, not an estimate: do not undo it.
+    hw = _hw(gpu_name="GTX 1650", vram_total_gb=4.0, vram_free_gb=3.64)
+    p = plan(
+        _SMALL_DENSE,
+        hw,
+        ctx=8192,
+        kv_cache="q8_0",
+        kv_cache_k="q4_0",
+        kv_cache_v="q4_0",
+    )
+
+    assert p.gpu_layers == p.n_layers
+    assert p.kv_types == ("q4_0", "q4_0")
+
+
+def test_full_offload_keeps_q8_0_when_f16_would_not_fit():
+    """The switch is only free when f16 still offloads the whole stack."""
+    meta = dict(_SMALL_DENSE, size_bytes=int(2.6 * _GIB))
+    hw = _hw(gpu_name="GTX 1650", vram_total_gb=4.0, vram_free_gb=3.64)
+
+    quantized = plan(meta, hw, ctx=32768, kv_cache="q8_0")
+    full_precision = plan(meta, hw, ctx=32768, kv_cache="f16")
+
+    assert quantized.kv_types == ("q8_0", "q8_0")
+    assert quantized.kv_cache_gb < full_precision.kv_cache_gb

@@ -83,6 +83,16 @@ def test_coerce_keeps_valid_kv_cache():
     assert cfg_mod._coerce({"kv_cache": "q4_0"})["kv_cache"] == "q4_0"
 
 
+def test_iq4_nl_is_refused_because_no_build_has_a_kernel_for_it():
+    # pp512 measured 127 t/s against 416 for f16 on the reference card: it is
+    # slower *and* larger than the q4_0 it would replace, so there is no
+    # memory/speed trade to make and no reason to accept it.
+    assert "iq4_nl" not in cfg_mod._KV_CACHE_TYPES
+    assert cfg_mod._coerce({"kv_cache": "iq4_nl"})["kv_cache"] == cfg_mod.DEFAULT_CONFIG["kv_cache"]
+    with pytest.raises(ValueError, match="kv_cache"):
+        cfg_mod._coerce_strict({"kv_cache": "iq4_nl"})
+
+
 @pytest.mark.parametrize("kv", sorted(cfg_mod._KV_CACHE_TYPES))
 def test_every_declared_kv_cache_type_is_accepted(kv):
     assert cfg_mod._coerce_strict({"kv_cache": kv})["kv_cache"] == kv

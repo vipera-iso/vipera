@@ -106,7 +106,14 @@ DEFAULT_CONFIG = {
     "tuning": True,
 }
 
-_KV_CACHE_TYPES = {"f32", "bf16", "f16", "q4_0", "q4_1", "q5_0", "q5_1", "q8_0", "iq4_nl"}
+# `iq4_nl` is deliberately absent: no build can compile a CUDA flash-attention
+# kernel for it (the type is not accepted by GGML_CUDA_FA_QUANTS), so llama.cpp
+# converts K and V to f16 on every step. Measured on the reference 4 GB card,
+# 1.5B Q4_K_M, pp512: 127 t/s against 416 for f16 - it is slower *and* larger
+# than the q4_0 it would replace, so there is no trade to make. q4_1/q5_0/q5_1
+# stay: current builds do have kernels for them, they are just a poor trade
+# (q5_1 holds more than q4_0 and decodes slower at depth).
+_KV_CACHE_TYPES = {"f32", "bf16", "f16", "q4_0", "q4_1", "q5_0", "q5_1", "q8_0"}
 
 # "inprocess" drives llama-cpp-python in this process; "server" runs the
 # llama-server binary as a child and talks OpenAI/SSE to it. Additional names
