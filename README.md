@@ -196,8 +196,13 @@ hardware:
   faster, and lands within the eval-set error on perplexity (6.9805 vs 7.0056,
   a 0.11σ gap). Say "same quality, 19% lighter", not "better".
 - **`kv_cache: q8_0`** halves KV memory for about 3% decode throughput. `q5_1`
-  and `iq4_nl` cost 14–18%: use them only when KV size blocks the context you
-  need.
+  costs 14–18%: use it only when KV size blocks the context you need. `iq4_nl`
+  is refused outright — no CUDA build compiles a flash-attention kernel for it,
+  so it prefills at 127 t/s against 416 for f16.
+- **But a smaller cache is only worth the dequantisation when it buys a layer.**
+  On a plan that already fits, the planner runs f16 instead: 1.5B fully
+  offloaded, f16 against q8_0 decoded 105.0/102.9 t/s at depth 0, 90.3/81.4 at
+  4096 and 78.0/66.4 at 8192.
 
 ## Contributing
 

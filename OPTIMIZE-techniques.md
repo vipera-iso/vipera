@@ -131,8 +131,7 @@ câu trả lời**: cùng prompt đó nhưng chỉ sinh 48 token → 6.48 t/s (k
 64 token trên prompt snippet ngắn → 6.45 vs 6.52 (không lợi). Nói cách khác:
 nó thắng ở ca "viết lại cả file" (≥128 token, phần lớn là copy), không thắng ở
 ca trả lời ngắn.
-Raw: `tools/server_results/ngram_prose_cache.jsonl`, harness `tools/server_ab.py`. Vì vậy nó được bật mặc định (`spec_type: ngram-map-k`) cho
-backend `server`, và **chỉ** ở đó: llama-cpp-python không có `--spec-type`, còn
+Raw: `tools/server_results/ngram_prose_cache.jsonl`, harness `tools/server_ab.py`.Vì vậy nó là opt-in (`spec_type: ngram-map-k`, còn mặc định vẫn là `none`) cho backend `server`, và **chỉ** ở đó: llama-cpp-python không có `--spec-type`, còn
 prompt-lookup của binding thì đo được **−29/−32%** (xem §5) nên đã bị gỡ khỏi
 `engine.py`.
 

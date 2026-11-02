@@ -343,6 +343,12 @@ prefix shifts instead of repeating.
   context fit on the MoE model above, but it is not a decode lever: [measured
   elsewhere](https://github.com/ggml-org/llama.cpp/discussions/20969) it costs
   12% of decode at 24K and 37% at 110K to per-token dequantization.
+- **And do not quantize a cache you have nowhere to spend.** The same cost is
+  what makes q8_0 a loss once every layer is already on the card: 1.5B
+  Q4_K_M fully offloaded, `llama-bench tg128`, f16 against q8_0 decoded
+  105.0/102.9 t/s at depth 0, 90.3/81.4 at 4096 and **78.0/66.4 at 8192**
+  (+17.5%). The planner therefore keeps a quantized cache only where it buys
+  a layer, and emits f16 when the plan is already a full offload.
 - **A lower-bit quant of a dense model is slower here.** Hermes-4-14B IQ3_XXS
   (5.90 GB) at the largest split that loads (`-ngl 21`) decodes 2.92 t/s against
   3.96 for the larger Q3_K_M at 18/40: CPU-side dequantization costs more than
