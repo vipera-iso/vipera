@@ -1,10 +1,12 @@
 import hashlib
+import io
 import json
 import os
 
 import pytest
 
 from vipera.sources import for_ref, hf, local, ollama, url
+from vipera.sources.protocol import FileInfo
 
 GGUF_NAME = "qwen2.5-0.5b-instruct-q4_k_m.gguf"
 
@@ -194,3 +196,67 @@ def test_ollama_search_lists_local_models(store):
     only_qwen = ollama.search("qwen")
     assert [r.ref for r in only_qwen] == ["qwen05:latest"]
     assert only_qwen[0].size_gb == pytest.approx(len(b"qwen") / 1e9)
+
+
+# -- url downloads -----------------------------------------------------------
+
+
+def _serve(monkeypatch, body: bytes) -> None:
+    """Answer every urlopen with `body`; BytesIO is already a response object."""
+    monkeypatch.setattr(url.urllib.request, "urlopen", lambda *_a, **_k: io.BytesIO(body))
+
+
+def test_url_download_writes_the_final_name_only_after_the_whole_body(monkeypatch, tmp_path):
+    _serve(monkeypatch, b"GGUF" + b"\0" * 60)
+    dest = tmp_path / "models"
+    info = FileInfo(path="m.gguf", size_bytes=64)
+
+    path = url.download("https://example.invalid/m.gguf", info, dest)
+
+    assert path == dest / "m.gguf"
+    assert path.read_bytes()[:4] == b"GGUF"
+    assert not list(dest.glob("*.part"))
+
+
+def test_url_download_rejects_a_short_body(monkeypatch, tmp_path):
+    # A server that answers 200 with a partial body used to leave the file at
+    # the final name, where `model add` only warns and `serve start` fails.
+    _serve(monkeypatch, b"GGUF" + b"\0" * 4)
+    dest = tmp_path / "models"
+    info = FileInfo(path="m.gguf", size_bytes=64)
+
+    with pytest.raises(OSError):
+        url.download("https://example.invalid/m.gguf", info, dest)
+
+    assert not (dest / "m.gguf").exists()
+    assert not list(dest.glob("*.part"))
+
+
+def test_url_download_leaves_nothing_behind_when_the_connection_drops(monkeypatch, tmp_path):
+    class _Drops(io.BytesIO):
+        def read(self, *args):
+            raise OSError("connection reset by peer")
+
+    monkeypatch.setattr(url.urllib.request, "urlopen", lambda *_a, **_k: _Drops(b"GGUF"))
+    dest = tmp_path / "models"
+    info = FileInfo(path="m.gguf", size_bytes=64)
+
+    with pytest.raises(OSError):
+        url.download("https://example.invalid/m.gguf", info, dest)
+
+    assert not (dest / "m.gguf").exists()
+    assert not list(dest.glob("*.part"))
+
+
+def test_url_download_accepts_whatever_arrived_when_the_head_had_no_length(monkeypatch, tmp_path):
+    # A HEAD with no Content-Length leaves size_bytes at 0, and then there is
+    # nothing to compare: the body must be taken as it came rather than guessed
+    # at, or every mirror that omits the header would fail to install.
+    _serve(monkeypatch, b"GGUF")
+    dest = tmp_path / "models"
+    info = FileInfo(path="m.gguf")
+
+    path = url.download("https://example.invalid/m.gguf", info, dest)
+
+    assert path.read_bytes() == b"GGUF"
+    assert not list(dest.glob("*.part"))
