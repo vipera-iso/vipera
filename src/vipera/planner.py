@@ -65,6 +65,18 @@ class Plan:
         """The (K, V) cache dtypes to request, each falling back to kv_cache."""
         return self.kv_cache_k or self.kv_cache, self.kv_cache_v or self.kv_cache
 
+    @property
+    def ubatch(self) -> int:
+        """The micro-batch the plan will actually run with.
+
+        `n_ubatch = 0` means "the planner did not pick one", and every backend
+        then falls back to `min(n_batch, _DENSE_UBATCH)`. That rule lives here
+        so the server's `-ub`, the in-process binding and the load probes
+        cannot disagree about what a plan runs with - which is exactly how a
+        probe ends up comparing a rung against itself.
+        """
+        return self.n_ubatch or min(self.n_batch, _DENSE_UBATCH)
+
 
 _VALID_PROFILES = ("auto", "cpu", "gpu", "lowmem")
 
@@ -149,6 +161,22 @@ def _kv_layer_count(meta: dict) -> int:
     if kv_layers <= 0 or (n_layers > 0 and kv_layers > n_layers):
         return n_layers
     return kv_layers
+
+
+def _total_kv_cache_gb(meta: dict, ctx: int, kv_k: str, kv_v: str, slots: int) -> float:
+    """The whole KV cache: K and V averaged over the two dtypes, times `slots`.
+
+    Averaging is what prices a plan that overrides only one side (``-ctk`` or
+    ``-ctv``) for the cache it actually allocates. Every VRAM figure and every
+    host footprint in this module comes from here, so the banner and the budget
+    cannot drift apart - which is the bug that a second, context-clamped copy
+    used to reintroduce.
+    """
+    return (
+        (_estimate_kv_cache_gb(meta, ctx, kv_k) + _estimate_kv_cache_gb(meta, ctx, kv_v))
+        / 2
+        * slots
+    )
 
 
 def _estimate_kv_cache_gb(meta: dict, ctx: int, kv_cache: str) -> float:
@@ -293,15 +321,8 @@ def _moe_experts_on_cpu_plan(
 
     ubatch = n_ubatch if n_ubatch > 0 else min(n_batch, _DENSE_UBATCH)
     dense_gb = (size_bytes - expert_bytes) / 1024**3
-    # Same K/V averaging the classic path uses, so a plan that only overrides
-    # one side is priced for the side it actually allocates.
-    kv_gb = (
-        (
-            _estimate_kv_cache_gb(meta, ctx, kv_cache_k or kv_cache)
-            + _estimate_kv_cache_gb(meta, ctx, kv_cache_v or kv_cache)
-        )
-        / 2
-        * max(1, parallel)
+    kv_gb = _total_kv_cache_gb(
+        meta, ctx, kv_cache_k or kv_cache, kv_cache_v or kv_cache, max(1, parallel)
     )
     overhead_gb = _MOE_OVERHEAD_BASE_GB + _MOE_OVERHEAD_PER_UB_GB * ubatch
     spare_gb = hw.vram_free_gb - dense_gb - kv_gb - overhead_gb - _MOE_VRAM_RESERVE_GB
@@ -770,11 +791,7 @@ def plan(
     # Subtracting the FULL cache from VRAM before offloading anything made a
     # 14B/Q4 model on a 4 GB card look like it had 0.2 GB free (0 layers) even
     # though ~9 layers actually fit. Budget both weights and KV per layer.
-    kv_cache_gb = (
-        (_estimate_kv_cache_gb(meta, ctx, kv_k) + _estimate_kv_cache_gb(meta, ctx, kv_v))
-        / 2
-        * slots
-    )
+    kv_cache_gb = _total_kv_cache_gb(meta, ctx, kv_k, kv_v, slots)
     # Charge each KV-bearing layer, not each layer: on a hybrid stack most
     # layers hold a fixed recurrent state and never pay for context. With
     # `--no-kv-offload` the whole cache stays in system RAM, so the card is
@@ -920,6 +937,14 @@ def plan(
             # Below 8 GB of RAM a full-size context is the thing that OOMs, so
             # the note has to carry that fact rather than the plain "CPU ONLY".
             ctx = min(ctx, 2048)
+            # Price the cache for the window that will actually be allocated.
+            # Every KV figure below - the banner, the host footprint and
+            # check_host_ram - was derived from the pre-clamp `ctx`, so a 32K
+            # request planned at 2K reported the 32K cache, and on a small box
+            # that inflation alone was enough to refuse a plan that fits.
+            kv_cache_gb = _total_kv_cache_gb(meta, ctx, kv_k, kv_v, slots)
+            if not no_kv_offload and kv_layers:
+                per_layer_kv_gb = kv_cache_gb / kv_layers
     else:
         # Quantized KV requires flash attention, regardless of VRAM size. With
         # full-precision KV the flag only follows the offload: a plan that puts

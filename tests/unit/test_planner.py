@@ -828,3 +828,26 @@ def test_spill_moe_needs_a_card_and_experts():
         kv_cache="q4_0",
     )
     assert no_experts.moe_cpu_layers == -1
+
+
+def test_cpu_only_clamp_prices_the_kv_cache_for_the_window_it_keeps():
+    """A 32K request clamped to 2K has to report the 2K cache.
+
+    The KV figures (banner, host footprint, check_host_ram) used to come from
+    the requested window, so on a 6 GB box a 32K ask reported ~2 GiB of cache
+    that would never be allocated - enough, with the 2 GiB compute allowance on
+    top, for check_host_ram to refuse a plan that fits.
+    """
+    meta = {
+        "n_layers": 32,
+        "n_heads": 32,
+        "n_kv_heads": 8,
+        "head_dim": 128,
+        "size_bytes": 4 * _GIB,
+    }
+    p = plan(meta, _hw(ram_total_gb=6, ram_free_gb=3.5), ctx=32768)
+
+    assert p.context == 2048
+    assert p.kv_cache_gb == pytest.approx(_estimate_kv_cache_gb(meta, 2048, p.kv_cache))
+    # 2 * 32 layers * 8 kv heads * 128 dim * 2048 tokens, q8_0 = 0.125 GiB.
+    assert p.kv_cache_gb == pytest.approx(0.125)
