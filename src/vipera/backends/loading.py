@@ -91,11 +91,12 @@ _MOE_PROBE_STEPS = 2
 #: Measured on a GTX 1650 4 GB with Qwen2.5-7B Q4_K_M, ctx 4096, 641-token
 #: prompt: the planner's 18/28 FFN on the card decoded 16.1 t/s, 20/28 (one step
 #: past the fit) 17.4, 22/28 (four steps) 17.9 - and one step further does not
-#: create a context at all. A failed rung costs ~1.5 s (mmap'd 4.4 GB model, the
+#: create a context at 512, which is what the `_PROBE_UBATCH` retry below is for.
+#: A failed rung costs ~1.5 s (mmap'd 4.4 GB model, the
 #: failure is the context allocation), so the cap is what a start pays when the
 #: fit is off by more than it can be, not what a healthy start pays: an
 #: aggressive rung that loads is the first and only spawn.
-_FFN_PROBE_STEPS = 4
+_FFN_PROBE_STEPS = 5
 
 
 def with_gpu_layers(plan: Plan, layers: int) -> Plan:
@@ -148,6 +149,27 @@ def _moe_probe_attempts(plan: Plan, steps: int) -> list[tuple[Plan, str]]:
     return attempts
 
 
+#: The micro-batch an aggressive tensor split falls back to when the planned
+#: one cannot create a context. The prefill compute buffer scales with `-ub`, and
+#: that buffer is what a heavier split runs out of room on. Measured on the
+#: reference 4 GB card, Qwen2.5-7B Q4_K_M, ctx 4096, 74-token prompt:
+#:   21/28 FFN at ub 512  -> 20.80 t/s decode, 70.4 prefill
+#:   22/28 FFN at ub 128  -> 19.98 t/s decode, 74.1 prefill  (block gained,
+#:                           and the prefill budget cost more than it paid)
+#:   22/28 FFN at ub 256  -> 21.70 t/s decode, 73.4 prefill  (+4.3% over 21/28)
+#: 256 is the middle point that keeps both the block and the prompt throughput,
+#: so it is the fallback. It is never a default: every rung is tried at the
+#: planned batch first, and this smaller one only after that fails.
+_PROBE_UBATCH = 256
+
+
+def with_ubatch(plan: Plan, ubatch: int) -> Plan:
+    """Same plan at a lower micro-batch; unchanged when it is not lower."""
+    if ubatch >= plan.ubatch or ubatch > plan.n_batch:
+        return plan
+    return replace(plan, n_ubatch=ubatch)
+
+
 def _ffn_probe_attempts(plan: Plan, steps: int) -> list[tuple[Plan, str]]:
     """Tensor splits more aggressive than the planner's own fit.
 
@@ -155,6 +177,14 @@ def _ffn_probe_attempts(plan: Plan, steps: int) -> list[tuple[Plan, str]]:
     *smaller* value means more FFN blocks on the card. These candidates are
     tried before the planned split; the first one that loads wins and the rest
     are never spawned.
+
+    Each rung is tried at the planned micro-batch and then at
+    ``_PROBE_UBATCH``: a block that does not fit at 512 often fits at 256, and
+    a block on the card is worth more per token than the prefill the smaller
+    batch costs. (128 buys the same block and costs more prefill - the numbers
+    are in that constant.) The extra rung is only paid for when the block
+    really does not fit either way - one failed spawn, ~1.5 s, on the start
+    that was going to lose the block anyway.
     """
     attempts: list[tuple[Plan, str]] = []
     for step in range(steps, 0, -1):
@@ -162,12 +192,12 @@ def _ffn_probe_attempts(plan: Plan, steps: int) -> list[tuple[Plan, str]]:
         if n_cpu_ffn < 0:
             continue
         gpu_ffn = plan.n_layers - n_cpu_ffn
-        attempts.append(
-            (
-                with_ffn_on_cpu(plan, n_cpu_ffn),
-                f"tensor split, {gpu_ffn}/{plan.n_layers} FFN layers on GPU (probed)",
-            )
-        )
+        label = f"tensor split, {gpu_ffn}/{plan.n_layers} FFN layers on GPU (probed)"
+        aggressive = with_ffn_on_cpu(plan, n_cpu_ffn)
+        attempts.append((aggressive, label))
+        smaller = with_ubatch(aggressive, _PROBE_UBATCH)
+        if smaller is not aggressive:
+            attempts.append((smaller, f"{label}, ub {_PROBE_UBATCH}"))
     return attempts
 
 

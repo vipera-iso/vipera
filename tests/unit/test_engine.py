@@ -524,14 +524,16 @@ def test_ffn_probe_tries_more_ffn_on_the_gpu_before_the_planned_split():
     probed = load_attempts(plan, probe=True)
     ncffn = [candidate.n_cpu_ffn for candidate, _ in probed]
 
-    # Most aggressive first - four FFN blocks back on the card - then the fit
-    # itself, then the safe direction, then the CPU stages.
-    assert ncffn[:5] == [6, 7, 8, 9, 10]
-    assert ncffn[5:8] == [11, 12, 28]
+    # Most aggressive first - one FFN block back on the card per rung - and each
+    # rung is tried at the planned micro-batch before the smaller one that can
+    # fit a block the planned batch cannot. Then the fit itself, the safe
+    # direction, and finally the CPU stages.
+    assert ncffn[:10] == [5, 5, 6, 6, 7, 7, 8, 8, 9, 9]
+    assert ncffn[10:14] == [10, 11, 12, 28]
     assert ncffn[-1] == -1
     # The banner has to travel with the rung, or a probed split is reported as
     # the planned one.
-    assert probed[0][0].note == "Tensor split: 22/28 dense FFN layers on GPU, attention on GPU"
+    assert probed[0][0].note == "Tensor split: 23/28 dense FFN layers on GPU, attention on GPU"
 
     # Without the flag the planned split is tried as given: the in-process
     # engine cannot execute an override plan at all.
@@ -548,8 +550,48 @@ def test_ffn_probe_never_asks_for_a_negative_ffn_layer_count():
 
     probed = load_attempts(plan, probe=True)
 
-    # -ncffn counts from layer 0, so 0 is the most aggressive legal value.
-    assert [candidate.n_cpu_ffn for candidate, _ in probed][:2] == [0, 1]
+    # -ncffn counts from layer 0, so 0 is the most aggressive legal value; it is
+    # tried at the planned batch and then at the smaller one.
+    assert [candidate.n_cpu_ffn for candidate, _ in probed][:4] == [0, 0, 1, 1]
+
+
+def test_ffn_probe_retries_the_aggressive_rung_at_a_smaller_micro_batch():
+    """22/28 FFN needs a smaller `-ub` than 512 on the reference 4 GB card.
+
+    The prefill compute buffer is what the extra block runs out of room on, and
+    it scales with the micro-batch: 512 does not fit the block, 256 does, and
+    128 fits it while losing more prompt throughput than the block is worth
+    (see `_PROBE_UBATCH`). The same rung is therefore retried at 256 before the
+    ladder gives the block up.
+    """
+    plan = _plan(
+        gpu_layers=18,
+        n_layers=28,
+        n_cpu_ffn=10,
+        note="Tensor split: 18/28 dense FFN layers on GPU, attention on GPU",
+    )
+
+    first, second = load_attempts(plan, probe=True)[:2]
+
+    assert first[0].n_cpu_ffn == second[0].n_cpu_ffn == 5
+    assert first[0].n_ubatch != 256
+    assert second[0].n_ubatch == 256
+    assert "ub 256" in second[1]
+
+
+def test_ffn_probe_does_not_lower_an_already_small_micro_batch():
+    plan = _plan(
+        gpu_layers=18,
+        n_layers=28,
+        n_cpu_ffn=10,
+        n_ubatch=256,
+        note="Tensor split: 18/28 dense FFN layers on GPU, attention on GPU",
+    )
+
+    batches = [candidate.n_ubatch for candidate, _ in load_attempts(plan, probe=True)]
+
+    # One entry per rung: -ub 256 is already what the rung would ask for.
+    assert batches[:5] == [256] * 5
 
 
 def test_moe_probe_tries_more_experts_on_the_gpu_before_the_planned_split():

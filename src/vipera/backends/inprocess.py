@@ -95,9 +95,9 @@ class Engine:
                 n_ctx=p.context,
                 n_threads=p.cpu_threads,
                 n_batch=p.n_batch,
-                # p.n_ubatch is what the planner budgeted VRAM for; 0 keeps the
+                # p.ubatch is what the planner budgeted VRAM for; 0 keeps the
                 # historical min(n_batch, 512).
-                n_ubatch=p.n_ubatch or min(p.n_batch, 512),
+                n_ubatch=p.ubatch,
                 embedding=self.supports_embeddings,
                 # Without a pooling type llama.cpp returns one vector per
                 # token, but /v1/embeddings promises one per input.

@@ -298,7 +298,7 @@ def server_command(
         gpu_layers = plan.n_layers + 1
     # -ub is the prefill lever (measured: 896 was the best all-round point on
     # the reference 4 GB card); -b must be at least as large as -ub.
-    ubatch = plan.n_ubatch or min(plan.n_batch, 512)
+    ubatch = plan.ubatch
     batch = max(plan.n_batch, ubatch)
     slots = max(1, plan.parallel if parallel is None else int(parallel))
     command = [
