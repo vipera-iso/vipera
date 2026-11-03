@@ -269,7 +269,13 @@ The crossover sits between 177 and 1 840 tokens, which is why `planner.py` puts
 a floor of 4096 on the *configured* window before emitting `-ncffn`: below it
 the classic split is the better bet, and from 4K up the tensor split won every
 run. `--load-mode none` (a hint the loader prints for tensor overrides) is
-slower here — 4.37 against 4.89 t/s — so mmap stays. Graphs: 4.97 t/s with
+slower here — 4.37 against 4.89 t/s — so mmap stays, and on Qwen2.5-7B Q4_K_M
+at `ctx 4096`/`-ub 256` it is worse than slower: the 1 405-token prefill aborts
+with `CUDA error: out of memory` from `cuMemCreate` inside CUDA graph capture, 4
+runs of 4, while mmap completes the same request at 19.3-19.4 t/s (5 requests
+over 3 fresh starts). With
+`GGML_CUDA_DISABLE_GRAPHS=1` it runs, at 19.25 t/s against 19.37 — so the hint
+costs a crash on that plan, not just throughput. Graphs: 4.97 t/s with
 capture on against 4.89 with it off, i.e. noise, so a tensor split gives up
 capture like every other hybrid plan (a plan that fills the budget cannot
 promise the 780 MiB of headroom that measurement had).
@@ -334,8 +340,13 @@ twice on one child with `cache_prompt`:
 | second | **247 ms / 1 token** | 24.1 s |
 
 For a long-context session this is the largest lever of all, because it removes
-the cost rather than reducing it. `--cache-reuse` covers the case where the
-prefix shifts instead of repeating.
+the cost rather than reducing it. `--cache-reuse` is meant to cover the case
+where the prefix shifts instead of repeating; measured here it did not. Same
+child, Qwen2.5-7B Q4_K_M `ctx 4096`, `-ub 256`, turn 1 `A+B` then turn 2
+`A+C+B` (C a 12-token question, B ~300 tokens), 3 runs each: turn 2 re-prefilled
+310 tokens in 3.89 s both with and without `--cache-reuse 256`, so it is not
+emitted. Untested: whether a longer inserted chunk or a real agent loop with
+several divergences behaves differently.
 
 **6. Things that do not help, with the numbers.**
 
