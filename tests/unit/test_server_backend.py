@@ -915,6 +915,120 @@ def test_server_command_parks_kv_in_ram_only_with_layers_on_the_gpu():
     assert "--no-kv-offload" not in sb.server_command("/bin/llama-server", "/m.gguf", _plan(), 1)
 
 
+def test_a_failed_probe_rung_is_not_reported_as_the_plan_failing(monkeypatch, capsys):
+    """The ladder climbs before it descends. Only the plan can "be the plan".
+
+    On the reference box gpt-oss-120b logged "failed to start with the planned
+    split" while serving `-ncmoe 35`: the rung that failed was the probe at 34,
+    which asks for *more* experts on the card than the plan. The warning pointed
+    at a split that was never spawned, and the rung that worked was strictly
+    better than the plan.
+    """
+    engine = _engine()
+    planned = _plan(gpu_layers=0, n_layers=36, moe_cpu_layers=36)
+    too_greedy = _plan(gpu_layers=0, n_layers=36, moe_cpu_layers=34)
+    probed = _plan(gpu_layers=0, n_layers=36, moe_cpu_layers=35)
+    attempts = [
+        (too_greedy, "MoE, 2/36 expert layers (probed)"),
+        (probed, "MoE, 1/36 expert layers (probed)"),
+        (planned, "planned split"),
+    ]
+
+    def fake_start(candidate):
+        if candidate == too_greedy:
+            raise RuntimeError("llama-server exited with code 1")
+
+    monkeypatch.setattr(engine, "_start", fake_start)
+    monkeypatch.setattr(sb, "load_attempts", lambda plan, probe=False: attempts)
+
+    engine._start_ladder(planned, probe=True)
+
+    out = capsys.readouterr().out
+    assert "failed to start with the planned split" not in out
+    assert "started with MoE, 1/36 expert layers (probed)" in out
+
+
+def test_a_plan_that_fails_says_so(monkeypatch, capsys):
+    engine = _engine()
+    planned = _plan(gpu_layers=0, n_layers=36, moe_cpu_layers=36)
+    safer = _plan(gpu_layers=0, n_layers=36, moe_cpu_layers=35, note="MoE")
+    attempts = [(planned, "planned split"), (safer, "MoE, 1/36 expert layers")]
+
+    def fake_start(candidate):
+        if candidate == planned:
+            raise RuntimeError("llama-server exited with code 1")
+
+    monkeypatch.setattr(engine, "_start", fake_start)
+    monkeypatch.setattr(sb, "load_attempts", lambda plan, probe=False: attempts)
+
+    engine._start_ladder(planned, probe=False)
+
+    out = capsys.readouterr().out
+    assert "failed to start with the planned split; serving MoE, 1/36 expert layers" in out
+
+
+def test_a_ladder_that_never_loads_raises_the_last_failure(monkeypatch):
+    engine = _engine()
+    planned = _plan(gpu_layers=0, n_layers=36)
+
+    def fake_start(candidate):
+        raise RuntimeError(f"cannot load {candidate.note}")
+
+    monkeypatch.setattr(engine, "_start", fake_start)
+    monkeypatch.setattr(sb, "load_attempts", lambda plan, probe=False: [(planned, "planned split")])
+
+    with pytest.raises(RuntimeError, match="failed to start on GPU and CPU: cannot load"):
+        engine._start_ladder(planned, probe=False)
+
+
+def test_cpu_only_plan_keeps_host_work_off_the_card():
+    """Nothing on the card means nothing for it to do.
+
+    `--op-offload` defaults to on, so a CPU-only plan still had its prefill
+    compute buffer allocated on the GPU: gpt-oss-120b at `-ngl 0` died there
+    (627 MiB) while another server held 3.5 of the 4 GB, and the same command
+    with this flag loaded.
+    """
+    cpu_only = sb.server_command(
+        "/bin/llama-server", "/m.gguf", _plan(gpu_layers=0), 1, op_offload_supported=True
+    )
+    assert "--no-op-offload" in cpu_only
+
+    # A build that predates the flag must not see it: an unknown option kills
+    # the child before it loads.
+    old_build = sb.server_command(
+        "/bin/llama-server", "/m.gguf", _plan(gpu_layers=0), 1, op_offload_supported=False
+    )
+    assert "--no-op-offload" not in old_build
+
+    # A hybrid plan has layers on the card and keeps the default.
+    hybrid = sb.server_command(
+        "/bin/llama-server", "/m.gguf", _plan(gpu_layers=7), 1, op_offload_supported=True
+    )
+    assert "--no-op-offload" not in hybrid
+
+
+def test_supports_no_op_offload_reads_the_binary_help(monkeypatch):
+    class _Result:
+        def __init__(self, text):
+            self.stdout = text
+            self.stderr = ""
+
+    monkeypatch.setattr(
+        sb.subprocess, "run", lambda *a, **kw: _Result("  --no-op-offload  do not offload")
+    )
+    assert sb.supports_no_op_offload("/bin/llama-server") is True
+
+    monkeypatch.setattr(sb.subprocess, "run", lambda *a, **kw: _Result("no such option here"))
+    assert sb.supports_no_op_offload("/bin/llama-server") is False
+
+    def _boom(*a, **kw):
+        raise OSError("no such file")
+
+    monkeypatch.setattr(sb.subprocess, "run", _boom)
+    assert sb.supports_no_op_offload("/bin/llama-server") is False
+
+
 def test_hybrid_split_disables_cuda_graphs():
     """A hybrid plan already spent the VRAM budget, so graphs can OOM a prompt.
 
@@ -968,6 +1082,7 @@ def test_start_passes_the_environment_to_the_child(monkeypatch, tmp_path):
     engine._spec_type = "none"
     engine._spec_type_supported = False
     engine._moe_cache_supported = False
+    engine._op_offload_supported = False
     engine.supports_embeddings = False
     engine.parallel = 1
     engine._start(_plan(gpu_layers=7, n_layers=40))

@@ -269,6 +269,16 @@ def _supports_fit(binary: str) -> bool:
     return text is not None and ("-fit" in text or "--fit" in text)
 
 
+def supports_no_op_offload(binary: str) -> bool:
+    """Whether this llama-server knows `--no-op-offload`.
+
+    Only asked for a plan that puts nothing on the card: a build without the
+    flag parses it as an unknown option and exits, so the probe decides.
+    """
+    text = _help_text(binary)
+    return text is not None and "--no-op-offload" in text
+
+
 def supports_embeddings(binary: str) -> bool:
     """Whether this llama-server can serve ``/v1/embeddings`` for a chat model.
 
@@ -295,6 +305,7 @@ def server_command(
     embeddings: bool = False,
     embeddings_supported: bool | None = None,
     parallel: int | None = None,
+    op_offload_supported: bool | None = None,
 ) -> list[str]:
     """Translate a Plan into llama-server flags.
 
@@ -368,6 +379,21 @@ def server_command(
         # The planner owns placement; auto-fit would shrink it to leave 1 GiB
         # free and silently invalidate both the banner and the A/B numbers.
         command.extend(["-fit", "off"])
+    # A plan with nothing on the card still reaches the device: `--op-offload`
+    # defaults to on, so llama.cpp ships host tensor operations to the GPU even
+    # at `-ngl 0`, and the prefill compute buffer is then allocated on it. That
+    # makes a plan the banner calls CPU ONLY fail on a card another process is
+    # using. Measured on gpt-oss-120b Q2_K (62.6 GB, ctx 8192, ub 512) with a
+    # second server holding 3.5 of the 4 GB: `-ngl 0` died asking for 627 MiB of
+    # CUDA compute buffer before it ever served, and the same command line with
+    # this flag loaded in 48 s. Turns off work the plan never asked for, so
+    # there is nothing to lose when the card is free either.
+    if gpu_layers == 0 and not tensor_placement:
+        supported = (
+            supports_no_op_offload(binary) if op_offload_supported is None else op_offload_supported
+        )
+        if supported:
+            command.append("--no-op-offload")
     if plan.moe_cpu_layers >= 0:
         command.extend(["-ncmoe", str(plan.moe_cpu_layers)])
     # -ncffn moves the dense FFN of the first N layers, leaving attention (and
@@ -523,6 +549,7 @@ class ServerEngine:
         self._fit_supported = _supports_fit(self._binary)
         # Probed once: the ladder may spawn several children with the same plan.
         self._moe_cache_supported = supports_moe_cache(self._binary)
+        self._op_offload_supported = supports_no_op_offload(self._binary)
         cfg = config.load_config()
         # Slots: >1 lets the gateway run that many requests at once through
         # llama.cpp's continuous batching (see build_app's semaphore). Taken from
@@ -551,31 +578,39 @@ class ServerEngine:
         # that came from a measurement already holds the answer, and load_attempts
         # drops the probe rungs for it (see its docstring) - so the split is still
         # confirmed by the first attempt, one spawn, and the safe rungs follow.
-        probe = bool(cfg.get("moe_probe", True))
+        self._start_ladder(plan, probe=bool(cfg.get("moe_probe", True)))
+
+        atexit.register(self.close)
+
+    def _start_ladder(self, plan: Plan, *, probe: bool) -> None:
+        """Spawn the first candidate of `load_attempts` that loads.
+
+        The ladder can climb before it descends, so a failure is only about the
+        plan when the plan itself was the candidate that failed. Reporting a
+        failed probe rung as "the planned split failed" sent a reader looking
+        for a problem in a plan that was never spawned.
+        """
         last_exc: Exception | None = None
-        fell_back = False
+        plan_failed = False
         for candidate, label in load_attempts(plan, probe=probe):
             try:
                 self._start(candidate)
             except RuntimeError as exc:
                 last_exc = exc
-                fell_back = True
+                plan_failed = plan_failed or candidate == plan
                 continue
             if candidate != plan:
-                if fell_back:
+                if plan_failed:
                     print(
                         "\n[!] Warning: llama-server failed to start with the planned "
                         f"split; serving {label}."
                     )
                 else:
+                    # A rung above the plan: the fit is a floor, so this is the
+                    # probe winning, not the plan losing.
                     print(f"\n[i] llama-server started with {label}.")
-            break
-        else:
-            raise RuntimeError(
-                f"llama-server failed to start on GPU and CPU: {last_exc}"
-            ) from last_exc
-
-        atexit.register(self.close)
+            return
+        raise RuntimeError(f"llama-server failed to start on GPU and CPU: {last_exc}") from last_exc
 
     # -- lifecycle ---------------------------------------------------------
 
@@ -611,6 +646,7 @@ class ServerEngine:
             embeddings=self.supports_embeddings,
             embeddings_supported=self.supports_embeddings,
             parallel=self.parallel,
+            op_offload_supported=self._op_offload_supported,
         )
         # The handle is handed to Popen and must outlive this function.
         handle = open(log_path, "wb")  # noqa: SIM115
