@@ -117,6 +117,35 @@ vipera serve start                 # child llama-server, same :8686 API
 vipera system config backend inprocess
 ```
 
+### Choosing the llama.cpp build
+
+`~/.vipera/bin/llama-server` is usually a symlink to whichever build was
+installed. To run the gateway against a *different* build without moving that
+symlink - a patched tree, a second `cmake` build, a build from another commit -
+export `VIPERA_LLAMA_BIN` for the `vipera serve` process:
+
+```bash
+export VIPERA_LLAMA_BIN=/home/you/llama.cpp/build-patched/bin
+vipera serve start --model <alias>
+```
+
+The variable is a **directory**, not a file, and it is read per spawn: the value
+in the environment of the `vipera serve` process is what the child gets, so set
+it before starting the gateway. Precedence is `--bin-dir` (quantize tools only),
+then `VIPERA_LLAMA_BIN`, then `~/.vipera/bin`, then the usual build
+directories, then `PATH`.
+
+Check which binary a running gateway actually spawned before trusting a
+measurement:
+
+```bash
+pgrep -af llama-server | awk '{print $2}'   # the child's argv[0]
+```
+
+A build whose shared libraries live beside it (`libllama.so`, `libggml-cuda.so`)
+needs no `LD_LIBRARY_PATH`: llama.cpp writes an `$ORIGIN` rpath, which is also
+why pointing at `bin/` is enough.
+
 ### Protocols
 
 `protocols` selects which HTTP layers the gateway mounts. `--protocol`
