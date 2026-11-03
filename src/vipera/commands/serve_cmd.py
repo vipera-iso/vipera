@@ -357,15 +357,24 @@ def start(
         # Decide before the banner: an MoE plan either upgrades to llama-server
         # or falls back to the classic split, and the panel must show the truth.
         backend_used, p = resolve_backend(p, backend)
-        if announce:
-            _announce_plan(label, info, p, backend_used)
 
         try:
             with console.status(f"[{C_ACCENT}] Loading {label} into memory…"):
-                return p, create_engine(p, info.path, backend_used), backend_used
+                engine = create_engine(p, info.path, backend_used)
         except RuntimeError as e:
             console.print(f"[{C_RED}] ✗ {e}[/]")
             raise typer.Exit(1) from e
+
+        # Announced after the load, not before it: the loading ladder may settle
+        # on a different split than the one planned - a -ncmoe that does not fit
+        # is walked down a layer at a time - and the engine is the only thing
+        # that knows which one started. Printing the requested plan here made the
+        # panel describe a run that never happened: "moe experts 0/36" beside a
+        # child started with -ncmoe 35.
+        effective = getattr(engine, "plan", None) or p
+        if announce:
+            _announce_plan(label, info, effective, backend_used)
+        return effective, engine, backend_used
 
     pool = None
     engine = None
