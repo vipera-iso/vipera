@@ -15,6 +15,17 @@ from dataclasses import dataclass
 from typing import Any
 
 
+def supports_embeddings(engine: Any) -> bool:
+    """Whether an engine can answer the embeddings route.
+
+    Duck-typed on purpose: a model is loadable without embedding support (that
+    is what the ``embeddings`` config flag buys), and only the backend knows
+    which it got. Both protocol layers ask the same question, so it is asked
+    once, here.
+    """
+    return bool(getattr(engine, "supports_embeddings", False))
+
+
 def _noop_release(engine: Any) -> None:
     """Single-model gateways never evict, so releasing is a no-op."""
 

@@ -19,7 +19,7 @@ from starlette.background import BackgroundTask
 from vipera.errors import log_failure
 from vipera.metrics import Stopwatch, Timings
 from vipera.pool import UnknownModelError
-from vipera.protocols.gateway import Gateway
+from vipera.protocols.gateway import Gateway, supports_embeddings
 from vipera.protocols.limits import (
     MAX_EMBED_CHARS,
     MAX_EMBED_INPUTS,
@@ -123,10 +123,6 @@ async def _engine(gateway: Gateway, name: str | None):
     except Exception as exc:
         log_failure(f"model load ({name or 'default'})", exc)
         return None, _error(503, f"model failed to load: {exc}", error_type="backend_error")
-
-
-def _supports_embeddings(engine) -> bool:
-    return bool(getattr(engine, "supports_embeddings", False))
 
 
 def _validate_chat(req: ChatRequest) -> None:
@@ -423,7 +419,7 @@ def mount(app: FastAPI, gateway: Gateway) -> None:
             return problem
         lease = Lease(lambda: gateway.release(active))
         try:
-            if not _supports_embeddings(active):
+            if not supports_embeddings(active):
                 raise HTTPException(
                     501,
                     "this backend was not started with embedding support. "

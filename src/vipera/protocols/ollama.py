@@ -27,7 +27,7 @@ from vipera.errors import log_failure
 from vipera.keepalive import parse_keep_alive
 from vipera.optimize.shaping import Shaping
 from vipera.pool import UnknownModelError
-from vipera.protocols.gateway import Gateway
+from vipera.protocols.gateway import Gateway, supports_embeddings
 from vipera.protocols.limits import MAX_EMBED_CHARS, MAX_EMBED_INPUTS, MAX_PROMPT_CHARS
 from vipera.protocols.streaming import (
     Lease,
@@ -305,10 +305,6 @@ def _with_tool_calls(message: dict) -> dict:
     return message
 
 
-def _supports_embeddings(engine) -> bool:
-    return bool(getattr(engine, "supports_embeddings", False))
-
-
 async def _shape(gateway: Gateway, active, messages: list[dict], kwargs: dict):
     """Fit the request into the loaded context; None when the layer is off.
 
@@ -575,7 +571,7 @@ def mount(app: FastAPI, gateway: Gateway) -> None:
             return problem
         lease = Lease(lambda: gateway.release(active))
         try:
-            if not _supports_embeddings(active):
+            if not supports_embeddings(active):
                 return _error(501, _EMBEDDINGS_OFF)
             started = time.perf_counter()
             try:
@@ -604,7 +600,7 @@ def mount(app: FastAPI, gateway: Gateway) -> None:
             return problem
         lease = Lease(lambda: gateway.release(active))
         try:
-            if not _supports_embeddings(active):
+            if not supports_embeddings(active):
                 return _error(501, _EMBEDDINGS_OFF)
             try:
                 vectors = await run_leased(gateway.lock, lease, active.embed, [req.prompt])
