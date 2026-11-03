@@ -234,9 +234,10 @@ http://127.0.0.1:8686/v1
 ```
 
 Point any OpenAI-compatible client at `http://127.0.0.1:8686/v1` with any API
-key value. To chat in the terminal instead of serving HTTP, stop the gateway
-with `Ctrl+C` and run `vipera chat repl`. Both modes load the model into memory,
-so avoid running them at the same time on a small machine.
+key value. To chat in the terminal, run `vipera chat repl` in another terminal:
+it notices the gateway is up and serves the alias, so it attaches instead of
+loading a second copy of the model. Stop the gateway first only if you would
+rather chat with its placement out of the way.
 
 ## Next time you want to use it
 

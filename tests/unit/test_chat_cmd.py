@@ -159,6 +159,7 @@ def test_oneshot_streams_and_closes_engine(monkeypatch):
         seen["chunks"] = list(stream)
         return "hello"
 
+    monkeypatch.setattr(chat_cmd, "_attach", lambda *a, **k: None)
     monkeypatch.setattr(chat_cmd, "_build", lambda model: engine)
     monkeypatch.setattr(chat_cmd, "plain_chat_stream", fake_plain)
     monkeypatch.setattr(chat_cmd, "load_config", lambda: dict(DEFAULT_CONFIG))
@@ -174,6 +175,7 @@ def test_oneshot_typewriter_uses_typewriter_renderer(monkeypatch):
     engine = FakeEngine()
     calls = []
 
+    monkeypatch.setattr(chat_cmd, "_attach", lambda *a, **k: None)
     monkeypatch.setattr(chat_cmd, "_build", lambda model: engine)
     monkeypatch.setattr(
         chat_cmd,
@@ -190,6 +192,7 @@ def test_oneshot_typewriter_uses_typewriter_renderer(monkeypatch):
 
 def test_repl_command_closes_engine(monkeypatch):
     engine = FakeEngine()
+    monkeypatch.setattr(chat_cmd, "_attach", lambda *a, **k: None)
     monkeypatch.setattr(chat_cmd, "_build", lambda model: engine)
     monkeypatch.setattr(chat_cmd, "repl_loop", lambda *a, **kw: None)
     monkeypatch.setattr(chat_cmd, "load_config", lambda: dict(DEFAULT_CONFIG))
@@ -197,6 +200,99 @@ def test_repl_command_closes_engine(monkeypatch):
     chat_cmd.repl(model="m", typewriter=False)
 
     assert engine.closed is True
+
+
+def test_repl_uses_the_gateway_instead_of_loading_a_second_copy(monkeypatch):
+    """A gateway already holds the weights; loading them again is the bug."""
+    attached = FakeEngine()
+    attached.base_url = "http://127.0.0.1:8686"
+
+    def _no_local_load(model):
+        raise AssertionError("loaded a second copy while a gateway was serving it")
+
+    monkeypatch.setattr(chat_cmd, "_attach", lambda *a, **k: attached)
+    monkeypatch.setattr(chat_cmd, "_build", _no_local_load)
+    monkeypatch.setattr(chat_cmd, "repl_loop", lambda *a, **kw: None)
+    monkeypatch.setattr(chat_cmd, "load_config", lambda: dict(DEFAULT_CONFIG))
+
+    chat_cmd.repl(model="m", typewriter=False)
+
+    assert attached.closed is True
+
+
+def test_repl_loads_locally_when_no_gateway_serves_the_model(monkeypatch):
+    engine = FakeEngine()
+    monkeypatch.setattr(chat_cmd, "_attach", lambda *a, **k: None)
+    monkeypatch.setattr(chat_cmd, "_build", lambda model: engine)
+    monkeypatch.setattr(chat_cmd, "repl_loop", lambda *a, **kw: None)
+    monkeypatch.setattr(chat_cmd, "load_config", lambda: dict(DEFAULT_CONFIG))
+
+    chat_cmd.repl(model="m", typewriter=False)
+
+    assert engine.closed is True
+
+
+def test_attach_points_at_the_gateway_the_config_names(monkeypatch):
+    seen = {}
+
+    def fake_attach(url, model, *, api_key=None):
+        seen.update(url=url, model=model, api_key=api_key)
+        return None
+
+    monkeypatch.setattr(chat_cmd.gateway, "attach", fake_attach)
+
+    chat_cmd._attach("m", {"host": "0.0.0.0", "port": 9999, "api_key": "k"})
+
+    # A wildcard bind is where serve listens, not an address to dial.
+    assert seen == {"url": "http://127.0.0.1:9999", "model": "m", "api_key": "k"}
+
+
+def test_local_flag_skips_the_gateway(monkeypatch):
+    """`--local` is an answer, not a hint: do not even probe the gateway."""
+    engine = FakeEngine()
+    probes = []
+    monkeypatch.setattr(chat_cmd, "_attach", lambda *a, **k: probes.append(a) or None)
+    monkeypatch.setattr(chat_cmd, "_build", lambda model: engine)
+    monkeypatch.setattr(chat_cmd, "repl_loop", lambda *a, **kw: None)
+    monkeypatch.setattr(chat_cmd, "load_config", lambda: dict(DEFAULT_CONFIG))
+
+    chat_cmd.repl(model="m", typewriter=False, local=True)
+
+    assert probes == []
+    assert engine.closed is True
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        ("http://127.0.0.1:9000", "http://127.0.0.1:9000"),
+        ("http://gpu-box:9000/", "http://gpu-box:9000"),
+        ("127.0.0.1:9000", "http://127.0.0.1:9000"),
+        ("9000", "http://127.0.0.1:9000"),
+    ],
+)
+def test_gateway_flag_takes_what_a_person_pastes(value, expected):
+    # A gateway started with `--port 9000` is not reachable at the default one.
+    assert chat_cmd._gateway_url({}, value) == expected
+
+
+def test_gateway_flag_falls_back_to_the_config():
+    cfg = {"host": "0.0.0.0", "port": 8686}
+    assert chat_cmd._gateway_url(cfg) == "http://127.0.0.1:8686"
+
+
+def test_attach_probes_the_gateway_the_flag_names(monkeypatch):
+    seen = {}
+
+    def fake_attach(url, model, *, api_key=None):
+        seen.update(url=url, model=model, api_key=api_key)
+        return None
+
+    monkeypatch.setattr(chat_cmd.gateway, "attach", fake_attach)
+
+    chat_cmd._attach("m", {"port": 8686, "api_key": "k"}, gateway_url="127.0.0.1:9000")
+
+    assert seen == {"url": "http://127.0.0.1:9000", "model": "m", "api_key": "k"}
 
 
 def _wire_build(monkeypatch, cfg, on_engine):
@@ -247,6 +343,81 @@ def test_build_applies_a_measured_tuning_profile(monkeypatch):
 
     assert called == ["m"]
     assert seen["plan"].gpu_layers == 3
+
+
+def test_build_names_the_server_holding_the_card(monkeypatch, capsys):
+    """A CPU-only plan on a machine with a card deserves the reason.
+
+    The planner only sees `vram_free_gb`, so a second server reads as "this card
+    is small", not "this card is busy" - on gpt-oss-120b that is 0.6 t/s
+    against 1.8, with no hint about why.
+    """
+    _wire_build(monkeypatch, DEFAULT_CONFIG, lambda p, path: None)
+    monkeypatch.setattr(
+        chat_cmd,
+        "detect",
+        lambda: types.SimpleNamespace(vram_total_gb=4.0, vram_free_gb=0.12),
+    )
+    monkeypatch.setattr(
+        chat_cmd, "_other_servers", lambda: [("50973", "llama-server --port 50973")]
+    )
+
+    chat_cmd._build("m")
+
+    out = capsys.readouterr().out
+    assert "port 50973" in out
+    assert "3.9 of 4.0 GB" in out
+    assert "vipera serve stop" in out
+
+
+def test_build_stays_quiet_when_the_card_is_free(monkeypatch, capsys):
+    _wire_build(monkeypatch, DEFAULT_CONFIG, lambda p, path: None)
+    monkeypatch.setattr(
+        chat_cmd,
+        "detect",
+        lambda: types.SimpleNamespace(vram_total_gb=4.0, vram_free_gb=3.64),
+    )
+    monkeypatch.setattr(chat_cmd, "_other_servers", lambda: [])
+
+    chat_cmd._build("m")
+
+    assert "another llama-server" not in capsys.readouterr().out
+
+
+def test_build_does_not_explain_a_plan_that_uses_the_card(monkeypatch, capsys):
+    _wire_build(monkeypatch, DEFAULT_CONFIG, lambda p, path: None)
+    monkeypatch.setattr(
+        chat_cmd,
+        "plan",
+        lambda *a, **kw: Plan(**{**_plan().__dict__, "gpu_layers": 7}),
+    )
+    monkeypatch.setattr(
+        chat_cmd,
+        "detect",
+        lambda: types.SimpleNamespace(vram_total_gb=4.0, vram_free_gb=0.12),
+    )
+    monkeypatch.setattr(
+        chat_cmd, "_other_servers", lambda: [("50973", "llama-server --port 50973")]
+    )
+
+    chat_cmd._build("m")
+
+    assert "another llama-server" not in capsys.readouterr().out
+
+
+def test_other_servers_names_running_children_only(monkeypatch):
+    class Proc:
+        def __init__(self, cmdline):
+            self.info = {"cmdline": cmdline}
+
+    procs = [
+        Proc(["/home/u/.vipera/bin/llama-server", "-m", "m.gguf", "--port", "50973"]),
+        Proc(["/usr/bin/python", "-m", "vipera", "serve", "start"]),
+        Proc(["/home/u/.vipera/bin/llama-server", "--help"]),
+    ]
+    monkeypatch.setattr(chat_cmd.psutil, "process_iter", lambda attrs=None: procs)
+
+    assert [port for port, _ in chat_cmd._other_servers()] == ["50973"]
 
 
 def test_build_skips_tuning_when_the_config_turns_it_off(monkeypatch):

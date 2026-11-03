@@ -290,6 +290,20 @@ Both subcommands resolve the model as `--model`, then `default_model`, then the
 picker. Loading uses the planner with `config.ctx`, `config.kv_cache`, and
 `config.n_batch`.
 
+Before planning or loading anything, `chat` asks the gateway at `config.host`:
+`config.port` whether it already serves that alias (`GET /v1/models`, with the
+configured `api_key` if one is set). If it does, the chat attaches to it and
+loads nothing: the gateway already holds the weights, and a second copy would
+fight it for the card - and, on a model larger than RAM, re-read the file from
+disk for one prompt. The line `using the gateway already serving <alias> at
+<url>` says which path was taken. A gateway that is down, or that does not list
+the alias, falls through to the local load exactly as before.
+
+| Option | Default | Description |
+|---|---|---|
+| `--gateway URL` | `config.host:port` | Attach to this gateway instead. Takes `http://host:port`, `host:port`, or a bare port, so a gateway started with `--port 9000` is reachable without editing the config. |
+| `--local` | off | Load the model here even when a gateway serves the alias - for measuring this machine's own placement, or for a chat that must not touch the serving process. |
+
 ### `vipera chat repl [-m ALIAS]`
 
 Interactive multi-turn REPL seeded with a single system message:
@@ -308,7 +322,8 @@ or the HTTP API for real timings.
 ### `vipera chat oneshot "PROMPT" [-m ALIAS]`
 
 Send one user message, stream the reply, print it, exit. Useful inside scripts;
-output is still rendered with the typewriter effect.
+output is still rendered with the typewriter effect. Attaches to a running
+gateway on the same terms as the REPL.
 
 ## `vipera bench`
 
