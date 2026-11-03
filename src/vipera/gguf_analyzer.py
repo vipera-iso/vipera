@@ -512,6 +512,15 @@ def _analyze_single(path: str) -> dict[str, Any]:
             # token_embd, output.weight and friends: resident either way, so
             # they are charged once instead of to every layer.
             fixed_bytes += size
+        elif "_exps" in tensor_name:
+            # Routed experts are the pool `-ncmoe` moves, not part of the
+            # attention side that always rides with a layer. Charging them here
+            # made ``attn_bytes`` for a MoE model equal its whole expert pool
+            # (gpt-oss-120b: 61.6 of 62.6 GB) - an "attention side" that is
+            # 98% of the file is not a placement hint, it is a number that
+            # cannot fit anywhere. The router and the shared experts stay on the
+            # attention side below, because llama.cpp keeps them active.
+            pass
         elif category == "ffn" and "_shexp" not in tensor_name:
             ffn_layer_bytes[layer] += size
         else:

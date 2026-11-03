@@ -126,6 +126,25 @@ def test_analyze_separates_routed_and_shared_experts(tmp_path, mocked_moe_gguf):
     assert meta["expert_layer_bytes"] == [300, 400]
 
 
+def test_routed_experts_are_not_counted_on_the_attention_side(tmp_path, mocked_moe_gguf):
+    """`attn_bytes` is the always-active side of a layer, and a pool is not it.
+
+    The routed experts used to fall through to the attention bucket, which made
+    attn_bytes for gpt-oss-120b report 61.6 of the file's 62.6 GB - the pool
+    plus everything else. The router and the shared experts are always active,
+    so they stay on the attention side.
+    """
+    path = tmp_path / "moe.gguf"
+    path.write_bytes(b"")
+
+    meta = analyze_gguf(str(path))["metadata"]
+
+    assert meta["expert_bytes"] == 700
+    # Router (20) + shared experts (60 + 70); the two *_exps tensors (700) are out.
+    assert meta["attn_bytes"] == 150
+    assert meta["ffn_layer_bytes"] == [0, 0]
+
+
 def test_analyze_warns_about_low_quant_critical_tensors(tmp_path, mocked_gguf):
     path = tmp_path / "model-q2_k.gguf"
     path.write_bytes(b"")
@@ -670,9 +689,10 @@ def test_split_model_is_analyzed_as_one_model(tmp_path, monkeypatch):
     assert meta["expert_bytes"] == 300 + 400
     assert meta["expert_layer_bytes"] == [300, 400]
     assert meta["expert_layers"] == 2
-    # The layer-resident total, experts included (only a model with no experts
-    # reads this field, through the --n-cpu-ffn path).
-    assert meta["attn_bytes"] == 300 + 100 + 400 + 150
+    # Both attention blocks, and neither expert pool: the routed experts are
+    # their own field, and the --n-cpu-ffn path that reads this one bails out on
+    # a model that has any.
+    assert meta["attn_bytes"] == 100 + 150
     assert meta["tensor_count"] == 4
 
 
