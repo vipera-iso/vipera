@@ -113,6 +113,12 @@ def _cut(text: str, keep_chars: int) -> str:
 
 def _shrink(msg: dict, excess_tokens: int) -> bool:
     """Cut ``msg`` enough to free ``excess_tokens``. True when it changed."""
+    if "content" in msg and not isinstance(msg["content"], str):
+        # Multimodal content is a list of parts, and `_content` reads it as the
+        # Python repr of that list. Writing the cut repr back would send the
+        # model "[{'type': 'text', ...}]" instead of the message, so this layer
+        # leaves such a message alone rather than corrupting it.
+        return False
     content = _content(msg)
     if not content:
         return False
