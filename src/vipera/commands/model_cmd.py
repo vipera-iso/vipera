@@ -1,3 +1,4 @@
+import contextlib
 import re
 import shlex
 import shutil
@@ -171,6 +172,32 @@ def _read_meta(path: Path, name: str | None = None) -> dict:
 #: Separators turn an alias into a path rather than a file name inside the store.
 _ALIAS_SEPARATORS = re.compile(r"[\\/]+")
 
+#: How llama.cpp names a model split across files: `<name>-00001-of-00002.gguf`.
+#: The postfix is not cosmetic - the loader rewrites it to find the siblings
+#: (``llama_split_prefix``/``llama_split_path`` in llama.cpp), so a shard renamed
+#: to ``<alias>.gguf`` cannot be loaded at all, whatever the alias says.
+_SPLIT_RE = re.compile(r"^(?P<prefix>.+)-(?P<index>\d{5})-of-(?P<count>\d{5})\.gguf$")
+
+
+def _split_shards(path: Path) -> list[Path]:
+    """Every shard of a split GGUF in order, or [] when `path` is one file.
+
+    The names are computed from the postfix rather than read from the directory,
+    because those names are exactly what the loader looks for: computing them is
+    also the only way to tell a complete model from shard 3 of 4 with the rest
+    missing.
+    """
+    m = _SPLIT_RE.match(path.name)
+    if m is None:
+        return []
+    count = int(m.group("count"))
+    if count < 2:
+        return []
+    prefix = m.group("prefix")
+    return [
+        path.with_name(f"{prefix}-{index:05d}-of-{count:05d}.gguf") for index in range(1, count + 1)
+    ]
+
 
 def _safe_alias(base: str | None) -> str:
     """One file name inside the model store, or "" when nothing usable is left.
@@ -303,13 +330,41 @@ def import_model(
         console.print(f"file not found: {src_path}")
         raise typer.Exit(1)
 
-    base_alias = (_safe_alias(alias_name) or src_path.stem).removesuffix(".gguf")
-    alias = _unique_alias(base_alias)
-    dst = MODELS_DIR / f"{alias}.gguf"
+    shards = _split_shards(src_path)
+    if shards:
+        # One artifact in N files, and the loader finds the siblings by rewriting
+        # this file's postfix. Naming the copy `<alias>.gguf` is why a registered
+        # split model used to be unloadable; and copying tens of GB just to keep
+        # a name is not a trade worth making, so the store keeps every shard
+        # under its own name - as a link, not a second copy.
+        missing = [shard.name for shard in shards if not shard.exists()]
+        if missing:
+            console.print(
+                f"[{C_RED}] ✗ {src_path.name} is one shard of a {len(shards)}-part "
+                f"model; missing {', '.join(missing)}[/]"
+            )
+            raise typer.Exit(1)
+        first = shards[0]
+        dst = MODELS_DIR / first.name
+        match = _SPLIT_RE.match(first.name)
+        base_alias = _safe_alias(alias_name) or (match.group("prefix") if match else first.stem)
+        alias = _unique_alias(base_alias, ignore=dst)
+        for shard in shards:
+            link = MODELS_DIR / shard.name
+            if link.exists() or link.is_symlink():
+                continue
+            link.symlink_to(shard)
+    else:
+        base_alias = (_safe_alias(alias_name) or src_path.stem).removesuffix(".gguf")
+        # The destination is this model's own file, not a name collision: counting
+        # it as taken renamed the alias to `<name>-2` and copied the model a
+        # second time, which for a 60 GB file is the whole disk budget.
+        alias = _unique_alias(base_alias, ignore=MODELS_DIR / f"{base_alias}.gguf")
+        dst = MODELS_DIR / f"{alias}.gguf"
 
-    if src_path.resolve() != dst.resolve():
-        with console.status(f"[{C_ACCENT}] Copying {src_path.name}…"):
-            shutil.copy2(src_path, dst)
+        if src_path.resolve() != dst.resolve():
+            with console.status(f"[{C_ACCENT}] Copying {src_path.name}…"):
+                shutil.copy2(src_path, dst)
 
     animated_loading_bar("importing gguf", 1.0)
     meta = _read_meta(dst, src_path.name)
@@ -945,6 +1000,17 @@ def rm_cmd(
         console.print(f"[{C_DIM}]  Kept {path}: another alias still uses it.[/]")
     else:
         path.unlink(missing_ok=True)
+        # A split model is several files in the store but one registered path;
+        # the others are the sibling links `model add` made for it. Leaving them
+        # behind would strand every shard but the first. Only links are removed:
+        # a real file was never this command's to delete.
+        for shard in _split_shards(path):
+            if shard == path or not shard.is_symlink():
+                continue
+            if any(other.path == shard for other in list_models()):
+                continue
+            with contextlib.suppress(OSError):
+                shard.unlink(missing_ok=True)
 
     console.print(f"removed {name}")
 

@@ -548,3 +548,121 @@ def test_import_without_a_tty_takes_the_first_file_instead_of_prompting(
 
     assert seen["download"] == ("org/repo", "model-q4_k_m.gguf")
     assert "model-q4_k_m.gguf" in capsys.readouterr().out
+
+
+# --- split models: the shard names are the load contract -------------------
+
+
+def test_split_shards_lists_every_part_from_the_postfix(tmp_path):
+    path = tmp_path / "m-Q4_K-00002-of-00003.gguf"
+
+    names = [shard.name for shard in model_cmd._split_shards(path)]
+
+    # Asking for shard 2 still answers with all of them: the loader rewrites the
+    # postfix of whatever path it was given.
+    assert names == [
+        "m-Q4_K-00001-of-00003.gguf",
+        "m-Q4_K-00002-of-00003.gguf",
+        "m-Q4_K-00003-of-00003.gguf",
+    ]
+
+
+def test_split_shards_is_empty_for_a_single_file(tmp_path):
+    assert model_cmd._split_shards(tmp_path / "m.gguf") == []
+
+
+def test_import_of_a_split_model_keeps_the_names_and_links_the_shards(
+    isolated_home, monkeypatch, tmp_path
+):
+    source = tmp_path / "download"
+    source.mkdir()
+    names = ["m-Q4_K-00001-of-00002.gguf", "m-Q4_K-00002-of-00002.gguf"]
+    for name in names:
+        (source / name).write_bytes(b"GGUF")
+
+    models = isolated_home / "models"
+    monkeypatch.setattr(model_cmd, "MODELS_DIR", models)
+    monkeypatch.setattr(
+        model_cmd,
+        "_read_meta",
+        lambda path, name=None: {"size_bytes": 8, "quant": "Q4_K", "n_layers": 32},
+    )
+    monkeypatch.setattr(model_cmd, "animated_loading_bar", lambda *a, **k: None)
+
+    model_cmd.import_model(f"local:{source / names[0]}")
+
+    # Registered under the shard's own name. A copy called `<alias>.gguf` loses
+    # the postfix, and llama.cpp then refuses the file outright.
+    spec = reg_mod.get_model("m-Q4_K")
+    assert spec is not None
+    assert spec.path.name == names[0]
+    for name in names:
+        assert (models / name).exists()
+    # Every shard is a link, not a second copy of the weights.
+    for name in names:
+        assert (models / name).stat().st_ino == (source / name).stat().st_ino
+
+
+def test_import_of_an_incomplete_split_refuses_before_registering(
+    isolated_home, monkeypatch, tmp_path
+):
+    source = tmp_path / "download"
+    source.mkdir()
+    first = source / "m-00001-of-00002.gguf"
+    first.write_bytes(b"GGUF")
+
+    monkeypatch.setattr(model_cmd, "MODELS_DIR", isolated_home / "models")
+    monkeypatch.setattr(model_cmd, "_read_meta", lambda path, name=None: {"size_bytes": 4})
+
+    with pytest.raises(typer.Exit):
+        model_cmd.import_model(f"local:{first}")
+
+    # A registered model that cannot load is worse than an error: the planner
+    # would size a cache for half a model.
+    assert reg_mod.get_model("m") is None
+
+
+def test_import_of_a_file_already_in_the_store_does_not_copy_it_again(isolated_home, monkeypatch):
+    models = isolated_home / "models"
+    models.mkdir(parents=True, exist_ok=True)
+    store_file = models / "m.gguf"
+    store_file.write_bytes(b"GGUF")
+
+    monkeypatch.setattr(model_cmd, "MODELS_DIR", models)
+    monkeypatch.setattr(
+        model_cmd, "_read_meta", lambda path, name=None: {"size_bytes": 4, "quant": "?"}
+    )
+    monkeypatch.setattr(model_cmd, "animated_loading_bar", lambda *a, **k: None)
+
+    model_cmd.import_model(f"local:{store_file}")
+
+    # The file in the store is this model's own copy, not a name collision: it
+    # must be registered, not renamed to `m-2` and copied again.
+    spec = reg_mod.get_model("m")
+    assert spec is not None
+    assert spec.path == store_file
+    assert not (models / "m-2.gguf").exists()
+
+
+def test_rm_of_a_split_model_takes_its_shard_links_with_it(isolated_home, monkeypatch, tmp_path):
+    source = tmp_path / "download"
+    source.mkdir()
+    models = isolated_home / "models"
+    models.mkdir(parents=True, exist_ok=True)
+    links = []
+    for name in ("m-00001-of-00002.gguf", "m-00002-of-00002.gguf"):
+        real = source / name
+        real.write_bytes(b"GGUF")
+        link = models / name
+        link.symlink_to(real)
+        links.append(link)
+
+    monkeypatch.setattr(model_cmd, "MODELS_DIR", models)
+    reg_mod.add_model("m", links[0], {"size_bytes": 8})
+
+    model_cmd.rm_cmd("m", yes=True)
+
+    for link in links:
+        assert not link.exists() and not link.is_symlink()
+    # Removing a model must not touch the files it was linked from.
+    assert (source / "m-00002-of-00002.gguf").exists()
