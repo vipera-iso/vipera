@@ -54,6 +54,12 @@ class Plan:
     # host footprints already include that multiplication. 1 is a single window,
     # which is what the in-process engine has.
     parallel: int = 1
+    # True when `optimize/tuning.py` chose this placement from a measurement
+    # rather than the planner's formula. The server backend reads it to skip the
+    # "try a more aggressive split" probes: those exist to discover what the card
+    # can take, this plan already carries that answer, and the split is confirmed
+    # by the first load attempt instead (see loading.load_attempts).
+    measured: bool = False
 
     @property
     def requires_server(self) -> bool:

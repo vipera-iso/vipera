@@ -35,6 +35,20 @@ class _Response:
         self.closed = True
 
 
+class _Chunked:
+    """A streaming response that hands back one read per item, like `read1`."""
+
+    def __init__(self, chunks):
+        self.chunks = list(chunks)
+        self.closed = False
+
+    def read1(self, _n):
+        return self.chunks.pop(0) if self.chunks else b""
+
+    def close(self):
+        self.closed = True
+
+
 class _Payload:
     def __init__(self, payload):
         self.payload = payload
@@ -278,10 +292,14 @@ def test_server_command_passes_spec_type_when_supported():
     assert command[command.index("--spec-type") + 1] == "ngram-map-k"
 
 
-def test_ngram_scan_drafters_get_a_usable_draft_length():
-    # --spec-draft-n-max defaults to 3, which is a draft *model* default; the
-    # scan drafters copy the m tokens following a match, and llama.cpp's own
-    # examples pass 64 for ngram-simple/ngram-map-k.
+def test_the_draft_length_cap_is_never_emitted():
+    # `--spec-draft-n-max 64` was added on the theory that the default 3
+    # truncates a scan drafter. Swept on the reference card it changes nothing:
+    # the counter reports 234 draft tokens and 136 accepted at both 3 and 64 on
+    # three workloads, decode within 0.5% either way. The scan drafter sizes its
+    # draft from the match, not from this cap, so it is not passed at all -
+    # unlike `--spec-type`, which is a real lever (+21.9% to +35.9% on rewrite
+    # prompts, -7% on prose where the output does not echo the input).
     command = sb.server_command(
         "/bin/llama-server",
         "/m.gguf",
@@ -289,72 +307,9 @@ def test_ngram_scan_drafters_get_a_usable_draft_length():
         1,
         spec_type="ngram-map-k",
         spec_type_supported=True,
-        spec_draft_n_max_supported=True,
-    )
-
-    assert command[command.index("--spec-draft-n-max") + 1] == "64"
-
-
-def test_ngram_mod_keeps_its_own_draft_length_knobs():
-    # ngram-mod sizes its drafts with --spec-ngram-mod-n-min/-max (default
-    # 48/64); the docs suggest lowering those for dense models, not overriding
-    # them with the draft-model flag.
-    command = sb.server_command(
-        "/bin/llama-server",
-        "/m.gguf",
-        _plan(),
-        1,
-        spec_type="ngram-mod",
-        spec_type_supported=True,
-        spec_draft_n_max_supported=True,
     )
 
     assert "--spec-draft-n-max" not in command
-
-
-def test_draft_length_is_dropped_on_builds_without_the_flag():
-    command = sb.server_command(
-        "/bin/llama-server",
-        "/m.gguf",
-        _plan(),
-        1,
-        spec_type="ngram-simple",
-        spec_type_supported=True,
-        spec_draft_n_max_supported=False,
-    )
-
-    assert command[command.index("--spec-type") + 1] == "ngram-simple"
-    assert "--spec-draft-n-max" not in command
-
-
-def test_a_mixed_spec_list_still_gets_the_draft_length():
-    # --spec-type takes a comma-separated list; one scan drafter is enough.
-    command = sb.server_command(
-        "/bin/llama-server",
-        "/m.gguf",
-        _plan(),
-        1,
-        spec_type="ngram-mod,ngram-map-k",
-        spec_type_supported=True,
-        spec_draft_n_max_supported=True,
-    )
-
-    assert command[command.index("--spec-draft-n-max") + 1] == "64"
-
-
-def test_supports_spec_draft_n_max_reads_the_binary_help(monkeypatch):
-    class _Result:
-        def __init__(self, text):
-            self.stdout = text
-            self.stderr = ""
-
-    monkeypatch.setattr(
-        sb.subprocess, "run", lambda *a, **kw: _Result("--spec-draft-n-max N  max draft")
-    )
-    assert sb.supports_spec_draft_n_max("/bin/llama-server") is True
-
-    monkeypatch.setattr(sb.subprocess, "run", lambda *a, **kw: _Result("--spec-type ngram-mod"))
-    assert sb.supports_spec_draft_n_max("/bin/llama-server") is False
 
 
 def test_server_command_skips_spec_type_when_unset_unsupported_or_none():
@@ -580,6 +535,30 @@ def test_iter_sse_skips_unparsable_frames():
     assert list(sb.ServerEngine._iter_sse(response)) == []
 
 
+def test_a_token_that_spells_done_does_not_end_the_stream():
+    # llama-server's frames are JSON, so a model that writes "[DONE]" puts it
+    # inside the content field. Only the bare `data: [DONE]` line ends a stream.
+    frames = [
+        b'data: {"choices":[{"delta":{"content":"[DONE]"}}]}\n\n',
+        b"data: [DONE]\n\n",
+    ]
+    stream = sb._SseStream(_Chunked(frames), timeout=5.0)
+
+    assert list(stream) == frames
+
+
+def test_a_token_that_spells_the_whole_done_line_does_not_end_the_stream():
+    # The sentinel is matched line by line, so content carrying "data: [DONE]"
+    # inside the JSON is not the terminator.
+    frames = [
+        b'data: {"choices":[{"delta":{"content":"send data: [DONE] to stop"}}]}\n\n',
+        b"data: [DONE]\n\n",
+    ]
+    stream = sb._SseStream(_Chunked(frames), timeout=5.0)
+
+    assert list(stream) == frames
+
+
 def test_tokenize_posts_text_and_returns_ints(monkeypatch):
     engine = _engine()
     seen = {}
@@ -704,6 +683,93 @@ def test_gpu_start_failure_stops_at_the_last_split_that_starts(monkeypatch):
 
     assert attempts == [7, 6, 5]
     assert engine.plan.gpu_layers == 5
+
+
+def test_a_taken_port_is_retried_instead_of_failing_the_split(monkeypatch):
+    # `_free_port()` closes its socket before the child binds, so another engine
+    # (a pool loads on worker threads) can take the port. That is not a split
+    # that does not fit, and walking the ladder down for it costs layers.
+    engine = _engine()
+    plans = []
+
+    def fake_start_once(plan):
+        plans.append(plan)
+        if len(plans) == 1:
+            raise RuntimeError("llama-server exited with code 1")
+
+    monkeypatch.setattr(engine, "_start_once", fake_start_once)
+    monkeypatch.setattr(
+        engine, "_log_text", lambda limit=200_000: "couldn't bind HTTP server socket"
+    )
+
+    engine._start(_plan())
+
+    assert len(plans) == 2
+
+
+def test_a_real_start_failure_is_not_retried(monkeypatch):
+    engine = _engine()
+    plans = []
+
+    def fake_start_once(plan):
+        plans.append(plan)
+        raise RuntimeError("Failed to create llama_context")
+
+    monkeypatch.setattr(engine, "_start_once", fake_start_once)
+    monkeypatch.setattr(engine, "_log_text", lambda limit=200_000: "CUDA error: out of memory")
+
+    with pytest.raises(RuntimeError, match="llama_context"):
+        engine._start(_plan())
+
+    assert len(plans) == 1
+
+
+def test_an_unmeasured_split_still_probes_above_the_fit(monkeypatch):
+    # The probe ladder exists to discover a placement the planner's fit only
+    # guessed: five steps more aggressive are tried before the planned split.
+    monkeypatch.setattr(sb, "find_llama_tool", lambda tool: "/bin/llama-server")
+    attempts = []
+
+    def fake_start(self, plan):
+        attempts.append(plan.n_cpu_ffn)
+        self.plan = plan
+
+    monkeypatch.setattr(sb.ServerEngine, "_start", fake_start)
+
+    sb.ServerEngine(
+        _plan(n_layers=28, n_cpu_ffn=10, note="Tensor split: 18/28 dense FFN layers on GPU"),
+        "/m.gguf",
+    )
+
+    assert attempts[0] == 5
+
+
+def test_a_measured_split_is_not_probed_again(monkeypatch):
+    # A split remembered from `vipera bench` already carries the answer, so the
+    # first spawn is the split itself - not up to ten rungs that re-discover it
+    # at ~1.5 s each on every start.
+    monkeypatch.setattr(sb, "find_llama_tool", lambda tool: "/bin/llama-server")
+    attempts = []
+
+    def fake_start(self, plan):
+        attempts.append(plan.n_cpu_ffn)
+        self.plan = plan
+
+    monkeypatch.setattr(sb.ServerEngine, "_start", fake_start)
+
+    engine = sb.ServerEngine(
+        _plan(
+            n_layers=28,
+            n_cpu_ffn=6,
+            n_ubatch=256,
+            measured=True,
+            note="Tensor split: 22/28 dense FFN layers on GPU (measured: ub 256)",
+        ),
+        "/m.gguf",
+    )
+
+    assert attempts == [6]
+    assert engine.plan.n_cpu_ffn == 6
 
 
 def test_placement_is_corrected_when_llama_server_ignores_gpu_layers(monkeypatch, capsys):

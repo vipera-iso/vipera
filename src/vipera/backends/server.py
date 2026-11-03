@@ -88,21 +88,24 @@ def _kv_converted_pair(log: str) -> str | None:
     return match.group(1) if match else "the requested pair"
 
 
-#: Deepest draft an n-gram scan drafter is asked for. `--spec-draft-n-max`
-#: defaults to 3, which is a draft *model* default: the scan drafters copy the m
-#: tokens that followed a matching n-gram, so 3 truncates them, and llama.cpp's
-#: own examples pass 64 for ngram-simple/ngram-map-k.
-_NGRAM_DRAFT_MAX = 64
-#: Drafters that take `--spec-draft-n-max`. ngram-mod is excluded on purpose: its
-#: draft length comes from `--spec-ngram-mod-n-min/-max`, which already default
-#: to 48/64 (the docs suggest *lowering* those for dense models).
-_NGRAM_SCAN_DRAFTERS = ("ngram-simple", "ngram-map-k", "ngram-map-k4v")
+#: `--spec-draft-n-max` is deliberately *not* emitted, including for the scan
+#: drafters that llama.cpp's examples pair with 64: measured on the reference
+#: build it changes nothing. Same prompt, greedy, 1.5B full offload, 3 runs each:
+#: ngram-simple copied 234 draft tokens with 136 accepted at both 3 and 64, and
+#: decode was 132.8 vs 131.6 t/s (repeat-copy), 124.3 vs 124.2 (code rewrite),
+#: 94.5 vs 94.3 (longer rewrite, where spec loses 7% to plain decode anyway).
+#: Identical draft counts mean the scan drafter sizes its draft from the match,
+#: not from this cap, so the flag is dead weight instead of a lever.
 
 
 # Printed by llama.cpp builds without a GPU backend. The child keeps running
 # but ignores --gpu-layers, so the plan must be corrected instead of reporting
 # layers that are not on the GPU.
 _GPU_IGNORED_MARKER = "--gpu-layers option will be ignored"
+
+# Printed by llama-server when another process took the port between
+# `_free_port()` and the child's bind. Worth a second port, not a weaker split.
+_BIND_FAILURE = "couldn't bind HTTP server socket"
 
 # Chat parameters llama-server understands. It ignores unknown JSON fields, but
 # sending a curated set keeps a typo from becoming a 400 in the child.
@@ -254,16 +257,6 @@ def supports_spec_type(binary: str) -> bool:
     return text is not None and "--spec-type" in text
 
 
-def supports_spec_draft_n_max(binary: str) -> bool:
-    """Whether this llama-server knows `--spec-draft-n-max`.
-
-    Same contract as `supports_spec_type`: an unknown option kills the child, so
-    the flag only goes out after the cached `--help` text lists it.
-    """
-    text = _help_text(binary)
-    return text is not None and "--spec-draft-n-max" in text
-
-
 def _supports_fit(binary: str) -> bool:
     """Whether this llama-server knows `-fit` / `--fit`.
 
@@ -298,7 +291,6 @@ def server_command(
     fit_supported: bool | None = None,
     spec_type: str | None = None,
     spec_type_supported: bool | None = None,
-    spec_draft_n_max_supported: bool | None = None,
     moe_cache_supported: bool | None = None,
     embeddings: bool = False,
     embeddings_supported: bool | None = None,
@@ -398,15 +390,6 @@ def server_command(
         )
         if supported:
             command.extend(["--spec-type", spec_type])
-            # `--spec-draft-n-max` defaults to 3, which truncates a scan drafter
-            # that exists to copy the m tokens following a match. Unmeasured
-            # here - the repo's +72%/+37% were measured at the defaults - so
-            # this is the sweep the docs ask for, not a gain already in hand.
-            if any(part.strip() in _NGRAM_SCAN_DRAFTERS for part in spec_type.split(",")):
-                if spec_draft_n_max_supported is None:
-                    spec_draft_n_max_supported = supports_spec_draft_n_max(binary)
-                if spec_draft_n_max_supported:
-                    command.extend(["--spec-draft-n-max", str(_NGRAM_DRAFT_MAX)])
     cache_k, cache_v = plan.kv_types
     if cache_k != "f16" or cache_v != "f16":
         # Both halves are named once either differs, so the command line says
@@ -500,7 +483,7 @@ class _SseStream:
         if not chunk:
             self.close()
             raise StopIteration
-        if b"[DONE]" in chunk:
+        if b"data: [DONE]" in chunk.splitlines():
             # The last frame is already in hand; nobody will read more.
             self._finished = True
             with contextlib.suppress(OSError, AttributeError):
@@ -564,6 +547,10 @@ class ServerEngine:
         # a MoE plan tries a more aggressive expert placement first and keeps it
         # only if it starts: the fit the planner computed is a floor on what the
         # card can take, not a measurement (see loading.load_attempts).
+        # `moe_probe` only asks to explore a placement the fit guessed. A plan
+        # that came from a measurement already holds the answer, and load_attempts
+        # drops the probe rungs for it (see its docstring) - so the split is still
+        # confirmed by the first attempt, one spawn, and the safe rungs follow.
         probe = bool(cfg.get("moe_probe", True))
         last_exc: Exception | None = None
         fell_back = False
@@ -593,6 +580,23 @@ class ServerEngine:
     # -- lifecycle ---------------------------------------------------------
 
     def _start(self, plan: Plan) -> None:
+        """Start the child, giving a taken port one second chance.
+
+        `_free_port()` closes its socket before the child binds, so another
+        engine (a pool loads models on worker threads) or any local process can
+        take the port in between. The child then dies without ever trying to
+        fit, and that must not be read as "this split does not load" and walk
+        the ladder down to a weaker split. Only a bind failure is retried: a real
+        out-of-VRAM failure fails again on a new port.
+        """
+        try:
+            self._start_once(plan)
+        except RuntimeError:
+            if _BIND_FAILURE not in self._log_text():
+                raise
+            self._start_once(plan)
+
+    def _start_once(self, plan: Plan) -> None:
         port = _free_port()
         log_path = config.LOGS_DIR / f"llama-server-{port}.log"
         command = server_command(

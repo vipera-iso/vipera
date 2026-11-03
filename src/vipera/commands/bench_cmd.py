@@ -226,6 +226,12 @@ def run(
                     gpu_layers=engine.plan.gpu_layers,
                     ctx=engine.plan.context,
                     gen_tps=result["gen_tps"],
+                    # The tensor split is what a server plan actually runs with;
+                    # storing it is what lets the next start skip the probe
+                    # ladder instead of re-discovering the same answer.
+                    n_cpu_ffn=engine.plan.n_cpu_ffn,
+                    moe_cpu_layers=engine.plan.moe_cpu_layers,
+                    n_ubatch=engine.plan.n_ubatch,
                 )
 
             # Report the plan the engine actually loaded: a GPU load can fail

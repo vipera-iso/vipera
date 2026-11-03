@@ -47,6 +47,19 @@ class Tuning:
     gen_tps: float = 0.0
     measured_at: str = ""
     free_gb: float = 0.0
+    # The tensor placement this profile measured, -1 for "not a tensor split",
+    # exactly like Plan's own fields. A server plan's offload is `-ncmoe` or
+    # `-ncffn`, and storing it is the point: the planner's fit is a formula while
+    # the split that loaded is a measurement, and replaying it is what stops
+    # every start from paying the probe ladder again (up to ten spawns, ~1.5 s
+    # each, on a dense 7B). Absent keys read as -1, so files written before this
+    # field existed still load.
+    n_cpu_ffn: int = -1
+    moe_cpu_layers: int = -1
+    # The micro-batch that split loaded at. A probe that had to drop to 256 to
+    # create a context has to be replayed at 256, or the replay fails and the
+    # ladder runs from the top again.
+    n_ubatch: int = 0
 
 
 def fingerprint(hw: Any) -> str:
@@ -100,6 +113,9 @@ class TuningStore:
                 gen_tps=float(entry.get("gen_tps") or 0.0),
                 measured_at=str(entry.get("measured_at") or ""),
                 free_gb=float(entry.get("free_gb") or 0.0),
+                n_cpu_ffn=int(entry.get("n_cpu_ffn", -1)),
+                moe_cpu_layers=int(entry.get("moe_cpu_layers", -1)),
+                n_ubatch=int(entry.get("n_ubatch") or 0),
             )
         except (KeyError, TypeError, ValueError):
             return None
@@ -112,6 +128,9 @@ class TuningStore:
         gpu_layers: int,
         ctx: int = 0,
         gen_tps: float = 0.0,
+        n_cpu_ffn: int = -1,
+        moe_cpu_layers: int = -1,
+        n_ubatch: int = 0,
     ) -> bool:
         """Store a measurement; keep the fastest one seen for this machine.
 
@@ -139,6 +158,9 @@ class TuningStore:
                 "gen_tps": round(float(gen_tps), 3),
                 "measured_at": _now(),
                 "free_gb": round(float(getattr(hw, "vram_free_gb", 0.0) or 0.0), 2),
+                "n_cpu_ffn": int(n_cpu_ffn),
+                "moe_cpu_layers": int(moe_cpu_layers),
+                "n_ubatch": int(n_ubatch),
             }
             profiles[alias] = model
             self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -158,15 +180,17 @@ def apply_tuning(
     hw: Any,
     store: TuningStore | None = None,
 ) -> Plan:
-    """Return ``p`` with the measured layer split, or ``p`` unchanged.
+    """Return ``p`` with the measured placement, or ``p`` unchanged.
 
-    Only the classic split is learned. A MoE plan's offload is ``-ncmoe`` and a
-    tensor split's is ``-ncffn``; the server backend derives both from
-    ``n_layers`` and the per-tensor field, so the ``gpu_layers`` a profile stores
-    is not what either plan uses and a stored value would only look applied.
+    Two kinds of profile are replayed. A classic plan learns its ``gpu_layers``.
+    A server plan learns the tensor split it measured (``-ncffn``/``-ncmoe`` plus
+    the micro-batch it loaded at): the planner's fit is a formula, the probe
+    ladder that turns it into a measurement costs a spawn per rung on every
+    start, and a stored split is confirmed by the first load attempt instead - so
+    a stale profile still walks down the safe rungs. That holds when the profile
+    agrees with the fit too: the split is measured either way, even when
+    replaying it changes nothing about the plan.
     """
-    if p.requires_server:
-        return p
     profile = (store or TuningStore()).get(alias, hw)
     if profile is None:
         return p
@@ -186,6 +210,8 @@ def apply_tuning(
     # formula's smaller split is the honest answer there.
     if profile.ctx > 0 and p.context > profile.ctx:
         return p
+    if p.requires_server:
+        return _apply_tensor_split(p, profile)
     layers = profile.gpu_layers
     if p.n_layers > 0:
         layers = min(layers, p.n_layers)
@@ -194,3 +220,41 @@ def apply_tuning(
         return p
     rate = f", {profile.gen_tps:.2f} t/s" if profile.gen_tps else ""
     return replace(p, gpu_layers=layers, note=f"{p.note} (measured: {layers} layers{rate})")
+
+
+def _apply_tensor_split(p: Plan, profile: Tuning) -> Plan:
+    """Replay a measured -ncffn / -ncmoe split, or return ``p`` unchanged.
+
+    Only when the planner itself chose a tensor placement: the profile says
+    *where* that split landed, not that a tensor split applies at all - a 2K
+    window or a model without per-tensor sizes made the planner pick the classic
+    split deliberately, and replaying over that decision would undo its reason.
+    """
+    if p.n_layers <= 0:
+        return p
+    ubatch = profile.n_ubatch or p.ubatch
+    if profile.n_cpu_ffn >= 0 and p.n_cpu_ffn >= 0:
+        n_cpu_ffn = max(0, min(profile.n_cpu_ffn, p.n_layers))
+        if n_cpu_ffn == p.n_cpu_ffn and ubatch == p.n_ubatch:
+            return replace(p, measured=True)
+        gpu_ffn = p.n_layers - n_cpu_ffn
+        return replace(
+            p,
+            n_cpu_ffn=n_cpu_ffn,
+            n_ubatch=ubatch,
+            measured=True,
+            note=f"{p.note} (measured: {gpu_ffn}/{p.n_layers} dense FFN layers on GPU, ub {ubatch})",
+        )
+    if profile.moe_cpu_layers >= 0 and p.moe_cpu_layers >= 0:
+        moe_cpu_layers = max(0, min(profile.moe_cpu_layers, p.n_layers))
+        if moe_cpu_layers == p.moe_cpu_layers and ubatch == p.n_ubatch:
+            return replace(p, measured=True)
+        gpu_experts = p.n_layers - moe_cpu_layers
+        return replace(
+            p,
+            moe_cpu_layers=moe_cpu_layers,
+            n_ubatch=ubatch,
+            measured=True,
+            note=f"{p.note} (measured: MoE, {gpu_experts}/{p.n_layers} expert layers on GPU)",
+        )
+    return p

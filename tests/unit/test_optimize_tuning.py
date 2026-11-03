@@ -3,6 +3,7 @@ import types
 
 import pytest
 
+from vipera.backends.loading import load_attempts
 from vipera.optimize.tuning import Tuning, TuningStore, apply_tuning, fingerprint
 from vipera.planner import Plan
 
@@ -167,3 +168,60 @@ def test_a_profile_without_a_recorded_context_still_applies(tmp_path):
     store.record("m", _hw(), gpu_layers=17, gen_tps=6.0)
 
     assert apply_tuning(_plan(context=65536), "m", _hw(), store).gpu_layers == 17
+
+
+def test_apply_tuning_replays_a_measured_tensor_split(tmp_path):
+    # The planner's fit gave 18/28 dense FFN on the card; the probe found 22
+    # loadable at ub 256. Replaying that is what lets the next start skip the
+    # ladder that discovered it.
+    store = TuningStore(tmp_path / "t.json")
+    store.record("m", _hw(), gpu_layers=18, ctx=4096, gen_tps=17.9, n_cpu_ffn=6, n_ubatch=256)
+    p = _plan(gpu_layers=18, context=4096, n_cpu_ffn=10, n_layers=28)
+
+    tuned = apply_tuning(p, "m", _hw(), store)
+
+    assert tuned.n_cpu_ffn == 6
+    assert tuned.n_ubatch == 256
+    assert tuned.measured is True
+    assert "22/28 dense FFN layers" in tuned.note
+
+
+def test_a_classic_profile_does_not_override_a_tensor_split(tmp_path):
+    # gpu_layers is the classic split's field; a server plan does not run it.
+    store = TuningStore(tmp_path / "t.json")
+    store.record("m", _hw(), gpu_layers=18, gen_tps=16.1)
+    p = _plan(gpu_layers=18, n_cpu_ffn=10, n_layers=28)
+
+    assert apply_tuning(p, "m", _hw(), store) is p
+
+
+def test_apply_tuning_replays_a_measured_moe_split(tmp_path):
+    # -ncmoe is the MoE plan's field. The same replay that covers -ncffn has to
+    # cover it, or an expert split is re-probed on every start.
+    store = TuningStore(tmp_path / "t.json")
+    store.record("m", _hw(), gpu_layers=14, ctx=4096, gen_tps=12.0, moe_cpu_layers=12, n_ubatch=896)
+    p = _plan(gpu_layers=14, context=4096, moe_cpu_layers=16, n_ubatch=896, n_layers=24)
+
+    tuned = apply_tuning(p, "m", _hw(), store)
+
+    assert tuned.moe_cpu_layers == 12
+    assert tuned.measured is True
+    assert "12/24 expert layers on GPU" in tuned.note
+    # The planner's own reason survives: a replay appends, it does not replace.
+    assert tuned.note.startswith(p.note)
+
+
+def test_a_profile_that_agrees_with_the_fit_still_skips_the_probe(tmp_path):
+    # The measured split is also the planner's, so the plan does not change - but
+    # bench recorded it after probing, and the next start must not pay that
+    # ladder again to re-discover the same answer.
+    store = TuningStore(tmp_path / "t.json")
+    store.record("m", _hw(), gpu_layers=18, ctx=4096, gen_tps=17.9, n_cpu_ffn=10, n_ubatch=256)
+    p = _plan(gpu_layers=18, context=4096, n_cpu_ffn=10, n_ubatch=256, n_layers=28)
+
+    tuned = apply_tuning(p, "m", _hw(), store)
+
+    assert tuned is not p
+    assert tuned.measured is True
+    assert tuned.n_cpu_ffn == p.n_cpu_ffn
+    assert all("probed" not in label for _, label in load_attempts(tuned, probe=True))

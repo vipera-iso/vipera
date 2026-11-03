@@ -157,6 +157,15 @@ def _moe_probe_attempts(plan: Plan, steps: int) -> list[tuple[Plan, str]]:
 #:   22/28 FFN at ub 128  -> 19.98 t/s decode, 74.1 prefill  (block gained,
 #:                           and the prefill budget cost more than it paid)
 #:   22/28 FFN at ub 256  -> 21.70 t/s decode, 73.4 prefill  (+4.3% over 21/28)
+#: The same comparison at depth (1251-token prompt, llama-server, q8_0 KV, fa on,
+#: two runs a config): 21/28 at ub 512 decodes 17.6-17.9 t/s against 20.4-20.8 for
+#: 22/28 at ub 256, prefill unchanged (86.3 vs 85.7) - the block is worth ~16% per
+#: token once there is a context to read, not the 4.3% a 74-token prompt showed.
+#: At ctx 8192 the same rung is decode-neutral (17.0 vs 17.0) and costs 3.8%
+#: prefill, which is why it stays a fallback rung and never a default. It cannot
+#: rescue a split that is too aggressive for the context either: at ctx 8192
+#: `-ncffn 6` fails at every ub it was tried at, because what runs out is the KV
+#: cache (238 MiB), not the prefill buffer - ub buys compute buffer, not KV.
 #: 256 is the middle point that keeps both the block and the prompt throughput,
 #: so it is the fallback. It is never a default: every rung is tried at the
 #: planned batch first, and this smaller one only after that fails.
@@ -211,8 +220,17 @@ def load_attempts(plan: Plan, *, probe: bool = False) -> list[tuple[Plan, str]]:
     ``_ffn_probe_attempts``) - and keeps the most aggressive one that loads.
     Without it the planned split is tried as given, which is what the
     in-process engine needs.
+
+    A plan that ``optimize/tuning.py`` marked ``measured`` is past that stage:
+    its split is one this machine already loaded, and the rungs above it are the
+    ones the profile was measured *from* - they were the failed candidates. They
+    are dropped whatever ``probe`` says, so the rule lives here, in the one
+    function that builds the ladder, instead of in each caller. The rungs below
+    the measured split stay: they are the graceful path for a card that lost room
+    to another process, and they cost nothing when the first attempt works.
     """
     attempts: list[tuple[Plan, str]] = []
+    probe = probe and not plan.measured
     if plan.requires_server and plan.n_layers > 0:
         if probe and plan.moe_cpu_layers >= 0:
             attempts.extend(_moe_probe_attempts(plan, _MOE_PROBE_STEPS))
@@ -253,11 +271,9 @@ def load_attempts(plan: Plan, *, probe: bool = False) -> list[tuple[Plan, str]]:
                 )
     else:
         attempts.append((plan, "planned split"))
-        hybrid_total = (
-            plan.note.split("/", 1)[1].split()[0] if plan.note.startswith("Hybrid: ") else None
-        )
         for layers in layer_ladder(plan.gpu_layers)[1:]:
-            label = f"GPU, {layers}/{hybrid_total} layers" if hybrid_total else f"GPU, {layers}"
+            # `n_layers` is the total the note spells out, without parsing it.
+            label = f"GPU, {layers}/{plan.n_layers} layers" if plan.n_layers else f"GPU, {layers}"
             attempts.append((with_gpu_layers(plan, layers), label))
 
     # CPU stages: keep the caller's context and KV type first, then reduce.

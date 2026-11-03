@@ -350,7 +350,9 @@ def start(
             if tuned is not p:
                 p = tuned
                 if announce:
-                    note(f"layers from the measured {info.alias} profile: {p.gpu_layers}")
+                    # A server plan runs -ncffn/-ncmoe, not gpu_layers: report the
+                    # note the replay wrote, not a number that plan never uses.
+                    note(f"{info.alias}: {p.note}")
 
         # Decide before the banner: an MoE plan either upgrades to llama-server
         # or falls back to the classic split, and the panel must show the truth.

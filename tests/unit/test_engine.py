@@ -616,6 +616,46 @@ def test_moe_probe_never_asks_for_a_negative_expert_layer_count():
     assert [candidate.moe_cpu_layers for candidate, _ in probed][:3] == [0, 1, 2]
 
 
+def test_a_measured_split_is_not_probed_again():
+    # `vipera bench` already walked the rungs above this split and recorded the
+    # one that loaded, so probing them again spends a spawn each on a candidate
+    # the measurement already rejected. The rule lives in load_attempts, so a
+    # caller asking for probe=True cannot bypass it.
+    plan = _plan(
+        gpu_layers=18,
+        n_layers=28,
+        n_cpu_ffn=6,
+        n_ubatch=256,
+        measured=True,
+        note="Tensor split: 22/28 dense FFN layers on GPU, attention on GPU (measured)",
+    )
+
+    probed = load_attempts(plan, probe=True)
+
+    assert probed[0][0] is plan
+    assert all("probed" not in label for _, label in probed)
+    assert probed == load_attempts(plan)
+    # The rungs below the measured split stay: they are the graceful path for a
+    # card that lost room to another process, and they cost nothing while the
+    # first attempt works.
+    assert [candidate.n_cpu_ffn for candidate, _ in probed][:4] == [6, 7, 8, 28]
+
+
+def test_a_measured_moe_split_is_not_probed_again():
+    plan = _plan(
+        gpu_layers=14,
+        moe_cpu_layers=12,
+        n_layers=24,
+        n_ubatch=896,
+        measured=True,
+        note="MoE: 12/24 expert layers on GPU (measured)",
+    )
+
+    probed = load_attempts(plan, probe=True)
+
+    assert [candidate.moe_cpu_layers for candidate, _ in probed][:4] == [12, 13, 14, 24]
+
+
 def test_resolve_backend_upgrades_a_tensor_split_plan(monkeypatch, capsys):
     monkeypatch.setattr(
         "vipera.backends.registry.find_llama_tool", lambda *a, **kw: "/bin/llama-server"
