@@ -671,7 +671,56 @@ The card barely enters into it: the `auto` plan's own flags (`-ngl 2`,
 offloaded layers of thirty-six should buy (5% of the weights, with the other
 thirty-four still streamed from RAM). The expert pool is never planned for this
 model either: `--moe-cache-mib` would need ≥ 8 GB of spare VRAM after
-placement, and this 4 GB card has none.
+placement, and the attention-on-GPU plan on this card leaves 1.50 GB (measured
+below, against a real routing trace).
+
+### Routing on gpt-oss-120b: a real trace, and why the expert pool stays off
+
+Same model and box, 39 decoded tokens captured with the `LLAMA_MOE_TRACE` patch
+(`planner/bench/llama-moe-trace.patch`), run CPU-only (`-ngl 0`) so the capture
+does not compete with the card for the 1.78 GB it reads per step. The trace is
+`planner/bench/results/gpt-oss-120b-39tok.jsonl`; `bench/trace_pool_budget.py`
+reproduces the table below from it.
+
+| what | value |
+|---|---|
+| top-k per layer | 4 of 128 experts |
+| MoE layers | 36 |
+| one expert tensor | 12.64 MiB (1.62 GB per layer) |
+| **one decode step** | **144 tensors = 1.78 GB** |
+| distinct experts per layer, 39 tokens | 35–83, mean 50.4 |
+| experts holding 95% of the mass | 43.4 per layer → 1 564 tensors ≈ 19.3 GB |
+| mean routing entropy | 0.72 (1.0 = uniform) |
+
+Dense attention-on-GPU plan (`-ngl 37`, `-ncmoe 35`, `ctx` 8192, `-ub` 512,
+q8_0 KV) leaves **1.50 GB** spare on this 4 GB card — less than one decode
+step reads, before the next prefill's compute buffers. An LRU pool of that size
+is what `--moe-cache-mib` would get, so the hit rate on the trace is the answer
+to whether it can be armed:
+
+| pool | tensors | hit rate |
+|---|---|---|
+| 128 MiB | 10 | 0.0% |
+| 512 MiB | 40 | 0.0% |
+| 832 MiB | 65 | 0.0% |
+| 1 024 MiB | 81 | 0.0% |
+| 2 048 MiB | 162 | 24.9% |
+| 4 096 MiB (the whole card) | 324 | 35.0% |
+
+The cliff sits exactly at the per-step working set. Below 144 tensors the pool
+evicts the expert the next layer is about to need, which is the "copy paid
+twice" case `_MOE_CACHE_MIN_SPARE_GB` exists to avoid; above it, every step
+after the first is largely a hit. So the 8 GB gate is not conservative on this
+model, it is correct: the plan has 1.50 GB, half the spare would be 768 MiB,
+and that measures 0%. Covering the whole working set needs ~1.8 GB of the
+card's 4 GB (crowding out the attention placement that made decode faster in
+the first place), and covering the 95%-mass set needs 19.3 GB.
+
+The capture run is the trace, not a speed measurement (1.7 t/s prefill,
+0.7 t/s decode, CPU-only). 39 tokens is one topic: the distinct-expert counts
+and the 19.3 GB only grow with more tokens, so the "does not fit" conclusion is
+the conservative direction, while the 2–4 GB hit rates are an early-session,
+best-case number.
 
 ### Self-speculation on a model bigger than RAM: `--spec-type ngram-map-k`
 
