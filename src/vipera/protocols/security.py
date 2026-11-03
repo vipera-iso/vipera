@@ -187,10 +187,16 @@ def install(
         @app.middleware("http")
         async def _require_key(request, call_next):
             path = request.url.path
+            supplied = supplied_key(request.headers)
+            authorized = supplied is not None and hmac.compare_digest(supplied.encode(), expected)
+            # Recorded for every request, including the open ones. `/health` stays
+            # reachable without a key so a probe can never be locked out, but a
+            # route may now answer differently to a caller that proved who it is:
+            # the gateway's own numbers are not a probe's business.
+            request.state.authorized = authorized
             if path in OPEN_PATHS:
                 return await call_next(request)
-            supplied = supplied_key(request.headers)
-            if supplied is None or not hmac.compare_digest(supplied.encode(), expected):
+            if not authorized:
                 return JSONResponse(
                     security_error(path, supplied is None),
                     status_code=401,

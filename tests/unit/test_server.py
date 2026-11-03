@@ -43,6 +43,46 @@ def test_health():
     assert body["optimize"]["prefix_hits"] == 0
 
 
+def test_health_without_the_key_reports_only_the_verdict():
+    # /health is open so a container probe can never be locked out. What it must
+    # not do is hand the served aliases, the cache stats and the throughput to
+    # whoever can reach the port; that is the owner's data, not a probe's.
+    client = TestClient(build_app(FakeEngine(), "test-model", api_key="secret"))
+
+    r = client.get("/health")
+
+    assert r.status_code == 200
+    assert r.json() == {"status": "ok"}
+
+
+def test_health_with_the_key_reports_everything():
+    client = TestClient(build_app(FakeEngine(), "test-model", api_key="secret"))
+
+    r = client.get("/health", headers={"Authorization": "Bearer secret"})
+
+    assert r.status_code == 200
+    body = r.json()
+    assert body["model"] == "test-model"
+    assert body["engines"] == {"test-model": "ok"}
+    assert "throughput" in body
+    assert "optimize" in body
+
+
+def test_a_broken_engine_still_reports_503_without_the_key():
+    # The reduced body is a privacy change, not a health change: a probe that
+    # cannot authenticate must still learn that the model is not serving.
+    class SickEngine(FakeEngine):
+        def health(self):
+            return "unreachable"
+
+    client = TestClient(build_app(SickEngine(), "test-model", api_key="secret"))
+
+    r = client.get("/health")
+
+    assert r.status_code == 503
+    assert r.json() == {"status": "unreachable"}
+
+
 def test_health_reports_the_engine_state_when_it_is_ok():
     class HealthyEngine(FakeEngine):
         def health(self):

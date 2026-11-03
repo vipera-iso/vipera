@@ -42,7 +42,10 @@ request gets `401` with `WWW-Authenticate: Bearer` and the envelope of the
 protocol it spoke — `{"error": {"message": …, "type": "invalid_request_error",
 "code": "missing_api_key"|"invalid_api_key"}}` under `/v1/*`, `{"error": "…"}`
 under `/api/*`. `/health` stays open for container probes and `vipera system
-doctor`.
+doctor`, but once a key is set it answers a caller without one with the verdict
+alone — `{"status": "ok"}` or `{"status": "unhealthy"}`, still `503` when an
+engine is down. The served aliases, per-engine states, cache-reuse counters and
+throughput are returned only to a caller that presents the key.
 
 CORS is off unless `cors` is configured (`"http://localhost:3000,https://app…"`
 or `*`). An allowed origin gets its headers on a `401` too, so the browser can
@@ -52,7 +55,7 @@ read the error instead of reporting a network failure.
 
 | Method | Path | Purpose |
 |---|---|---|
-| `GET` | `/health` | Liveness and active model alias. |
+| `GET` | `/health` | Liveness, plus the active model, engine states, cache reuse and throughput when the caller presents the key. |
 | `GET` | `/v1/models` | OpenAI-shaped model list (one entry per served alias). |
 | `POST` | `/v1/chat/completions` | Chat completion, streaming or not. |
 | `POST` | `/v1/embeddings` | Embeddings, when the model was loaded with `embeddings: true`. |

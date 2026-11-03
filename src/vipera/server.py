@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import asyncio
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
 from vipera import __version__
@@ -130,24 +130,37 @@ def build_app(
     )
 
     @app.get("/health")
-    def health():
+    def health(request: Request):
         """Liveness plus what the engines themselves answer.
 
         A model that is loaded but no longer serving is the failure this has to
         report: FastAPI answering while the child is wedged is not health. The
         probe never loads or restarts anything, so it is cheap to poll.
+
+        The route is open by design (see ``security.OPEN_PATHS``), so the body is
+        graded: a caller that presents the gateway's key gets the whole picture,
+        and anyone else gets the verdict alone. Which models are served, whether
+        one has stopped answering, how much of the prompt was cached and how fast
+        decode is running are the owner's business, not a probe's.
         """
         states = health_states()
         broken = {alias: state for alias, state in states.items() if state != "ok"}
         if pool is not None:
-            body = {
-                "status": "unhealthy" if broken else "ok",
-                "model": pool.default,
-                "loaded": pool.loaded_ids(),
-            }
+            status = "unhealthy" if broken else "ok"
         else:
             # Single-model: the one engine's word is the gateway's status.
-            body = {"status": next(iter(broken.values()), "ok"), "model": model_name}
+            status = next(iter(broken.values()), "ok")
+        code = 503 if broken else 200
+
+        # No key configured leaves `authorized` unset, which reads as True: an
+        # install that never asked for auth keeps every field it had before.
+        if not getattr(request.state, "authorized", True):
+            return JSONResponse({"status": status}, status_code=code)
+
+        if pool is not None:
+            body = {"status": status, "model": pool.default, "loaded": pool.loaded_ids()}
+        else:
+            body = {"status": status, "model": model_name}
         # Always present, possibly empty: the key does not appear and disappear
         # depending on whether anything happens to be loaded.
         body["engines"] = states
@@ -159,7 +172,7 @@ def build_app(
         # request, so `/health` answers "how fast is it going" without a client
         # having to time anything.
         body["throughput"] = meter.snapshot()
-        return JSONResponse(body, status_code=503 if broken else 200)
+        return JSONResponse(body, status_code=code)
 
     # Where the protocol layers record each request's timings.
     meter = Meter()
