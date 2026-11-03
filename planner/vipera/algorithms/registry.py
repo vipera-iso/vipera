@@ -27,8 +27,8 @@ status column exists to prevent.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Callable
 
 
 @dataclass(frozen=True)
@@ -201,7 +201,6 @@ def _top_by(scores: list[float], k: int) -> list[int]:
 
 def _run_select(*, items: int = 24, universe: int = 64, k: int = 6, seed: int = 5,
                 trace: str | None = None) -> dict:
-    from .select import brute_force, coverage_objective, greedy, lazy_greedy
 
     if trace:
         per_trace = _select_from_trace(trace, k)

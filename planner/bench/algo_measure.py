@@ -44,8 +44,8 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from vipera.algorithms import quant, select                     # noqa: E402
-from vipera.gguf import read_gguf                                # noqa: E402
+from vipera.algorithms import quant
+from vipera.gguf import read_gguf
 
 QK_K = 256           # super-block size for every k-quant in ggml
 Q4_K_BYTES = 144     # d(2) + dmin(2) + scales(12) + qs(128)

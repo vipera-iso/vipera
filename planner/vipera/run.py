@@ -401,7 +401,7 @@ class _Sampler:
             self._take()
             self._stop.wait(self.interval)
 
-    def start(self) -> "_Sampler":
+    def start(self) -> _Sampler:
         self._thread.start()
         return self
 

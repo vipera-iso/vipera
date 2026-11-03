@@ -132,7 +132,7 @@ class TestMain(unittest.TestCase):
             trace = os.path.join(d, "t.jsonl")
             with open(trace, "w") as f:
                 for t in range(8):
-                    f.write('{"t": %d, "layers": [[0, 1, 1], [2, 2, 3]]}\n' % t)
+                    f.write(f'{{"t": {t}, "layers": [[0, 1, 1], [2, 2, 3]]}}\n')
             out = os.path.join(d, "pf.txt")
             self.assertEqual(main([trace, "-o", out, "--target-mass", "1.0"]), 0)
             with open(out) as f:

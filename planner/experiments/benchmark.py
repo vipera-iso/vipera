@@ -26,6 +26,7 @@ Usage
     python3 experiments/benchmark.py all           # everything above, in order
 """
 import argparse
+import contextlib
 import csv
 import json
 import os
@@ -35,7 +36,7 @@ import subprocess
 import sys
 import threading
 import time
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 import yaml
@@ -121,9 +122,7 @@ def build_command(cfg, model_key, variant, arm=None, verbose=True):
     model = str(REPO / m["path"])
 
     if vdef["runner"] == "llama-bench":
-        argv = [llm_bin(cfg, "llama-bench"), "-m", model, "-p", "0",
-                "-n", str(meas["n_gen"]), "-r", "1", "-t", str(meas["threads"]),
-                "-o", "json", "-lm", lv] + list(vdef["flags"])
+        argv = [llm_bin(cfg, "llama-bench"), "-m", model, "-p", "0", "-n", str(meas["n_gen"]), "-r", "1", "-t", str(meas["threads"]), "-o", "json", "-lm", lv, *list(vdef["flags"])]
         return argv, f"{variant} {model_key} (llama-bench)"
 
     # `-st` (single turn) + stdin=/dev/null in run_one: this build has no -no-cnv flag,
@@ -142,7 +141,7 @@ def build_command(cfg, model_key, variant, arm=None, verbose=True):
         # runtime log records into the transcript, so the correctness check runs without it.
         argv.append("-v")
     if arm == "speculative":
-        argv += ["-md", str(REPO / vdef["draft"])] + list(vdef["draft_flags"])
+        argv += ["-md", str(REPO / vdef["draft"]), *list(vdef["draft_flags"])]
     return argv, f"{variant}:{arm or 'control_no_draft'} {model_key} (llama-cli)"
 
 
@@ -457,10 +456,8 @@ def acquire_lock():
 
 
 def release_lock():
-    try:
+    with contextlib.suppress(FileNotFoundError):
         LOCK.unlink()
-    except FileNotFoundError:
-        pass
 
 
 def result_path(variant):
@@ -472,7 +469,7 @@ def measure_variant(cfg, variant, models, runs):
     doc = {"variant": variant, "runner": cfg["_variant_defs"][variant]["runner"],
            "flags": cfg["_variant_defs"][variant]["flags"],
            "question": cfg["experiment"]["question"],
-           "generated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+           "generated_at": datetime.now(UTC).isoformat(timespec="seconds"),
            "measurement": cfg["measurement"], "arms": {}}
     if variant == "speculative":
         # Same runner, same session: the control arm makes this variant comparable to
@@ -488,7 +485,8 @@ def measure_variant(cfg, variant, models, runs):
     # Merge rather than overwrite: measuring one model must not delete the cells already
     # measured for the other. Only the (arm, model) cells just measured are replaced.
     if path.exists():
-        old = json.load(open(path))
+        with open(path) as fh:
+            old = json.load(fh)
         for arm, armdoc in doc["arms"].items():
             old.setdefault("arms", {}).setdefault(arm, {"models": {}})
             old["arms"][arm].setdefault("models", {}).update(armdoc["models"])
@@ -544,7 +542,8 @@ def verify(cfg, model_key, variant):
     # with the lever off, identical text is expected and proves nothing.
     lever_on = False
     if result_path(variant).exists():
-        doc = json.load(open(result_path(variant)))
+        with open(result_path(variant)) as fh:
+            doc = json.load(fh)
         blk = doc.get("arms", {}).get("speculative", {}).get("models", {}).get(model_key, {})
         lever_on = bool(blk.get("lever_engaged"))
     if not lever_on:
@@ -555,7 +554,7 @@ def verify(cfg, model_key, variant):
     else:
         verdict = "OUTPUT CHANGED - the draft altered greedy decoding"
     result = {"variant": variant, "model": model_key,
-              "generated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+              "generated_at": datetime.now(UTC).isoformat(timespec="seconds"),
               "check": "greedy output identical with and without the draft model",
               "lever_engaged": lever_on, "verdict": verdict,
               "identical": identical, "n_chars": len(arms[0]["text"]),
@@ -600,7 +599,8 @@ def load_results():
         path = result_path(variant)
         if not path.exists():
             continue
-        doc = json.load(open(path))
+        with open(path) as fh:
+            doc = json.load(fh)
         for arm, armdoc in doc.get("arms", {}).items():
             for model, block in armdoc.get("models", {}).items():
                 rows.append({"variant": variant, "arm": arm, "model": model,
@@ -806,7 +806,7 @@ def cmd_charts(args):
                 data.append([v for _, v in per_run_tok_s(blk)])
                 labels.append(f"{model}\n{cell}")
     bp = ax.boxplot(data, tick_labels=labels, patch_artist=True, widths=0.6)
-    for patch, lab in zip(bp["boxes"], labels):
+    for patch, lab in zip(bp["boxes"], labels, strict=False):
         key = lab.split("\n")[1]
         patch.set_facecolor(colors.get(key, "#999999"))
         patch.set_alpha(0.6)

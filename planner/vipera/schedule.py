@@ -43,16 +43,16 @@ class Quant:
     other_bytes: float = 1.0
 
     @classmethod
-    def fp8(cls) -> "Quant":
+    def fp8(cls) -> Quant:
         return cls(1.0, 1.0, 1.0)
 
     @classmethod
-    def q4_experts(cls) -> "Quant":
+    def q4_experts(cls) -> Quant:
         """4-bit routed experts, FP8 for everything else (the practical target)."""
         return cls(0.5, 1.0, 1.0)
 
     @classmethod
-    def q4_all(cls) -> "Quant":
+    def q4_all(cls) -> Quant:
         return cls(0.5, 0.5, 0.5)
 
     def as_dict(self) -> dict:
@@ -228,8 +228,8 @@ def plan_residency(
     arch: Architecture,
     target: Target,
     *,
-    quant: "Quant | None" = None,
-    optimizations: "Optimizations | None" = None,
+    quant: Quant | None = None,
+    optimizations: Optimizations | None = None,
 ) -> Plan:
     """Decide what is always resident, what becomes expert cache, what spills."""
     quant = quant or Quant.fp8()
@@ -238,7 +238,7 @@ def plan_residency(
     # model). Clamp to the real layer count, or `kinds` ends up shorter than
     # `n_layers` and `simulate` indexes past its end.
     n_layers = min(opt.keep_layers, arch.n_layers) if opt.keep_layers else arch.n_layers
-    n_experts = max(arch.top_k, int(round(arch.n_experts * opt.prune_experts)))
+    n_experts = max(arch.top_k, round(arch.n_experts * opt.prune_experts))
     mb = model_bytes(arch, quant, n_layers=n_layers, n_experts=n_experts)
     kinds = arch.layer_kinds()[:n_layers]
     # The dense leading blocks have no experts, so they are not part of the pool
@@ -643,14 +643,11 @@ def simulate(
     resident_vram = plan.resident_vram
     resident_ram = plan.resident_ram
     resident_spill = plan.resident_spill
-    cache_vram = plan.cache_vram
-    cache_ram = plan.cache_ram
     cache_bytes = plan.cache_bytes
     slots = plan.slots
     f_vram = plan.f_vram
     f_ram = plan.f_ram
     f_disk = plan.f_disk
-    total_experts = plan.total_experts
     expert_pool = plan.expert_pool
     expert_spill = plan.expert_spill
 
@@ -704,7 +701,7 @@ def simulate(
         measured_this = ti >= eval_start
         compute_s = 2.0 * active_eff / (target.cpu_gflops * 1e9)
         io_s = 0.0
-        for i, kind in enumerate(kinds):
+        for i, _kind in enumerate(kinds):
             lb = mb.layers[i]
             expert_cached = 0
             expert_disk = 0

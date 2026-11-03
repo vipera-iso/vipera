@@ -5,13 +5,17 @@ import tempfile
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
 
-from tests._fixture import (make_dense_gguf, make_gguf, make_gguf_with_expert_data,
-                            make_unknown_quant_gguf)
+from tests._fixture import (
+    make_dense_gguf,
+    make_gguf,
+    make_gguf_with_expert_data,
+    make_unknown_quant_gguf,
+)
+from vipera.arch import Architecture
 from vipera.cli import main
 from vipera.gguf import read_gguf
-from vipera.schedule import Quant, plan_residency
-from vipera.arch import Architecture
 from vipera.manifest import Target
+from vipera.schedule import Quant, plan_residency
 from vipera.trace import save_trace, synth_trace
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -129,7 +133,7 @@ class TestCLI(unittest.TestCase):
         self.assertLess(data["bytes_after"], data["bytes_before"])
         before = read_gguf(source).tensor("blk.1.ffn_gate_exps.weight").shape
         after = read_gguf(dest).tensor("blk.1.ffn_gate_exps.weight").shape
-        self.assertEqual(after, before[:2] + (2,), "expert dimension must shrink to 2")
+        self.assertEqual(after, (*before[:2], 2), "expert dimension must shrink to 2")
 
     def test_rewrite_needs_a_source_of_expert_order(self):
         source = os.path.join(self.tmp.name, "source.gguf")

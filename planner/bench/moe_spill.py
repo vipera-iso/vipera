@@ -156,7 +156,7 @@ def run_arm(*, binary: str, model: str, no_repack: bool, timeout: int,
             raise
     wall = time.time() - started
     code = proc.returncode
-    with open(log, "r", errors="replace") as f:
+    with open(log, errors="replace") as f:
         text = f.read()
 
     gen = GEN_RE.search(text)
@@ -322,7 +322,7 @@ def main(argv: list[str] | None = None) -> int:
               f"{'peakRSS':<10}{'anonRSS':<10}{'fileRSS':<10}{'diskRead':<11}disk/tok")
         for a in arms:
             print(f"{a['arm']:<11}{a['outcome']:<11}{a['exit_code']:<6}"
-                  f"{a['wall_s']:<8}{str(a['tok_s_generation']):<8}"
+                  f"{a['wall_s']:<8}{a['tok_s_generation']!s:<8}"
                   f"{a['peak_rss_mib']:<10}{a['peak_rss_anon_mib']:<10}"
                   f"{a['peak_rss_file_mib']:<10}{a['disk_read_mib_after_load']:<11}"
                   f"{a['disk_mib_per_token']}")

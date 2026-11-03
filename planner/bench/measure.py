@@ -111,7 +111,7 @@ class Sampler:
             self.peak.io = io
         self.samples += 1
 
-    def start(self) -> "Sampler":
+    def start(self) -> Sampler:
         self._thread.start()
         return self
 

@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import math
 
+
 # Symmetric quantization: with `bits` bits and a sign, the largest representable
 # magnitude is (2^(bits-1) - 1) steps. Same convention as ggml's Q4_0.
 def levels_for_bits(bits: int) -> int:
@@ -78,7 +79,7 @@ def quantize_rtn(
     W: list[list[float]], *, bits: int = 4, group: int | None = None
 ) -> list[list[float]]:
     """Round-to-nearest on the grid implied by `group`-sized abs-max scales."""
-    rows, cols = _validate(W)
+    _rows, cols = _validate(W)
     levels = levels_for_bits(bits)
     g = cols if group is None else group
     if g < 1:
@@ -126,7 +127,7 @@ def dense_inverse(A: list[list[float]]) -> list[list[float]]:
             if factor == 0.0:
                 continue
             Mr, Mc = M[r], M[col]
-            M[r] = [a - factor * b for a, b in zip(Mr, Mc)]
+            M[r] = [a - factor * b for a, b in zip(Mr, Mc, strict=False)]
     return [row[n:] for row in M]
 
 

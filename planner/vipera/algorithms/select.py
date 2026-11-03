@@ -27,8 +27,8 @@ and so a second objective (coverage across *sets*, not a prefix) is available.
 from __future__ import annotations
 
 import heapq
+from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
-from typing import Callable, Iterable, Sequence
 
 # A set function over a ground set of indices.
 SetFunction = Callable[[frozenset[int]], float]
@@ -114,7 +114,7 @@ def lazy_greedy(f: SetFunction, ground: Sequence[int], k: int) -> GreedyResult:
         heapq.heappush(heap, (-(v - value), e))
 
     while heap and len(chosen) < k:
-        neg_bound, e = heapq.heappop(heap)
+        _neg_bound, e = heapq.heappop(heap)
         if e in current:
             continue
         v = f(current | {e})

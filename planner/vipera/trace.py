@@ -133,7 +133,7 @@ def stats(routing: list[list[list[int]]], *, n_experts: int,
     tokens = len(routing)
     layers = len(routing[0])
     top_k = len(routing[0][0])
-    keep = max(1, int(round(n_experts * cache_fraction)))
+    keep = max(1, round(n_experts * cache_fraction))
 
     per_layer: list[LayerStats] = []
     entropies: list[float] = []
@@ -146,10 +146,7 @@ def stats(routing: list[list[list[int]]], *, n_experts: int,
                 freq[e] += 1
         total = sum(freq) or 1
         probs = [c / total for c in freq if c > 0]
-        if len(probs) > 1:
-            h = -sum(p * math.log2(p) for p in probs) / math.log2(n_experts)
-        else:
-            h = 0.0
+        h = -sum(p * math.log2(p) for p in probs) / math.log2(n_experts) if len(probs) > 1 else 0.0
         ranked = sorted(freq, reverse=True)
         coverage = sum(ranked[:keep]) / total
         entropies.append(h)

@@ -21,7 +21,7 @@ from vipera.prefetch import (
 )
 from vipera.trace import load_trace
 
-__all__ = ["build_table", "format_table", "n_experts_in", "table_stats", "main"]
+__all__ = ["build_table", "format_table", "main", "n_experts_in", "table_stats"]
 
 
 def main(argv: list[str] | None = None) -> int:

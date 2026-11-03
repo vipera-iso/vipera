@@ -151,7 +151,7 @@ def spearman(xs: list[float], ys: list[float]) -> float:
     rx, ry = ranks(xs), ranks(ys)
     n = len(xs)
     mx, my = sum(rx) / n, sum(ry) / n
-    num = sum((a - mx) * (b - my) for a, b in zip(rx, ry))
+    num = sum((a - mx) * (b - my) for a, b in zip(rx, ry, strict=False))
     den = math.sqrt(sum((a - mx) ** 2 for a in rx) * sum((b - my) ** 2 for b in ry))
     return num / den if den > 0 else 0.0
 

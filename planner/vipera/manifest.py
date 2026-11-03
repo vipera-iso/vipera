@@ -53,7 +53,7 @@ class Target:
         return max(0, self.ram_bytes - self.ram_headroom_bytes)
 
     @classmethod
-    def from_toml(cls, path: str) -> "Target":
+    def from_toml(cls, path: str) -> Target:
         import tomllib
 
         with open(path, "rb") as f:

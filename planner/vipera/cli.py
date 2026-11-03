@@ -24,49 +24,56 @@ from .arch import Architecture
 from .gguf import GGUFError, read_gguf
 from .gguf_write import expert_order, rewrite_experts
 from .launch import choose_policy, describe
-from .longcontext import DEFAULT_SINKS, describe as describe_long_context, plan_long_context
+from .longcontext import DEFAULT_SINKS, plan_long_context
+from .longcontext import describe as describe_long_context
 from .manifest import MIB, Target, dumps, plan
-from .schedule import (
-    Optimizations,
-    Quant,
-    dumps as schedule_dumps,
-    plan_residency,
-    simulate,
-)
+from .prefetch import build_table as build_prefetch_table
+from .prefetch import write_table as write_prefetch_table
 from .prune import (
-    dumps as prune_dumps,
-    gated_dumps,
     gated_prune,
     mass_curve,
     plan_from_trace,
 )
-from .prefetch import build_table as build_prefetch_table, write_table as write_prefetch_table
 from .run import (
     PREFETCH_ENV,
     build_command,
-    fit_context,
-    compare as compare_runs,
     default_binary,
     detect_gpu_backend,
+    fit_context,
     format_compare,
     format_report,
     load_manifest,
     plan_flags,
     resolve_binary,
-    run as run_model,
     supports_prefetch,
+)
+from .run import (
+    compare as compare_runs,
+)
+from .run import (
+    run as run_model,
+)
+from .schedule import (
+    Optimizations,
+    Quant,
+    plan_residency,
+    simulate,
+)
+from .schedule import (
+    dumps as schedule_dumps,
 )
 from .scoring import local_llm_16gb_score
 from .trace import (
     TraceError,
-    dumps as trace_dumps,
     global_cache_ceiling,
     load_trace,
+)
+from .trace import (
     stats as trace_stats,
+)
+from .trace import (
     validate as validate_trace,
 )
-
-MIB = 1024 * 1024
 
 
 def _fmt(n: int) -> str:
@@ -874,7 +881,8 @@ def cmd_algo_run(args: argparse.Namespace) -> int:
     than silently accepting, because the caller would otherwise believe the
     numbers were trace-driven.
     """
-    from .algorithms import get, run as run_algorithm
+    from .algorithms import get
+    from .algorithms import run as run_algorithm
 
     try:
         algorithm = get(args.name)
@@ -945,7 +953,7 @@ def _print_report_table(rows: list[dict], *, indent: int) -> None:
     cols = list(rows[0].keys())
     print(f"{pad}" + "  ".join(f"{c:>12}" for c in cols))
     for row in rows:
-        print(f"{pad}" + "  ".join(f"{str(row.get(c, '')):>12}" for c in cols))
+        print(f"{pad}" + "  ".join(f"{row.get(c, '')!s:>12}" for c in cols))
 
 
 def main(argv: list[str] | None = None) -> int:

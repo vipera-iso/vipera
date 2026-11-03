@@ -3,7 +3,6 @@ import json
 import os
 import stat
 import tempfile
-import textwrap
 import unittest
 from contextlib import redirect_stdout
 
@@ -28,13 +27,13 @@ GOOD_JSON = json.dumps(RESULTS)
 
 # Stubs are Python scripts, not shell one-liners: embedding a JSON string inside
 # `sh -c "…"` mangles the quotes and makes the test lie about what it verifies.
-STUB_OK = """\
+STUB_OK = f"""\
 #!/usr/bin/env python3
 import json, sys, time
 buf = bytearray(16 * 1024 * 1024)   # make RSS measurable
 time.sleep(0.4)
-json.dump(%s, sys.stdout)
-""" % (RESULTS,)
+json.dump({RESULTS!r}, sys.stdout)
+"""
 
 STUB_FAIL = """\
 #!/usr/bin/env python3

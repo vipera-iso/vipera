@@ -29,8 +29,8 @@ from __future__ import annotations
 from .registry import REGISTRY, Algorithm, get, list_algorithms, run
 
 __all__ = [
-    "Algorithm",
     "REGISTRY",
+    "Algorithm",
     "get",
     "list_algorithms",
     "run",

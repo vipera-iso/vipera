@@ -153,7 +153,7 @@ class TestMalformedHeader(unittest.TestCase):
     def test_header_counts_larger_than_the_file_are_rejected(self):
         for kwargs in ({"kv_count": 2 ** 62}, {"tensor_count": 2 ** 62}):
             with self.subTest(**kwargs):
-                path = self._path(f"hdr{list(kwargs)[0]}.gguf")
+                path = self._path(f"hdr{next(iter(kwargs))}.gguf")
                 make_gguf_with_bogus_counts(path, **kwargs)
                 with self.assertRaises(GGUFError) as ctx:
                     read_gguf(path)

@@ -24,6 +24,30 @@ jobs:
       # Config lives in pyproject.toml ([tool.mypy] files = ["src/vipera"]).
       - run: mypy
 
+  planner:
+    # planner/ is a second distribution with its own pyproject.toml, so it is
+    # linted and tested here with its own config. The root ruff config excludes
+    # the directory; this job is what keeps it from drifting ungated, which is how
+    # it accumulated ~100 findings with nothing to catch them.
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: planner
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: pip install ruff pytest
+      # stdlib only by design (see planner/pyproject.toml): there is nothing to
+      # install, the tests import from the working directory.
+      - run: ruff check vipera tests bench experiments
+      # No `ruff format --check` yet: this tree predates the gateway's formatter,
+      # and reformatting ~50 files belongs in its own change, not inside the
+      # commit that starts gating it.
+      - run: pytest
+
   test:
     runs-on: ${{ matrix.os }}
     strategy:

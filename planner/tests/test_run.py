@@ -12,7 +12,6 @@ from vipera.run import (
     RunFlags,
     build_command,
     detect_gpu_backend,
-    format_compare,
     format_report,
     parse_prefetch_stats,
     parse_throughput,

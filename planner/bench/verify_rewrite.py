@@ -57,7 +57,7 @@ def compare(src: str, dst: str) -> tuple[list[str], int]:
     if len(a.tensors) != len(b.tensors):
         problems.append(f"tensor count {len(a.tensors)} -> {len(b.tensors)}")
     else:
-        for ta, tb in zip(a.tensors, b.tensors):
+        for ta, tb in zip(a.tensors, b.tensors, strict=False):
             if (ta.name, ta.shape, ta.ggml_type) != (tb.name, tb.shape, tb.ggml_type):
                 problems.append(
                     f"descriptor changed: {ta.name} {ta.shape}/{ta.type_name} -> "
@@ -68,7 +68,7 @@ def compare(src: str, dst: str) -> tuple[list[str], int]:
         return problems, 0
 
     differing: list[str] = []
-    for ta, tb in zip(a.tensors, b.tensors):
+    for ta, tb in zip(a.tensors, b.tensors, strict=False):
         if ta.n_bytes != tb.n_bytes:
             differing.append(ta.name)
             continue

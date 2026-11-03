@@ -16,3 +16,33 @@ vipera = "vipera.cli:main"
 
 [tool.setuptools]
 packages = ["vipera", "vipera.algorithms"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+# The same rule selection as the gateway's ../../pyproject.toml on purpose: this
+# distribution ships from the same repository, and two standards inside one tree
+# is how a subproject drifts. The root config excludes `planner/` from *its*
+# run so that this file is the one in charge here; CI lints this directory with
+# this config rather than skipping it.
+select = ["E", "W", "F", "I", "B", "UP", "SIM", "RUF"]
+ignore = [
+    # Long lines in this code are result tables, derivation lines and measured
+    # numbers, where a break would separate a value from its label.
+    "E501",
+    # The derivations write ×, ≤, −, ∪ and ⁻¹ in comments and docstrings on
+    # purpose; the ASCII rewrite reads worse, and none of these is an identifier.
+    "RUF001",
+    "RUF002",
+    "RUF003",
+    # `l` is a layer index in the tensor maths (`routing[l][e]`). It is never
+    # mistaken for `1` here, and renaming 27 comprehensions to `layer` risks
+    # shadowing a real `layer` binding in the same scope for no readability gain.
+    "E741",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q --strict-markers"

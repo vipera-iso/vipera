@@ -252,7 +252,7 @@ def make_gguf_with_expert_data(path: str, *, block_count: int = 2, n_experts: in
     patterns: dict[tuple[int, int], int] = {}
     offsets: list[int] = []
     offset = 0
-    for name, shape in tensors:
+    for _name, shape in tensors:
         offset = (offset + alignment - 1) // alignment * alignment
         offsets.append(offset)
         n = 1
@@ -268,11 +268,11 @@ def make_gguf_with_expert_data(path: str, *, block_count: int = 2, n_experts: in
     _kv_str(buf, "general.architecture", "llama")
     _kv_u32(buf, "llama.block_count", block_count)
     _kv_u32(buf, "general.alignment", alignment)
-    for (name, shape), off in zip(tensors, offsets):
+    for (name, shape), off in zip(tensors, offsets, strict=False):
         _tensor(buf, name, shape, offset=off)
 
     data = bytearray()
-    for (name, shape), off in zip(tensors, offsets):
+    for (name, shape), off in zip(tensors, offsets, strict=False):
         pad = off - len(data)
         data += b"\x00" * pad
         n = 1

@@ -98,7 +98,7 @@ def residual(p: Distribution, q: Distribution) -> Distribution:
     the caller must fall back to the target itself.
     """
     _validate_pair(p, q)
-    r = [max(0.0, pi - qi) for pi, qi in zip(p, q)]
+    r = [max(0.0, pi - qi) for pi, qi in zip(p, q, strict=False)]
     total = math.fsum(r)
     if total <= 0:
         raise ValueError(
@@ -111,7 +111,7 @@ def residual(p: Distribution, q: Distribution) -> Distribution:
 def overlap(p: Distribution, q: Distribution) -> float:
     """``a = Σ_x min(p(x), q(x))`` — the chance position i is accepted."""
     _validate_pair(p, q)
-    return math.fsum(min(pi, qi) for pi, qi in zip(p, q))
+    return math.fsum(min(pi, qi) for pi, qi in zip(p, q, strict=False))
 
 
 def expected_accepted(
@@ -136,7 +136,7 @@ def expected_accepted(
         return 0.0
     total = 0.0
     survive = 1.0
-    for p_i, q_i in zip(target, draft):
+    for p_i, q_i in zip(target, draft, strict=False):
         survive *= overlap(p_i, q_i)
         total += survive
         if survive <= 0.0:
@@ -230,7 +230,7 @@ class DraftSweep:
 
 
 def sweep_draft_length(
-    make_position: "callable",
+    make_position: callable,
     *,
     max_k: int,
     cost_ratio: float = 0.15,

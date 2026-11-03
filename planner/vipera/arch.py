@@ -280,7 +280,7 @@ class Architecture:
     # -- config ------------------------------------------------------------
 
     @classmethod
-    def from_toml(cls, path: str) -> "Architecture":
+    def from_toml(cls, path: str) -> Architecture:
         import tomllib
 
         with open(path, "rb") as f:

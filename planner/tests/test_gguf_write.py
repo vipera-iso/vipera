@@ -2,10 +2,10 @@ import os
 import tempfile
 import unittest
 
+from tests._fixture import make_gguf_with_expert_data
 from vipera.analyze import analyze
 from vipera.gguf import GGUFError, read_gguf
 from vipera.gguf_write import expert_order, expert_slab_bytes, rewrite_experts
-from tests._fixture import make_gguf_with_expert_data
 
 
 class WriterCase(unittest.TestCase):

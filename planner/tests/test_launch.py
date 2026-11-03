@@ -109,7 +109,7 @@ class TestReadHelpers(unittest.TestCase):
             for core in range(4):
                 for _ in range(2):
                     f.write("processor\t: 0\n")
-                    f.write(f"physical id\t: 0\n")
+                    f.write("physical id\t: 0\n")
                     f.write(f"core id\t\t: {core}\n\n")
             path = f.name
         try:

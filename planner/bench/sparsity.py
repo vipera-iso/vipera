@@ -89,7 +89,7 @@ def channel_stats(energy: list[float]) -> dict:
     positive = [e if e > 0 else 0.0 for e in energy]
     descending = sorted((e / total for e in positive), reverse=True)
     n = len(descending)
-    top_decile = max(1, int(round(0.10 * n)))
+    top_decile = max(1, round(0.10 * n))
     ordered = sorted(positive)
     mid = n // 2
     median = ordered[mid] if n % 2 else 0.5 * (ordered[mid - 1] + ordered[mid])
@@ -145,7 +145,7 @@ def main(argv: list[str] | None = None) -> int:
 
     columns, kind = _columns(values, shape)
     if args.all_experts or len(columns) == 1:
-        energy = [sum(col) for col in zip(*columns)] if len(columns) > 1 else columns[0]
+        energy = [sum(col) for col in zip(*columns, strict=False)] if len(columns) > 1 else columns[0]
         note = f"all {len(columns)} experts summed (shape {shape})"
     else:
         if not 0 <= args.expert < len(columns):

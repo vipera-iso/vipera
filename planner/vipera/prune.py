@@ -131,7 +131,7 @@ def plan_at_fraction(routing: list[list[list[int]]], *, n_experts: int,
     """
     if not 0.0 < fraction <= 1.0:
         raise ValueError(f"fraction must be in (0, 1], got {fraction}")
-    keep = max(1, int(round(n_experts * fraction)))
+    keep = max(1, round(n_experts * fraction))
     counts = _layer_counts(routing, n_experts)
     layers: list[LayerKeep] = []
     for li, freq in enumerate(counts):
@@ -210,7 +210,7 @@ def mass_at_fraction(routing: list[list[list[int]]], *, n_experts: int,
     """
     if not 0.0 < fraction <= 1.0:
         raise ValueError(f"fraction must be in (0, 1], got {fraction}")
-    keep = max(1, int(round(n_experts * fraction)))
+    keep = max(1, round(n_experts * fraction))
     counts = _layer_counts(routing, n_experts)
     masses = []
     for freq in counts:

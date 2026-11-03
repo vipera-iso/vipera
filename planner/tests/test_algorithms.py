@@ -13,10 +13,8 @@ import tempfile
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
 
-from vipera.algorithms import REGISTRY, get, list_algorithms, run
-from vipera.algorithms import kv, quant, select, spec
+from vipera.algorithms import REGISTRY, get, kv, list_algorithms, quant, run, select, spec
 from vipera.cli import main
-from vipera.trace import save_trace, synth_trace
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 OLMOE_TRACE = os.path.join(REPO_ROOT, "bench", "results", "olmoe-1b-7b-511tok.jsonl")
@@ -331,7 +329,8 @@ class TestSelectSubmodular(unittest.TestCase):
         # A zero-gain step must not spend the rest of the budget: the result is
         # identical either way, and stopping is what keeps CELF's evaluation count
         # honest.
-        f = lambda _s: 0.0
+        def f(_s):
+            return 0.0
         self.assertEqual(select.greedy(f, range(10), 5).chosen, [])
         self.assertEqual(select.lazy_greedy(f, range(10), 5).chosen, [])
 
@@ -533,7 +532,8 @@ class TestAlgorithmCLI(unittest.TestCase):
         produced, so a key that cannot be rendered has to be a visible failure
         instead of a shorter report.
         """
-        from vipera.algorithms import list_algorithms, run as run_algorithm
+        from vipera.algorithms import list_algorithms
+        from vipera.algorithms import run as run_algorithm
 
         for algorithm in list_algorithms():
             with self.subTest(algorithm=algorithm.name):

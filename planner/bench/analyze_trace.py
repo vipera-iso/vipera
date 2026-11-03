@@ -37,7 +37,7 @@ def _first(d: dict, keys: tuple[str, ...]):
 def inspect(path: str) -> dict | None:
     """Print the first non-empty line so the caller can verify keys."""
     try:
-        with open(path, "r", encoding="utf-8") as f:
+        with open(path, encoding="utf-8") as f:
             for line in f:
                 if line.strip():
                     sample = json.loads(line)
@@ -57,7 +57,7 @@ def load(path: str) -> dict:
     per_layer: dict = {}
     total = 0
 
-    with open(path, "r", encoding="utf-8") as f:
+    with open(path, encoding="utf-8") as f:
         for line in f:
             line = line.strip()
             if not line:
@@ -82,7 +82,7 @@ def load(path: str) -> dict:
                 per_layer[layer] = {"tokens": [], "all_have_ids": True}
 
             if has_ids:
-                pairs = list(zip(ids, weights))
+                pairs = list(zip(ids, weights, strict=False))
             else:
                 per_layer[layer]["all_have_ids"] = False
                 pairs = list(enumerate(weights))
@@ -182,8 +182,8 @@ def report(per_layer: dict) -> None:
             if k_global >= k:
                 print(f"  prune: {k_global} experts needed for "
                       f"{MASS_TARGET:.0%} mass (>= top-k)")
-                print(f"         per-token load UNCHANGED; helps file size "
-                      f"and cache locality, NOT bytes/token")
+                print("         per-token load UNCHANGED; helps file size "
+                      "and cache locality, NOT bytes/token")
             else:
                 saved = 1 - k_global / k
                 print(f"  prune: {k_global}/{k} experts -> "

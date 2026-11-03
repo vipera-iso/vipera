@@ -16,9 +16,8 @@ import argparse
 import json
 import shutil
 import subprocess
-import sys
 import time
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 try:  # runnable both as `python3 -m bench.bench` and as a script
     from .measure import Sampler, bytes_per_token
@@ -86,7 +85,7 @@ def run_bench(binary: str, model: str, *, ngl: int | None = None, threads: int |
     cmd = build_command(binary, model, ngl=ngl, threads=threads, pp=pp, tg=tg, extra=extra or [])
 
     started = time.monotonic()
-    started_at = datetime.now(timezone.utc).isoformat()
+    started_at = datetime.now(UTC).isoformat()
     proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
     sampler = Sampler(proc.pid, interval=sample_interval, gpu=gpu).start()
     try:
@@ -173,7 +172,7 @@ def format_table(report: dict) -> str:
     for r in report.get("results", []):
         ts = r.get("avg_ts")
         ts_text = f"{ts:.2f} t/s" if isinstance(ts, (int, float)) else "n/a"
-        lines.append(f"  {str(r.get('test') or 'unknown'):<12} {ts_text}")
+        lines.append(f"  {r.get('test') or 'unknown'!s:<12} {ts_text}")
     if report.get("error"):
         lines.append(f"error         {report['error']}")
     return "\n".join(lines)

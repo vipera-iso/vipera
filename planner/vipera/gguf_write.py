@@ -28,11 +28,12 @@ has to be re-encoded, which is also why the reader records where it ends.
 from __future__ import annotations
 
 import os
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
-from typing import BinaryIO, Iterable, Mapping, Sequence
+from typing import BinaryIO
 
 from .analyze import _layer_of, is_expert_tensor
-from .gguf import DEFAULT_ALIGNMENT, GGUF, GGUFError, TensorInfo, read_gguf
+from .gguf import DEFAULT_ALIGNMENT, GGUFError, TensorInfo, read_gguf
 
 _HEADER_BYTES = 24  # magic(4) + version(4) + tensor_count(8) + kv_count(8)
 _CHUNK = 4 << 20  # copy/resize unit
@@ -199,7 +200,6 @@ def rewrite_experts(src: str, dest: str, experts: Mapping[int, Sequence[int]], *
         plans.append((t, out_shape, slabs, offset))
         offset += n_bytes
 
-    data_bytes = offset
     requested = {li for li in experts}
     found = set(report.per_layer)
     missing = sorted(requested - found)
@@ -278,4 +278,4 @@ def expert_order(routing: Iterable[Iterable[Iterable[int]]], *, n_experts: int,
     return order
 
 
-__all__ = ["RewriteReport", "rewrite_experts", "expert_order", "expert_slab_bytes"]
+__all__ = ["RewriteReport", "expert_order", "expert_slab_bytes", "rewrite_experts"]
