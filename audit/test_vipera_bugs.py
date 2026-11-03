@@ -39,7 +39,11 @@ class FakeEngine:
 
     def __init__(self, *, context=512, usage=True):
         self.calls = []
-        self.plan = types.SimpleNamespace(context=context)
+        # A real Plan, not a stand-in: `serve` reads the effective plan off the
+        # engine (`getattr(engine, "plan", None)`) and every consumer of it now
+        # reads fields a namespace has no reason to carry, so a fake here hides
+        # a regression instead of catching one.
+        self.plan = _plan(context=context)
         self.usage = usage
 
     def chat(self, messages, stream=False, **kw):
