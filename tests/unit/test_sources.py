@@ -2,6 +2,7 @@ import hashlib
 import io
 import json
 import os
+import socket
 
 import pytest
 
@@ -201,12 +202,49 @@ def test_ollama_search_lists_local_models(store):
 # -- url downloads -----------------------------------------------------------
 
 
-def _serve(monkeypatch, body: bytes) -> None:
-    """Answer every urlopen with `body`; BytesIO is already a response object."""
-    monkeypatch.setattr(url.urllib.request, "urlopen", lambda *_a, **_k: io.BytesIO(body))
+@pytest.fixture
+def public_dns(monkeypatch):
+    """Resolve every host to a public address, so no test touches real DNS."""
+
+    def _fake(host, *args, **kwargs):
+        return [(socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP, "", ("93.184.216.34", 0))]
+
+    monkeypatch.setattr(url.socket, "getaddrinfo", _fake)
 
 
-def test_url_download_writes_the_final_name_only_after_the_whole_body(monkeypatch, tmp_path):
+def _resolves_to(monkeypatch, address: str) -> None:
+    """Make the next lookup answer `address` (v4 or v6)."""
+    family = socket.AF_INET6 if ":" in address else socket.AF_INET
+
+    def _fake(host, *args, **kwargs):
+        return [(family, socket.SOCK_STREAM, socket.IPPROTO_TCP, "", (address, 0, 0, 0))]
+
+    monkeypatch.setattr(url.socket, "getaddrinfo", _fake)
+
+
+class _Opener:
+    """Stand-in for the module opener: every open() answers with `body`."""
+
+    def __init__(self, body: bytes) -> None:
+        self.body = body
+        self.seen: list = []
+
+    def open(self, request, **_kwargs):
+        self.seen.append(request)
+        if isinstance(self.body, Exception):
+            raise self.body
+        return self.body if hasattr(self.body, "read") else io.BytesIO(self.body)
+
+
+def _serve(monkeypatch, body: bytes) -> _Opener:
+    opener = _Opener(body)
+    monkeypatch.setattr(url, "_OPENER", opener)
+    return opener
+
+
+def test_url_download_writes_the_final_name_only_after_the_whole_body(
+    monkeypatch, tmp_path, public_dns
+):
     _serve(monkeypatch, b"GGUF" + b"\0" * 60)
     dest = tmp_path / "models"
     info = FileInfo(path="m.gguf", size_bytes=64)
@@ -218,7 +256,7 @@ def test_url_download_writes_the_final_name_only_after_the_whole_body(monkeypatc
     assert not list(dest.glob("*.part"))
 
 
-def test_url_download_rejects_a_short_body(monkeypatch, tmp_path):
+def test_url_download_rejects_a_short_body(monkeypatch, tmp_path, public_dns):
     # A server that answers 200 with a partial body used to leave the file at
     # the final name, where `model add` only warns and `serve start` fails.
     _serve(monkeypatch, b"GGUF" + b"\0" * 4)
@@ -232,12 +270,14 @@ def test_url_download_rejects_a_short_body(monkeypatch, tmp_path):
     assert not list(dest.glob("*.part"))
 
 
-def test_url_download_leaves_nothing_behind_when_the_connection_drops(monkeypatch, tmp_path):
+def test_url_download_leaves_nothing_behind_when_the_connection_drops(
+    monkeypatch, tmp_path, public_dns
+):
     class _Drops(io.BytesIO):
         def read(self, *args):
             raise OSError("connection reset by peer")
 
-    monkeypatch.setattr(url.urllib.request, "urlopen", lambda *_a, **_k: _Drops(b"GGUF"))
+    monkeypatch.setattr(url, "_OPENER", _Opener(_Drops(b"GGUF")))
     dest = tmp_path / "models"
     info = FileInfo(path="m.gguf", size_bytes=64)
 
@@ -248,7 +288,9 @@ def test_url_download_leaves_nothing_behind_when_the_connection_drops(monkeypatc
     assert not list(dest.glob("*.part"))
 
 
-def test_url_download_accepts_whatever_arrived_when_the_head_had_no_length(monkeypatch, tmp_path):
+def test_url_download_accepts_whatever_arrived_when_the_head_had_no_length(
+    monkeypatch, tmp_path, public_dns
+):
     # A HEAD with no Content-Length leaves size_bytes at 0, and then there is
     # nothing to compare: the body must be taken as it came rather than guessed
     # at, or every mirror that omits the header would fail to install.
@@ -260,3 +302,115 @@ def test_url_download_accepts_whatever_arrived_when_the_head_had_no_length(monke
 
     assert path.read_bytes() == b"GGUF"
     assert not list(dest.glob("*.part"))
+
+
+# -- url hardening: what the reference may point at -------------------------
+
+
+@pytest.mark.parametrize(
+    "address",
+    [
+        "127.0.0.1",  # the gateway's own port
+        "10.1.2.3",  # a private network
+        "169.254.169.254",  # cloud metadata
+        "::1",  # loopback, v6
+        "fd00::1",  # unique-local, v6
+        "0.0.0.0",  # unspecified
+    ],
+)
+def test_a_reference_that_resolves_inside_the_network_is_refused(monkeypatch, tmp_path, address):
+    _resolves_to(monkeypatch, address)
+    _serve(monkeypatch, b"GGUF")
+    dest = tmp_path / "models"
+
+    with pytest.raises(url.UnsafeURLError) as err:
+        url.download("https://mirror.example/m.gguf", FileInfo(path="m.gguf"), dest)
+
+    assert "not a public address" in str(err.value)
+    assert not dest.exists() or not any(dest.iterdir())
+
+
+def test_resolve_refuses_the_same_targets(monkeypatch):
+    # The HEAD is a request too: validating only the download would still let a
+    # caller probe an internal service through `model search <url>`.
+    _resolves_to(monkeypatch, "127.0.0.1")
+    _serve(monkeypatch, b"")
+
+    with pytest.raises(url.UnsafeURLError):
+        url.resolve("https://mirror.example/m.gguf")
+
+
+def test_a_non_http_scheme_is_refused(monkeypatch):
+    with pytest.raises(url.UnsafeURLError) as err:
+        url.resolve("file:///etc/passwd")
+
+    assert "only http/https" in str(err.value)
+
+
+def test_a_redirect_to_a_private_host_is_refused(monkeypatch):
+    # A public mirror that answers 302 towards 127.0.0.1 is the classic way past
+    # a check that only looked at the URL the user typed.
+    _resolves_to(monkeypatch, "127.0.0.1")
+    request = url.urllib.request.Request("https://mirror.example/m.gguf")
+
+    with pytest.raises(url.UnsafeURLError):
+        url._CheckedRedirect().redirect_request(
+            request, None, 302, "Found", {}, "http://127.0.0.1:8686/health"
+        )
+
+
+def test_a_redirect_to_a_public_host_is_followed(public_dns):
+    request = url.urllib.request.Request("https://mirror.example/m.gguf")
+
+    followed = url._CheckedRedirect().redirect_request(
+        request, None, 302, "Found", {}, "https://cdn.example/m.gguf"
+    )
+
+    assert followed.full_url == "https://cdn.example/m.gguf"
+
+
+# -- url hardening: how much a body may write ------------------------------
+
+
+def test_a_body_over_the_ceiling_is_stopped_mid_write(monkeypatch, tmp_path, public_dns):
+    monkeypatch.setattr(url, "MAX_DOWNLOAD_BYTES", 10)
+    _serve(monkeypatch, b"x" * 64)
+    dest = tmp_path / "models"
+
+    with pytest.raises(url.UnsafeURLError) as err:
+        url.download("https://mirror.example/m.gguf", FileInfo(path="m.gguf"), dest)
+
+    assert "byte limit" in str(err.value)
+    assert not (dest / "m.gguf").exists()
+    assert not list(dest.glob("*.part"))
+
+
+def test_a_declared_size_over_the_ceiling_is_refused_before_writing(
+    monkeypatch, tmp_path, public_dns
+):
+    monkeypatch.setattr(url, "MAX_DOWNLOAD_BYTES", 10)
+    opener = _serve(monkeypatch, b"x" * 4)
+    dest = tmp_path / "models"
+
+    with pytest.raises(url.UnsafeURLError) as err:
+        url.download("https://mirror.example/m.gguf", FileInfo(path="m.gguf", size_bytes=64), dest)
+
+    assert "does not fit" in str(err.value)
+    assert opener.seen == []  # nothing was fetched at all
+
+
+def test_resolve_refuses_a_declared_size_over_the_ceiling(monkeypatch, public_dns):
+    monkeypatch.setattr(url, "MAX_DOWNLOAD_BYTES", 10)
+
+    class _Head(io.BytesIO):
+        def __init__(self, body=b""):
+            super().__init__(body)
+            self.headers = {"Content-Length": "64"}
+
+    monkeypatch.setattr(url, "_OPENER", _Opener(b""))
+    monkeypatch.setattr(url._OPENER, "open", lambda *_a, **_k: _Head(b""))
+
+    with pytest.raises(url.UnsafeURLError) as err:
+        url.resolve("https://mirror.example/m.gguf")
+
+    assert "ceiling" in str(err.value)
