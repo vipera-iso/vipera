@@ -673,6 +673,42 @@ thirty-four still streamed from RAM). The expert pool is never planned for this
 model either: `--moe-cache-mib` would need ≥ 8 GB of spare VRAM after
 placement, and this 4 GB card has none.
 
+### Self-speculation on a model bigger than RAM: `--spec-type ngram-map-k`
+
+gpt-oss-120b Q2_K (58.3 GB, 36 layers) on the reference box, `-ngl 37 -ncmoe 35`
+(attention and KV of every layer on the card, experts in RAM), `ctx 8192`,
+`-t 4`, `-b 512`, `-ub 256`, `-fa on`, q8_0 KV. One server per arm, only
+`spec_type` changed between them, same prompt, `max_tokens` 96, temperature 0:
+
+| arm | gen t/s, each run | median |
+|---|---|---|
+| `spec_type none` | 0.65, 0.66 | **0.66** |
+| `spec_type ngram-map-k` | 1.24, 1.78, 1.78, 1.80 | **1.78** |
+
+Decode **2.7× faster** (+170%) with the n-gram drafter, and faster from the
+first request (1.24, +88%). The mechanism is the one the 7B numbers predicted,
+at a much larger multiple: 58 GB of weights on 15 GiB of RAM means every token
+waits on disk, and a verify pass that accepts several draft tokens reads the
+experts once for all of them instead of once per token.
+
+Two limits on this number:
+
+- **The prompt is the friendly case.** It asks the model to reproduce a Python
+  file, and the reply is highly self-similar. All 96 tokens landed in
+  `reasoning_content` (the final channel never opened before the budget ran
+  out), so this is a workload-level result, not a per-step acceptance rate —
+  `--spec-n` and acceptance were not instrumented through the gateway.
+- **Arms are sequential, one server each.** Reloading a 58 GB model between
+  arms leaves the page cache in a different state every time, which is why only
+  the same-state numbers are in the median. The first request on the `none`
+  server measured 1.14 t/s once; that is a different cache state and is not
+  part of the 0.66.
+
+The two `none` servers agreed to within 2% (0.65 / 0.66), so the comparison is
+quotable. Not measured here: acceptance on fresh prose (the 7B result was −1%),
+and true arm interleaving without a reload — that needs two 62 GB models
+resident at once, which does not fit in 15 GiB.
+
 ## Method
 
 ```bash
