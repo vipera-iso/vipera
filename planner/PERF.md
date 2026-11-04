@@ -33,6 +33,29 @@ byte-identical to the baseline.
 Guards: `tests/test_cache_policy.py::test_recency_list_is_only_maintained_for_lru` and
 `::test_only_the_hot_policy_ever_pins` fail if the recency-list optimisation is reverted.
 
+## Rust island (`_planner_rs`) — 2026-11-04
+
+`_zipf_sample`/`_routing` and `ExpertCache` ported to a PyO3 wheel
+(`_rs/`), as an **exact** replica — CPython's MT19937 (`init_by_array` incl.
+the 3-phase regeneration and the seed=0 `key=[0]` case, `getrandbits` with the
+shift on the last word only), the same sums in the same order.
+
+| Workload | Python → Island | Manifests |
+|---|---|---|
+| `simulate` — 512 tokens, modelled routing (glm-5.3-flash) | 4140 → **376 ms** median‑3 (11.0×) | **byte-identical** |
+
+Fallback: without the wheel, `schedule.py` silently uses the pure-Python
+original (`sch._rs = None`), so CI and users without `maturin` keep working.
+
+RNG parity verified bit-for-bit on 14 seeds incl. 0, ±2^31−1, 2^62 ORDER i64
+max: full state dump, `random()`, `getrandbits` (k=1/30/48), `_randbelow`, and
+`sample()` both pool and set paths.
+
+Guards: `tests/test_rs_island.py` — RNG/state parity, byte-identical manifests
+with the island forced off, and identical cache decisions across the three
+policies on a fixed Zipf trace. Seed types beyond int64 raise a normal
+`OverflowError` instead of silently drifting (planner seeds are small ints).
+
 ## Rejected
 
 | Idea | Baseline → Result | Verdict | Why |

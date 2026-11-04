@@ -30,6 +30,15 @@ from .arch import Architecture
 from .manifest import Target
 from .trace import global_cache_ceiling
 
+# Optional island in Rust (`_planner_rs`): an exact replica of the MT19937
+# RNG, `_zipf_sample`/`_routing` and `ExpertCache` hot paths. When the wheel
+# is importable the modelled path uses it; manifests must stay byte-identical
+# to the pure-Python fallback either way (checked by parity tests).
+try:
+    import _planner_rs as _rs
+except ImportError:  # pragma: no cover - fallback path, still the default
+    _rs = None
+
 GIB = 1024 ** 3
 MB = 1024 * 1024
 
@@ -669,14 +678,24 @@ def simulate(
     leading_dense = plan.leading_dense
     moe_n = n_layers - leading_dense
     if routing is None:
-        routing = _routing(moe_n, n_experts, arch.top_k, tokens + warmup, skew, seed)
+        if _rs is not None:
+            # Rust island replica: same Zipf table formula, same RNG draw
+            # order — manifests must be byte-identical to `_routing` below.
+            routing = _rs.routing(seed, moe_n, n_experts, arch.top_k,
+                                  tokens + warmup, skew)
+        else:
+            routing = _routing(moe_n, n_experts, arch.top_k, tokens + warmup, skew, seed)
         routing_source = f"modelled_zipf(skew={skew},seed={seed})"
     else:
         routing_source = "trace"
 
     # Expert cache over (layer, expert). `hot` adds an admission filter and a
     # pinned hot set on top of LFU (see ExpertCache).
-    cache = ExpertCache(slots, cache_policy, n_layers=moe_n, alloc=cache_alloc)
+    if _rs is not None:
+        cache = _rs.ExpertCacheRs(slots, cache_policy,
+                                  n_layers=moe_n, alloc=cache_alloc)
+    else:
+        cache = ExpertCache(slots, cache_policy, n_layers=moe_n, alloc=cache_alloc)
 
     # Per-layer accumulators, averaged over the measured (post-warmup) tokens.
     acc = [

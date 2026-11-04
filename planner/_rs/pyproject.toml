@@ -1,0 +1,12 @@
+[build-system]
+requires = ["maturin>=1.6,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "planner-rs"
+version = "0.1.0"
+requires-python = ">=3.11"
+
+[tool.maturin]
+# The wheel only ships the _planner_rs extension module.
+module-name = "_planner_rs"

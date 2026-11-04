@@ -1,0 +1,16 @@
+[package]
+name = "planner-rs"
+version = "0.1.0"
+edition = "2021"
+description = "Island: CPython-exact MT19937 RNG + _zipf_sample + ExpertCache for the vipera planner"
+
+[lib]
+name = "_planner_rs"
+crate-type = ["cdylib"]
+
+[dependencies]
+pyo3 = { version = "0.26", features = ["extension-module"] }
+indexmap = "2"
+
+[profile.release]
+opt-level = 3
