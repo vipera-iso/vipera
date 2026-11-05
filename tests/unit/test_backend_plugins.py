@@ -5,7 +5,7 @@ import types
 import pytest
 
 from vipera import config as cfg_mod
-from vipera.backends import names as names_mod
+from vipera import plugins
 from vipera.backends import registry
 from vipera.errors import BackendError
 from vipera.planner import Plan
@@ -82,19 +82,19 @@ def test_plugin_names_are_added_to_the_known_set(monkeypatch):
         "entry_points",
         lambda: types.SimpleNamespace(select=lambda group: [Entry()]),
     )
-    names_mod.plugin_names.cache_clear()
+    plugins.installed.cache_clear()
 
     try:
-        assert "vllm" in names_mod.names()
-        assert names_mod.is_known("vllm")
-        assert not names_mod.is_known("nope")
+        assert "vllm" in plugins.backend_names()
+        assert plugins.is_known_backend("vllm")
+        assert not plugins.is_known_backend("nope")
     finally:
-        names_mod.plugin_names.cache_clear()
+        plugins.installed.cache_clear()
 
 
 def test_config_accepts_a_known_plugin_name(monkeypatch):
     monkeypatch.setattr(
-        cfg_mod, "_is_known_backend", lambda name: name in {"auto", "inprocess", "vllm"}
+        cfg_mod, "is_known_backend", lambda name: name in {"auto", "inprocess", "vllm"}
     )
 
     assert cfg_mod._coerce({"backend": "vllm"})["backend"] == "vllm"

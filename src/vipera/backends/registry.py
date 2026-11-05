@@ -13,11 +13,11 @@ from pathlib import Path
 
 from vipera.backends import server as server_backend
 from vipera.backends.inprocess import Engine
-from vipera.backends.names import GROUP, names
 from vipera.backends.protocol import ChatEngine
 from vipera.errors import BackendError
 from vipera.optimizer import OptimizerError, find_llama_tool
 from vipera.planner import Plan
+from vipera.plugins import BACKEND_GROUP, backend_names
 
 # Resolved `auto` for this process: "server", "inprocess", or None (not probed).
 _AUTO_BACKEND: str | None = None
@@ -159,11 +159,11 @@ def _load_plugin(name: str):
 
     found = entry_points()
     # requires-python >= 3.11, so entry_points() always has .select.
-    selected = found.select(group=GROUP)
+    selected = found.select(group=BACKEND_GROUP)
     for entry in selected:
         if entry.name == name:
             return entry.load()
-    raise BackendError(f"unknown backend '{name}' (known: {', '.join(names())})")
+    raise BackendError(f"unknown backend '{name}' (known: {', '.join(backend_names())})")
 
 
 def create_engine(plan: Plan, model_path: str | Path, backend: str = "inprocess") -> ChatEngine:

@@ -5,12 +5,9 @@ import shutil
 import sys
 from pathlib import Path
 
-from vipera.backends.names import is_known as _is_known_backend
-from vipera.backends.names import names as backend_names
 from vipera.keepalive import parse_keep_alive
 from vipera.planner import profile_names
-from vipera.protocols.names import is_known as _is_known_protocol
-from vipera.protocols.names import names as protocol_names
+from vipera.plugins import backend_names, is_known_backend, is_known_protocol, protocol_names
 
 VIPERA_HOME = Path(os.environ.get("VIPERA_HOME") or (Path.home() / ".vipera"))
 MODELS_DIR = VIPERA_HOME / "models"
@@ -117,7 +114,7 @@ _KV_CACHE_TYPES = {"f32", "bf16", "f16", "q4_0", "q4_1", "q5_0", "q5_1", "q8_0"}
 
 # "inprocess" drives llama-cpp-python in this process; "server" runs the
 # llama-server binary as a child and talks OpenAI/SSE to it. Additional names
-# can be installed as plugins (see vipera.backends.names).
+# can be installed as plugins (see vipera.plugins).
 
 _TRUE_STRINGS = {"1", "true", "yes", "on"}
 _FALSE_STRINGS = {"0", "false", "no", "off", ""}
@@ -194,7 +191,7 @@ def _coerce(cfg: dict) -> dict:
                 file=sys.stderr,
             )
             cfg[side] = None
-    if not _is_known_backend(cfg.get("backend")):
+    if not is_known_backend(cfg.get("backend")):
         cfg["backend"] = DEFAULT_CONFIG["backend"]
     if cfg.get("profile") not in profile_names():
         cfg["profile"] = DEFAULT_CONFIG["profile"]
@@ -221,7 +218,7 @@ def _coerce(cfg: dict) -> dict:
         )
         cfg["keep_alive"] = DEFAULT_CONFIG["keep_alive"]
     requested = _split_protocols(cfg.get("protocols"))
-    known = [name for name in requested if _is_known_protocol(name)]
+    known = [name for name in requested if is_known_protocol(name)]
     for name in requested:
         if name not in known:
             print(
@@ -277,7 +274,7 @@ def _coerce_strict(cfg: dict) -> dict:
             parse_keep_alive(cfg["keep_alive"])
         except ValueError as exc:
             raise ValueError(f"keep_alive: {exc}") from exc
-    if "backend" in cfg and not _is_known_backend(cfg["backend"]):
+    if "backend" in cfg and not is_known_backend(cfg["backend"]):
         valid = ", ".join(backend_names())
         raise ValueError(f"backend: must be one of {valid}")
     if "profile" in cfg and cfg["profile"] not in profile_names():
@@ -285,7 +282,7 @@ def _coerce_strict(cfg: dict) -> dict:
         raise ValueError(f"profile: must be one of {valid}")
     if "protocols" in cfg:
         requested = _split_protocols(cfg["protocols"])
-        unknown = [name for name in requested if not _is_known_protocol(name)]
+        unknown = [name for name in requested if not is_known_protocol(name)]
         if unknown or not requested:
             valid = ", ".join(protocol_names())
             found = ", ".join(unknown) or "(empty)"

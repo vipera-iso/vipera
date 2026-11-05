@@ -90,11 +90,6 @@ C_BORDER = _P["rule"]
 C_GREEN = _P["ok"]
 C_RED = _P["error"]
 C_YELLOW = _P["warn"]
-C_SUCCESS = C_GREEN
-C_ERROR = C_RED
-C_WARN = C_YELLOW
-C_PRIMARY = C_ACCENT
-C_HIGHLIGHT = C_TEXT
 
 console = Console(highlight=False, soft_wrap=True)
 

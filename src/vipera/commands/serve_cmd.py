@@ -13,9 +13,8 @@ from vipera.hardware import detect
 from vipera.keepalive import parse_keep_alive
 from vipera.optimize.tuning import apply_tuning
 from vipera.planner import plan
+from vipera.plugins import is_known_protocol, protocol_names
 from vipera.pool import ModelPool
-from vipera.protocols.names import is_known as _is_known_protocol
-from vipera.protocols.names import names as _protocol_names
 from vipera.registry import ModelSpec, get_model, list_models
 from vipera.ui import (
     C_ACCENT,
@@ -270,12 +269,12 @@ def start(
     # Validate before loading a model: an unknown layer would otherwise fail
     # only after the (possibly minute-long) load finished.
     protocols = _protocols(protocol, cfg)
-    unknown = [name for name in protocols if not _is_known_protocol(name)]
+    unknown = [name for name in protocols if not is_known_protocol(name)]
     if unknown or not protocols:
         found = ", ".join(unknown) or "(empty)"
         console.print(
             f"[{C_RED}] ✗ Unknown protocol: {found}[/]\n"
-            f"[{C_DIM}]  available: {', '.join(_protocol_names())}[/]"
+            f"[{C_DIM}]  available: {', '.join(protocol_names())}[/]"
         )
         raise typer.Exit(1)
 
