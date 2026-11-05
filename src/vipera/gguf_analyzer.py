@@ -414,11 +414,24 @@ def _merge_analysis(parts: list[dict[str, Any]], model_path: Path) -> dict[str, 
     }
 
 
-def _analyze_single(path: str) -> dict[str, Any]:
-    """Metadata, tensor map, and size breakdown for one GGUF file."""
-    model_path = Path(path).expanduser()
-    if not model_path.is_file():
-        raise GGUFAnalysisError(f"file not found: {model_path}")
+def _open_reader(model_path: Path):
+    """Open the GGUF index, fast path first.
+
+    ``VIPERA_GGUF_READER=pkg`` forces the ``gguf`` package reader (the parity
+    test uses it) and ``=fast`` refuses to fall back. By default a fast-reader
+    failure falls through to the package, so a file that opens today still
+    opens. The fast reader skips the tokenizer vocabulary, which is 99% of the
+    old reader's time and none of this analyzer's input.
+    """
+    mode = os.environ.get("VIPERA_GGUF_READER", "").strip().lower()
+    if mode != "pkg":
+        try:
+            from vipera.gguf_fast import read_gguf
+
+            return read_gguf(str(model_path))
+        except Exception as exc:
+            if mode == "fast":
+                raise GGUFAnalysisError(f"failed to read {model_path}: {exc}") from exc
 
     try:
         from gguf import GGUFReader
@@ -428,9 +441,18 @@ def _analyze_single(path: str) -> dict[str, Any]:
         ) from exc
 
     try:
-        reader = GGUFReader(str(model_path))
+        return GGUFReader(str(model_path))
     except Exception as exc:
         raise GGUFAnalysisError(f"failed to read {model_path}: {exc}") from exc
+
+
+def _analyze_single(path: str) -> dict[str, Any]:
+    """Metadata, tensor map, and size breakdown for one GGUF file."""
+    model_path = Path(path).expanduser()
+    if not model_path.is_file():
+        raise GGUFAnalysisError(f"file not found: {model_path}")
+
+    reader = _open_reader(model_path)
 
     fields = getattr(reader, "fields", {}) or {}
     architecture = _as_text(_field_value(fields, "general.architecture"))
