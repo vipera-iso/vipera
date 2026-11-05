@@ -38,7 +38,7 @@ memory (the CLI row below is exactly that case).
 | 6 | planner (offline) | 376 ms | - | **Rust island** (done) | 4140 -> 376 ms | done |
 | 7 | plan (live) | 0.01 ms | - | none | 0 | no |
 | 8 | gateway relay | +1.30% wall | 0.8% | Rust/axum sidecar | <= 0.5% of wall | no |
-| 9 | request JSON (in/out) | **unmeasured** | - | `msgspec` (C) instead of pydantic models | unknown | experiment E1 |
+| 9 | request JSON (in/out) | **0.46 ms/request** | ~0.4 (stdlib json) | `msgspec` (C) instead of pydantic models | 1.5-2.9% of gateway overhead | no (E1 done) |
 | 10 | SSE relay per chunk | inside #8 | - | none | ~0 | no |
 | 11 | tokenize / detokenize | llama.cpp C++ | - | already C++ | 0 | no |
 | 12 | CPU quant mat-vec | 65 GB/s (part L3) | 45.4 GB/s DRAM | Rust/Zig CPU kernels | kernels already hit DRAM+L3; language changes nothing | no |
@@ -69,12 +69,14 @@ a 0.8% passthrough floor. The remaining 0.5% of wall time is not what anyone
 feels; the earlier +127% at c=4 turned out to be GPU serialization, not the
 gateway, and was corrected by measuring `-np 4` directly.
 
-**#9 JSON (experiment first).** This is the one unmeasured hot path left. FastAPI
-+ pydantic parse and re-serialize every request and every stream chunk. Before
-replacing anything, measure how many ms per request the JSON layer actually
-costs: wrap `model_validate`/`model_dump` and the SSE chunk encoder on a 2000-token
-stream. If it is under 5% of the gateway's own overhead, `msgspec` is not worth a
-rewrite; if it is 30-40%, it is the largest remaining item in the gateway.
+**#9 JSON (measured, rejected).** `tools/json_cost.py` on a 20-message request
+streaming 128 chunks: pydantic `model_validate_json` 0.019 ms, request
+re-serialize 0.036 ms, chunk encode 0.0032 ms each, **0.46 ms per request** in
+total (a stdlib `json.loads` of the same body is 0.013 ms, so pydantic's share
+is ~0.006 ms). Against a gateway overhead of 31 ms that is 1.5%; against the
+most pessimistic 16 ms it is 2.9%. The gate was 25%, so `msgspec` buys at most
+0.4 ms per request -- below measurement noise and far below owning a second
+serializer. No rewrite.
 
 **#12 CPU kernels (no).** 65 GB/s against a 45.4 GB/s DRAM read is already above
 DRAM -- the working set is partly in L3. A Rust or Zig kernel would have to beat
@@ -92,12 +94,12 @@ with extra cost. Language is the wrong axis here.
 Each one: harness -> change -> re-measure -> keep only if it clears 5% and the
 outputs stay identical. Stop the experiment when it fails twice.
 
-### E1 -- how much is JSON? (vipera, no code change to ship)
+### E1 -- how much is JSON? (done: rejected)
 
-Instrument the gateway: time `model_validate`, `model_dump`, and the SSE chunk
-encode over a fixed 2000-token streaming request, 5 runs, report ms and share of
-the gateway's own overhead. Gate to proceed to a `msgspec` spike: JSON >= 25% of
-the gateway's overhead. Output: one JSON file next to `tools/gateway_gate/`.
+`tools/json_cost.py` (median-7): 0.46 ms of JSON per request, 1.5-2.9% of the
+gateway's overhead against a 25% gate. Re-run with
+`python3 tools/json_cost.py --gateway-overhead-ms 31` after any change to the
+request or chunk models; it prints the share directly.
 
 ### E2 -- drop pynvml (vipera, new island function)
 
