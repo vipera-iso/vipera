@@ -1,0 +1,24 @@
+{
+  "_comment": "Measured on this box (GTX 1650 4 GiB, i5-11300H). Rewrite by running the commands in the note; do not edit by hand.",
+  "_source": {
+    "decode_t_s": "llama-bench -m qwen2.5-1.5b-instruct-q4_k_m.gguf -n 128 -ngl 99 -r 3 (avg_ts)",
+    "prefill_t_s": "llama-bench -m qwen2.5-1.5b-instruct-q4_k_m.gguf -p 512 -ngl 99 -r 3 (avg_ts)",
+    "bandwidth_gb_s": "GTX 1650: 6001 MHz max mem clock x2 (GDDR5) x128-bit / 8, as reported by NVML",
+    "flops_tflops": "GTX 1650 FP16: 1280 shader cores x 2 x 1.41 GHz boost / 1e6",
+    "gateway_overhead_pct": "make gate-gateway PORT=8000 CONCURRENCY=1 (median-3 of 3 runs)",
+    "gateway_floor_pct": "llama-server direct control run, same client and prompt",
+    "n_params": "llama-bench json model_n_params (the GGUF header of this file has no general.parameter_count)",
+    "bandwidth_achievable_gb_s": "vipera.cpp/build-cuda/bin/bandwidth-probe-cuda (1 GiB read kernel, best of 10)",
+    "cpu_read_gb_s": "vipera.cpp/build-cuda/bin/bandwidth-probe 4 (1 GiB read, 4 threads)"
+  },
+  "decode_t_s": 104.42,
+  "prefill_t_s": 440.55,
+  "bandwidth_gb_s": 192.0,
+  "flops_tflops": 3.61,
+  "gateway_overhead_pct": 1.3,
+  "gateway_floor_pct": 0.8,
+  "n_params": 1777088000,
+  "bandwidth_achievable_gb_s": 188.644,
+  "cpu_read_gb_s": 45.454,
+  "cpu_copy_gb_s": 39.184
+}
