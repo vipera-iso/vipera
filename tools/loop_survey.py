@@ -63,7 +63,11 @@ def main() -> int:
         os.environ.pop("VIPERA_GGUF_READER", None)
         analysis = analyze_gguf(str(model_path))
         tensors = analysis["metadata"]["tensor_count"]
-        bench(f"analyze_gguf index ({model_path.name})", tensors, lambda: analyze_gguf(str(model_path)))
+        bench(
+            f"analyze_gguf index ({model_path.name})",
+            tensors,
+            lambda: analyze_gguf(str(model_path)),
+        )
         meta = analysis["metadata"]
     else:
         analysis = None
@@ -76,6 +80,7 @@ def main() -> int:
     bench("registry.list_models", len(aliases) or 1, list_models)
 
     if meta is not None:
+
         def _plan():
             plan(
                 meta,
@@ -90,8 +95,9 @@ def main() -> int:
 
         items = max(1, meta.get("n_layers") or 1)
         bench(f"planner.plan ({meta.get('architecture')}, {items} layers)", items, _plan)
-        p = plan(meta, hw, profile="auto", ctx=2048, kv_cache="q8_0", n_batch=512,
-                 n_ubatch=0, parallel=1)
+        p = plan(
+            meta, hw, profile="auto", ctx=2048, kv_cache="q8_0", n_batch=512, n_ubatch=0, parallel=1
+        )
         info = get_model(aliases[0]) if aliases else None
         if info is not None:
             bench("optimize.apply_tuning", 1, lambda: apply_tuning(p, info.alias, hw))
@@ -102,7 +108,9 @@ def main() -> int:
             for i in range(count)
         ]
         bench(f"optimize.prefix_key ({count} msgs)", count, lambda m=messages: prefix_key(m))
-        bench(f"optimize.reusable_prefix ({count} msgs)", count, lambda m=messages: reusable_prefix(m))
+        bench(
+            f"optimize.reusable_prefix ({count} msgs)", count, lambda m=messages: reusable_prefix(m)
+        )
 
     if args.json:
         print(json.dumps(RESULTS, indent=2))

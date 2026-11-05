@@ -126,9 +126,7 @@ def test_default_mode_falls_back_for_files_the_fast_reader_rejects(monkeypatch):
 def test_real_model_analysis_is_identical(tmp_path, monkeypatch):
     # Smallest installed model: the parity claim must hold on real quant types,
     # not only on the F32 tensors the writer produces.
-    model = min(
-        (Path.home() / ".vipera" / "models").glob("*.gguf"), key=lambda p: p.stat().st_size
-    )
+    model = min((Path.home() / ".vipera" / "models").glob("*.gguf"), key=lambda p: p.stat().st_size)
     monkeypatch.setenv("VIPERA_GGUF_READER", "fast")
     fast = gguf_analyzer.analyze_gguf(str(model))
     monkeypatch.setenv("VIPERA_GGUF_READER", "pkg")
@@ -142,7 +140,7 @@ def _string_array(strings: list[str], *, wide: bool = True) -> bytes:
     out = bytearray()
     for s in strings:
         raw = s.encode()
-        out += (len(raw).to_bytes(8, "little") if wide else len(raw).to_bytes(4, "little"))
+        out += len(raw).to_bytes(8, "little") if wide else len(raw).to_bytes(4, "little")
         out += raw
     return bytes(out)
 

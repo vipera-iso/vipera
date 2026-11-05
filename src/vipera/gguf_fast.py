@@ -133,7 +133,9 @@ def _quant_sizes() -> dict[int, tuple[int, int]]:
         from gguf.constants import GGML_QUANT_SIZES
     except Exception as exc:  # pragma: no cover - gguf is a declared extra
         raise GGUFReadError(f"gguf not installed: {exc}") from exc
-    return {int(ggml_type): (int(pair[0]), int(pair[1])) for ggml_type, pair in GGML_QUANT_SIZES.items()}
+    return {
+        int(ggml_type): (int(pair[0]), int(pair[1])) for ggml_type, pair in GGML_QUANT_SIZES.items()
+    }
 
 
 class _Reader:
