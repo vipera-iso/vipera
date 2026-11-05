@@ -242,7 +242,33 @@ def test_apple_silicon_reports_unified_memory(monkeypatch):
     assert info.vram_total_gb == pytest.approx(info.ram_total_gb)
 
 
+def test_detect_reads_nvml_directly(monkeypatch):
+    from vipera import nvml
+
+    monkeypatch.setattr(nvml, "probe", lambda: ("Fake GPU", 8 * GIB, 6 * GIB))
+    _probe_only(monkeypatch, hardware._from_nvml)
+
+    info = hardware.detect()
+
+    assert info.gpu_name == "Fake GPU"
+    assert info.vram_total_gb == pytest.approx(8.0)
+    assert info.vram_free_gb == pytest.approx(6.0)
+    assert info.vram_source == "nvml"
+
+
+def test_nvml_probe_without_the_driver_library(monkeypatch):
+    from vipera import nvml
+
+    monkeypatch.setattr(nvml, "_load", lambda: None)
+
+    assert nvml.probe() is None
+
+
 def test_detect_reads_nvml(monkeypatch):
+    from vipera import nvml
+
+    # The direct probe answers first; this test is about the pynvml fallback.
+    monkeypatch.setattr(nvml, "probe", lambda: None)
     fake = types.ModuleType("pynvml")
     fake.nvmlInit = lambda: None
     fake.nvmlDeviceGetHandleByIndex = lambda index: object()

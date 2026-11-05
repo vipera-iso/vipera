@@ -453,7 +453,7 @@ decoding, you need a different serving stack.
 `hardware.detect()` reports cores and RAM via `psutil`, then asks a chain of
 probes for the GPU, most precise first:
 
-1. **NVML** (`pynvml`, from the `nvidia` extra) for NVIDIA cards.
+1. **NVML** through `ctypes` (`vipera/nvml.py`, `libnvidia-ml` / `nvml.dll`) for NVIDIA cards; `pynvml` from the `nvidia` extra is the fallback when the library will not open by name.
 2. **amdgpu sysfs** (`/sys/class/drm/card*/device`) on Linux. An APU's GTT
    window is folded in and reported as unified memory.
 3. **`rocm-smi --json`** for AMD cards whose sysfs is not readable.

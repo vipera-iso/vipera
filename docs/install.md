@@ -114,7 +114,7 @@ it in one step.
 |---|---|
 | `llama` | The inference runtime (`llama-cpp-python`). Without it Vipera cannot load a model. |
 | `gguf` | Reads layer count and parameter metadata from model files. |
-| `nvidia` | Installs `nvidia-ml-py` (the `pynvml` module) so Vipera reads NVIDIA VRAM without spawning anything. Recommended for NVIDIA cards; AMD and Intel need no Python extra. |
+| `nvidia` | Optional. Vipera reads NVIDIA VRAM through `libnvidia-ml` with `ctypes`, so this extra is only the `pynvml` fallback for a driver whose library it cannot open by name. AMD and Intel need no Python extra. |
 
 Installation can take several minutes because `llama-cpp-python` may compile
 code on your machine.

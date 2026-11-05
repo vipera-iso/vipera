@@ -34,7 +34,7 @@ memory (the CLI row below is exactly that case).
 | 2 | CLI imports + parse | 112.5 ms | ~10 | Rust/clap CLI | measured lazy ceiling 8 ms; a Rust CLI still spawns Python for the engine | no |
 | 3 | config + registry | 0.1 ms | - | none | 0 | no |
 | 4 | GGUF index parse | 2.9 ms | ~1 | **Rust island** (done, `gguf_rs`) | 4138 -> 2.9 ms | done |
-| 5 | hardware probe | 10.9 ms warm / 27 ms cold | ~7 | Rust + `libnvidia-ml` dlopen instead of pynvml | ~14 ms cold | experiment E2 |
+| 5 | hardware probe | 38.9 ms cold | ~20 (NVML init) | `ctypes` on `libnvidia-ml` instead of `pynvml` | 12.2 ms per detect | done (E2) |
 | 6 | planner (offline) | 376 ms | - | **Rust island** (done) | 4140 -> 376 ms | done |
 | 7 | plan (live) | 0.01 ms | - | none | 0 | no |
 | 8 | gateway relay | +1.30% wall | 0.8% | Rust/axum sidecar | <= 0.5% of wall | no |
@@ -58,11 +58,12 @@ the measured upside is 8 ms of a 150 ms startup -- inside the import's own noise
 coarse call per operation, byte-identical output. This is what a successful
 language replacement looks like in this codebase.
 
-**#5 hardware probe (experiment).** 14 ms of the cold cost is `import pynvml`
-(measured by `-X importtime`: 14.4 ms cumulative). A Rust function that
-`dlopen`s `libnvidia-ml.so` and reads the same fields removes the import, at the
-price of a second island to package. Small but real, and it reuses the `gguf_rs`
-pattern: one call, plain return values, Python decides when to call it.
+**#5 hardware probe (done, no Rust).** The cost was `import pynvml` at 20.1 ms,
+not the three NVML calls it wraps. `ctypes` is already in the standard library,
+so `vipera/nvml.py` makes those calls directly and the import disappears:
+`detect()` went 38.9 -> 26.6 ms median (9 runs, same machine, identical
+`HardwareInfo`). What is left is NVML's own init, which no binding removes. This
+is the cheapest case in the table: the language never had to change.
 
 **#8 gateway (no).** Already gated: a Rust sidecar was measured at <= 1.3% against
 a 0.8% passthrough floor. The remaining 0.5% of wall time is not what anyone
@@ -101,13 +102,20 @@ gateway's overhead against a 25% gate. Re-run with
 `python3 tools/json_cost.py --gateway-overhead-ms 31` after any change to the
 request or chunk models; it prints the share directly.
 
-### E2 -- drop pynvml (vipera, new island function)
+### E2 -- drop pynvml (done, `ctypes`)
 
-Add `_gguf_rs`-style `detect_gpu()` (or a small `hw_rs` module) returning
-`(name, total_gb, free_gb)` from `libnvidia-ml`; keep pynvml as the fallback and
-`VIPERA_HW_PURE=1` to force it. Gate: cold `vipera serve` startup at least 10 ms
-faster, and `HardwareInfo` identical on this machine (same fields, same values
-within 1%). Stop if the dlopen path is slower than the import.
+`vipera/nvml.py` opens `libnvidia-ml.so.1` / `nvml.dll` and calls
+`nvmlInit_v2`, `nvmlDeviceGetHandleByIndex_v2`, `nvmlDeviceGetName` and
+`nvmlDeviceGetMemoryInfo`, with the `nvmlShutdown` in a `finally`. It is
+imported inside `_from_nvml()` so a CPU-only or AMD machine never pays for
+`ctypes`. `pynvml` stays as the fallback for a driver whose library cannot be
+opened by name.
+
+Measured: `import pynvml` 20.1 ms vs `import ctypes` 2.7 ms; `detect()` median
+38.9 -> 26.6 ms over 9 cold processes. `HardwareInfo` identical:
+`GTX 1650 / 4.0 GB / 3.641846 GB free / source nvml`. On the 641 ms
+`vipera system doctor` path that is ~1.9% of wall -- it buys back the import,
+not the probe.
 
 ### E3 -- kernel track (vipera.cpp, no language)
 

@@ -196,6 +196,25 @@ def _vendor_of(backend: str, name: str) -> str:
 
 
 def _from_nvml() -> _Gpu | None:
+    # Imported here, not at module scope: CPUs and AMD cards never reach this
+    # probe and should not pay for `ctypes` on startup.
+    from vipera import nvml
+
+    reading = nvml.probe()
+    if reading is not None:
+        name, total_bytes, free_bytes = reading
+        return _Gpu(
+            name=name,
+            vendor="nvidia",
+            total_gb=total_bytes / GB,
+            free_gb=free_bytes / GB,
+            source="nvml",
+        )
+    return _from_pynvml()
+
+
+def _from_pynvml() -> _Gpu | None:
+    """Fallback for a driver whose library `vipera.nvml` could not open."""
     try:
         import pynvml
     except ImportError:
