@@ -411,7 +411,7 @@ def test_stop_removes_stale_pid_file(monkeypatch, isolated_home):
     def _gone(pid):
         raise psutil.NoSuchProcess(pid)
 
-    monkeypatch.setattr(serve_cmd.psutil, "Process", _gone)
+    monkeypatch.setattr(psutil, "Process", _gone)
 
     with pytest.raises(typer.Exit) as exc:
         serve_cmd.stop(port=8686, force=False, yes=True)
@@ -449,7 +449,7 @@ def test_stop_refuses_unrelated_process(monkeypatch, isolated_home):
     pid_file = isolated_home / "serve-8686.pid"
     pid_file.write_text("123")
     proc = FakeProcess(cmdline=("nginx", "-g", "daemon off;"))
-    monkeypatch.setattr(serve_cmd.psutil, "Process", lambda pid: proc)
+    monkeypatch.setattr(psutil, "Process", lambda pid: proc)
 
     with pytest.raises(typer.Exit) as exc:
         serve_cmd.stop(port=8686, force=False, yes=True)
@@ -464,7 +464,7 @@ def test_stop_terminates_the_gateway(monkeypatch, isolated_home):
     pid_file = isolated_home / "serve-8686.pid"
     pid_file.write_text("123")
     proc = FakeProcess()
-    monkeypatch.setattr(serve_cmd.psutil, "Process", lambda pid: proc)
+    monkeypatch.setattr(psutil, "Process", lambda pid: proc)
 
     serve_cmd.stop(port=8686, force=False, yes=True)
 
@@ -478,7 +478,7 @@ def test_stop_force_kills_after_timeout(monkeypatch, isolated_home):
     pid_file = isolated_home / "serve-8686.pid"
     pid_file.write_text("123")
     proc = FakeProcess(timeout_once=True)
-    monkeypatch.setattr(serve_cmd.psutil, "Process", lambda pid: proc)
+    monkeypatch.setattr(psutil, "Process", lambda pid: proc)
 
     serve_cmd.stop(port=8686, force=True, yes=True)
 

@@ -15,8 +15,6 @@ from __future__ import annotations
 
 import contextlib
 import json
-import urllib.error
-import urllib.request
 from collections.abc import Iterator
 from typing import Any
 
@@ -50,6 +48,10 @@ def served_models(
     None and an empty list are different answers: the first means \"no gateway\",
     the second \"a gateway that serves nothing\".
     """
+    # Local import: urllib drags in ssl and email, and `vipera serve` imports
+    # this module at startup for a probe it only runs when attaching.
+    import urllib.request
+
     request = urllib.request.Request(base_url.rstrip("/") + "/v1/models", headers=_headers(api_key))
     try:
         with urllib.request.urlopen(request, timeout=timeout) as resp:
@@ -73,6 +75,9 @@ class GatewayEngine:
         self._api_key = api_key
 
     def _post(self, path: str, body: dict, *, timeout: float):
+        import urllib.error
+        import urllib.request
+
         request = urllib.request.Request(
             self.base_url + path,
             data=json.dumps(body).encode(),

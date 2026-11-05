@@ -1,5 +1,7 @@
 import io
 import json
+import urllib.error
+import urllib.request
 
 import pytest
 
@@ -51,7 +53,7 @@ def _answer(monkeypatch, payload, *, recorded=None):
             return payload
         return _Payload(json.dumps(payload).encode())
 
-    monkeypatch.setattr(gateway.urllib.request, "urlopen", fake_urlopen)
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
 
 
 def test_served_models_reads_the_gateway_listing(monkeypatch):
@@ -136,11 +138,11 @@ def test_close_does_not_touch_the_gateway():
 
 def test_an_http_error_names_the_gateway_and_the_body(monkeypatch):
     def fake_urlopen(request, timeout=None):
-        raise gateway.urllib.error.HTTPError(
+        raise urllib.error.HTTPError(
             request.full_url, 500, "boom", {}, io.BytesIO(b"model not loaded")
         )
 
-    monkeypatch.setattr(gateway.urllib.request, "urlopen", fake_urlopen)
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
     engine = gateway.GatewayEngine("http://127.0.0.1:8686", "m")
 
     with pytest.raises(RuntimeError, match="returned 500: model not loaded"):

@@ -4,7 +4,6 @@ import socket
 import time
 from pathlib import Path
 
-import psutil
 import typer
 
 from vipera.backends.protocol import ChatEngine
@@ -509,6 +508,8 @@ def stop(
     yes: bool = typer.Option(False, "--yes", "-y", help="Do not ask for confirmation"),
 ):
     """Stop a gateway started by `vipera serve start`."""
+    import psutil  # ~10 ms of startup for a command this one does not use
+
     cfg = load_config()
     port = _resolve_option(port, cfg["port"])
     pid_file = _pid_file(port)

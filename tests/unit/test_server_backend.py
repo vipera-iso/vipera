@@ -1,4 +1,6 @@
 import json
+import urllib.error
+import urllib.request
 
 import pytest
 
@@ -113,7 +115,7 @@ def test_chat_bounds_each_child_request_with_a_timeout(monkeypatch):
         seen["timeout"] = timeout
         return _Payload({"choices": []})
 
-    monkeypatch.setattr(sb.urllib.request, "urlopen", fake_urlopen)
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
 
     engine.chat([{"role": "user", "content": "hi"}], max_tokens=4096)
 
@@ -141,19 +143,19 @@ def test_health_asks_the_child_and_reports_its_state(monkeypatch):
         def __exit__(self, *exc):
             return False
 
-    monkeypatch.setattr(sb.urllib.request, "urlopen", lambda url, timeout=None: _Ok())
+    monkeypatch.setattr(urllib.request, "urlopen", lambda url, timeout=None: _Ok())
     assert engine.health() == "ok"
 
     def _starting(url, timeout=None):
-        raise sb.urllib.error.HTTPError(url, 503, "loading", {}, None)
+        raise urllib.error.HTTPError(url, 503, "loading", {}, None)
 
-    monkeypatch.setattr(sb.urllib.request, "urlopen", _starting)
+    monkeypatch.setattr(urllib.request, "urlopen", _starting)
     assert engine.health() == "starting"
 
     def _unreachable(url, timeout=None):
-        raise sb.urllib.error.URLError("connection refused")
+        raise urllib.error.URLError("connection refused")
 
-    monkeypatch.setattr(sb.urllib.request, "urlopen", _unreachable)
+    monkeypatch.setattr(urllib.request, "urlopen", _unreachable)
     assert engine.health() == "unreachable"
 
 

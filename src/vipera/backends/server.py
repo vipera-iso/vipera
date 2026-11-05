@@ -21,8 +21,6 @@ import re
 import socket
 import subprocess
 import time
-import urllib.error
-import urllib.request
 from collections.abc import Iterator, Mapping
 from dataclasses import replace
 from pathlib import Path
@@ -671,6 +669,12 @@ class ServerEngine:
         self.plan = self._adopt_placement(plan)
 
     def _wait_ready(self, proc: subprocess.Popen, port: int) -> None:
+        # Imported here, not at module level: urllib pulls in ssl and email,
+        # which cost ~11 ms of `vipera serve` startup for a probe that only
+        # runs once a child exists.
+        import urllib.error
+        import urllib.request
+
         deadline = time.monotonic() + _START_TIMEOUT_S
         url = f"http://127.0.0.1:{port}/health"
         while time.monotonic() < deadline:
@@ -769,6 +773,9 @@ class ServerEngine:
         return f"http://127.0.0.1:{self._port}"
 
     def _post(self, path: str, body: dict, *, timeout: float):
+        import urllib.error
+        import urllib.request
+
         request = urllib.request.Request(
             self._base_url + path,
             data=json.dumps(body).encode(),
@@ -800,6 +807,9 @@ class ServerEngine:
         readiness probe needs: ``starting`` (503 while it loads), ``exited``
         (the process is gone) or ``unreachable`` (no answer on its port).
         """
+        import urllib.error
+        import urllib.request
+
         proc = self._proc
         if proc is None or proc.poll() is not None:
             return "exited"
