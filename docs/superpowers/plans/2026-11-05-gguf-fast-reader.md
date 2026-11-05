@@ -96,3 +96,22 @@ What is left of the 36 ms is the one loop that cannot be skipped: advancing over
 One correction found while writing the plan: the 4.1 s was never on the `serve`
 startup path. `tools/profile_startup.py --no-load` measures 76 ms total there
 (import 39.8, hardware probe 28.0, config 7.9, GGUF index 0.1).
+
+## Follow-up (same day): the last loop went to Rust
+
+The remaining ~25 ms was the walk over the tokenizer arrays' length prefixes. A
+small PyO3 island (`gguf_rs/`, built with `make gguf-rs`) does that walk on the
+mmap through the buffer protocol and returns the end offset; everything else
+stays in Python.
+
+| file | package gguf | Python struct | + island Rust |
+|---|---|---|---|
+| qwen2.5-1.5b Q4_K_M | 4138 ms | 36 ms | **4.9 ms** |
+| Qwen2.5-7B Q4_K_M | 4015 ms | 36 ms | **2.9 ms** |
+| hermes4-14b Q4_K_M | 4066 ms | 36 ms | **3.6 ms** |
+| q8src-imbf Q3_K_M (6.9 GB) | 4178 ms | 57 ms | **3.6 ms** |
+| gpt-oss-120b Q2_K shard 1 (49 GB) | 8234 ms | 62 ms | **6.1 ms** |
+
+All three paths return an identical `analyze_gguf` dict on all five files. The
+island is optional: without it the Python walk runs
+(`VIPERA_GGUF_FAST_PURE=1` forces that path in tests).

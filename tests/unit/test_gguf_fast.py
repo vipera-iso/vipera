@@ -135,3 +135,52 @@ def test_real_model_analysis_is_identical(tmp_path, monkeypatch):
     slow = gguf_analyzer.analyze_gguf(str(model))
     assert fast == slow
     assert fast["metadata"]["tensor_count"] > 0
+
+
+def _string_array(strings: list[str], *, wide: bool = True) -> bytes:
+    """A GGUF array of strings: `[len][bytes]` per entry, no header."""
+    out = bytearray()
+    for s in strings:
+        raw = s.encode()
+        out += (len(raw).to_bytes(8, "little") if wide else len(raw).to_bytes(4, "little"))
+        out += raw
+    return bytes(out)
+
+
+def test_rust_walk_agrees_with_the_python_walk():
+    rs = pytest.importorskip("_gguf_rs")
+    payload = _string_array(["a", "bb", "", "ccc" * 50])
+    assert rs.scan_strings(payload, 0, 4, True) == len(payload)
+    # v1 files use 32-bit length prefixes; the walk has to follow the same rule.
+    narrow = _string_array(["a", "bb"], wide=False)
+    assert rs.scan_strings(narrow, 0, 2, False) == len(narrow)
+    # A start offset, as the reader passes it.
+    assert rs.scan_strings(payload, len(_string_array(["a", "bb", ""])), 1, True) == len(payload)
+
+
+def test_rust_walk_refuses_a_length_that_runs_past_the_buffer():
+    rs = pytest.importorskip("_gguf_rs")
+    bad = (10_000).to_bytes(8, "little") + b"short"
+    with pytest.raises(ValueError):
+        rs.scan_strings(bad, 0, 1, True)
+    with pytest.raises(ValueError):
+        rs.scan_strings(b"", 0, 1, True)
+
+
+def test_island_is_used_when_installed(monkeypatch):
+    """The fast path must actually be wired, not merely importable."""
+    pytest.importorskip("_gguf_rs")
+    monkeypatch.delenv("VIPERA_GGUF_FAST_PURE", raising=False)
+    import importlib
+
+    from vipera import gguf_fast
+
+    importlib.reload(gguf_fast)
+    try:
+        assert gguf_fast._SCAN_STRINGS is not None
+        monkeypatch.setenv("VIPERA_GGUF_FAST_PURE", "1")
+        importlib.reload(gguf_fast)
+        assert gguf_fast._SCAN_STRINGS is None
+    finally:
+        monkeypatch.delenv("VIPERA_GGUF_FAST_PURE", raising=False)
+        importlib.reload(gguf_fast)

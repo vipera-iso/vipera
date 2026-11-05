@@ -1,0 +1,15 @@
+[package]
+name = "gguf-rs"
+version = "0.1.0"
+edition = "2021"
+description = "Island: walk a GGUF string array to find where it ends, without decoding it"
+
+[lib]
+name = "_gguf_rs"
+crate-type = ["cdylib"]
+
+[dependencies]
+pyo3 = { version = "0.26", features = ["extension-module"] }
+
+[profile.release]
+opt-level = 3

@@ -4,7 +4,21 @@ RSVG ?= rsvg-convert
 VHS ?= vhs
 FFMPEG ?= ffmpeg
 
-.PHONY: assets assets-vectors demo favicon verify clean-assets
+.PHONY: assets assets-vectors demo favicon verify clean-assets gate-gateway gguf-rs
+
+## How much wall time the gateway adds, at 1/8/32/64 streams. Needs a running
+## `vipera serve`; writes one JSON per level under tools/gateway_gate/.
+PORT ?= 8000
+CONCURRENCY ?= 1 8 32 64
+gate-gateway:
+	$(PY) tools/gateway_gate.py --port $(PORT) --concurrency $(CONCURRENCY)
+
+## Build the optional GGUF string-array island into the current virtualenv.
+## Without it `gguf_fast` falls back to the Python walk: correct, ~25 ms slower.
+MATURIN ?= maturin
+VENV ?= .venv
+gguf-rs:
+	cd gguf_rs && VIRTUAL_ENV=$(CURDIR)/$(VENV) ../$(VENV)/bin/$(MATURIN) develop --release
 
 ## Regenerate every asset: rasters, favicon, demo GIF.
 assets: assets-vectors favicon demo

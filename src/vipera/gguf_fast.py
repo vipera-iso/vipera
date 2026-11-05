@@ -23,8 +23,28 @@ Unknown or malformed files raise `GGUFReadError`; the caller falls back to
 from __future__ import annotations
 
 import mmap
+import os
 import struct
+from collections.abc import Callable
 from typing import Any
+
+
+def _load_scan_strings() -> Callable[..., int] | None:
+    """The Rust island for the string-array walk, when it is installed.
+
+    `VIPERA_GGUF_FAST_PURE=1` forces the Python loop, which the parity test uses.
+    A missing module is not an error: the walk is ~25 ms, not correctness.
+    """
+    if os.environ.get("VIPERA_GGUF_FAST_PURE"):
+        return None
+    try:
+        from _gguf_rs import scan_strings
+    except Exception:
+        return None
+    return scan_strings
+
+
+_SCAN_STRINGS = _load_scan_strings()
 
 _MAGIC = b"GGUF"
 
@@ -164,9 +184,18 @@ class _Reader:
 
             if item == _STRING:
                 # Skipped, but the end is only known by walking the lengths.
-                # This is the one loop left that runs per vocabulary entry, so
-                # it keeps no bounds check per item: the final `_need` covers
-                # the whole walk, and a bad length lands past the file there.
+                # This is the one loop left that runs per vocabulary entry:
+                # ~400k entries on a real model, which is what the Rust island
+                # exists for. The Python branch stays as the fallback and keeps
+                # no bounds check per item -- the final `_need` covers the walk.
+                if _SCAN_STRINGS is not None:
+                    try:
+                        end = int(_SCAN_STRINGS(buf, pos, count, wide))
+                    except Exception as exc:
+                        raise GGUFReadError(f"unreadable string array: {exc}") from exc
+                    if end > self.size:
+                        raise GGUFReadError("string array runs past the end of the file")
+                    return _SKIP, end
                 step = 8 if wide else 4
                 unpack = _U64 if wide else _U32
                 end = pos
