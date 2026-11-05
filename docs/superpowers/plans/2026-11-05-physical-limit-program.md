@@ -39,12 +39,18 @@ spread), and record the raw JSON next to the harness.
 | hardware probe | 10.9 ms | ~7 ms | 1.6x | driver bound |
 | plan | 0.01 ms | - | - | done |
 
-The CLI line is the only CPU stage with room. What is in it: `typer` 26 ms,
-`rich` 16 ms, the shared `vipera` tree ~50 ms, and the remainder is click's
-parsing. Deferring the model sources and psutil (done, commit `ba6cebc`) took it
-from 165 to 147 ms; the next step is loading only the invoked command module,
-which the measurement says is worth the ~28 ms that `model_cmd` + `chat_cmd`
-currently cost every command.
+The CLI line is the only CPU stage with room. What is in it (median-5, separate
+processes): bare interpreter 9.9 ms, `import vipera.cli` 112.5 ms, click group
+build 3.9 ms more. Of the 112.5, only 8 ms is the four command modules the
+invoked command does not need: `serve_cmd` alone imports in 104.5 ms, so typer
+26 ms, rich 16 ms, the backends tree and the rest are shared by every command.
+
+**A lazy command registry is therefore not worth it**: its ceiling is 8 ms
+(5% of startup, and inside the 103-112 ms run-to-run spread of the import alone),
+paid for by restructuring typer registration, the root `--help` still having to
+import everything, and every test that drives `CliRunner(vipera.cli.app)`.
+What did pay was the eager `vipera.sources`/`psutil` chain (commit `ba6cebc`),
+which was 28 ms of that shared tree and is now gone.
 
 ### vipera -- GPU stages (llama-bench, `-ngl 99`, Qwen2.5-1.5B Q4_K_M)
 
@@ -127,8 +133,10 @@ Ranked by (gap to floor) x (how much of a request it touches):
    whether t/s scales as 1/bytes -- if it does, the loss is not in the mat-vec;
    (c) only then touch kernel code (vector width, `__dp4a`, fused dequant).
    Gate: >= 5% on `llama-bench` decode, identical logits on a fixed prompt.
-2. **CLI startup (vipera).** Load only the invoked command module. Gate: `vipera
-   serve --help` under 120 ms and every `--help` still lists every command.
+2. **CLI startup (vipera) -- closed, not worth it.** Measured ceiling 8 ms for a
+   lazy command registry (see above), under both the 5% rule and the noise band.
+   The remaining ~90 ms is typer + rich + the shared package, i.e. the price of
+   the CLI's own UX, and cutting it is a product decision, not an optimization.
 3. **Prefill dequant path.** Only after 1: measure F16 prefill on the same card
    to see whether the 43% is dequant or a real compute wall. If dequant, it is
    the same fix as 1.
