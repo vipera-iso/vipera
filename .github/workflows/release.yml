@@ -25,9 +25,36 @@ jobs:
           name: dist
           path: dist/
 
+  island:
+    # The optional accelerator (`pip install "vipera-ai[gguf-rs]"`). It ships as
+    # its own distribution because a wheel carrying a compiled extension has to
+    # be built per platform, and `vipera-ai` itself must stay pure Python.
+    name: Build gguf_rs wheel (${{ matrix.target }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-latest, target: x86_64-unknown-linux-gnu }
+          - { os: macos-latest, target: aarch64-apple-darwin }
+          - { os: macos-13, target: x86_64-apple-darwin }
+          - { os: windows-latest, target: x86_64-pc-windows-msvc }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: PyO3/maturin-action@v1
+        with:
+          working-directory: gguf_rs
+          target: ${{ matrix.target }}
+          manylinux: auto
+          args: --release --out dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: island-${{ matrix.target }}
+          path: gguf_rs/dist/*.whl
+
   publish:
     name: Publish to PyPI
-    needs: build
+    needs: [build, island]
     runs-on: ubuntu-latest
     environment:
       name: pypi
@@ -39,6 +66,13 @@ jobs:
         with:
           name: dist
           path: dist/
+      # The island wheels go to PyPI alongside `vipera-ai`, so the `gguf-rs`
+      # extra resolves the moment the release is out.
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: island-*
+          path: dist/
+          merge-multiple: true
       - uses: pypa/gh-action-pypi-publish@release/v1
         with:
           # A project-scoped API token beats a half-configured trusted

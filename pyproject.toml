@@ -42,6 +42,10 @@ dependencies = [
 # prefix, so a follow-up turn only prefills its new tokens.
 llama  = ["llama-cpp-python>=0.3.36"]
 gguf   = ["gguf>=0.10"]
+# Optional accelerator: walking a GGUF tokenizer array in Rust turns a 36 ms
+# `vipera model inspect` into ~3 ms. Without it the Python walk runs; nothing
+# breaks, it is just slower. Built from gguf_rs/ (see make gguf-rs).
+gguf-rs = ["vipera-gguf-rs>=0.1,<0.2"]
 nvidia = ["nvidia-ml-py>=12"]
 dev   = [
     "pytest>=8",

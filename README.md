@@ -55,7 +55,7 @@ numbers in comments, [`docs/benchmarks.md`](docs/benchmarks.md) carries the runs
 > unrelated PDF tool. Step-by-step help: [installation guide](docs/install.md).
 
 ```bash
-pip install "vipera-ai[llama,gguf,nvidia]"   # llama-cpp-python builds for your platform
+pip install "vipera-ai[llama,gguf,nvidia,gguf-rs]"   # llama-cpp-python builds for your platform
 vipera model search                          # fetch a GGUF from Hugging Face
 vipera serve start                           # → http://127.0.0.1:8686/v1
 ```

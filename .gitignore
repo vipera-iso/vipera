@@ -62,3 +62,7 @@ skills-lock.json
 # Generated source dump and editor backups; see docs/design/repo-structure.md
 fullcode.md
 *.bak
+
+# Rust island build output (gguf_rs/)
+gguf_rs/target/
+dist-island/
