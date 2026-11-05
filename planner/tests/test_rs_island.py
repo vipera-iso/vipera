@@ -32,8 +32,10 @@ def _py_randbelow(px: random.Random, n: int) -> int:
 class TestRsRandomParity(unittest.TestCase):
     """The RNG behind byte-identical manifests: same state, same draws."""
 
-    SEEDS = [0, 1, 42, 7, 12345, 2**31 - 1, 2**32, 2**62,
-             9223372036854775807, -(2**31), -1, 999, 65535]
+    # a tuple, not a list: a mutable class attribute is shared state the tests
+    # could edit from one case into the next
+    SEEDS = (0, 1, 42, 7, 12345, 2**31 - 1, 2**32, 2**62,
+             9223372036854775807, -(2**31), -1, 999, 65535)
 
     def test_state_dump(self):
         for s in self.SEEDS:
