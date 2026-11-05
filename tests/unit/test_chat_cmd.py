@@ -2,6 +2,7 @@ import builtins
 import types
 from pathlib import Path
 
+import psutil
 import pytest
 import typer
 
@@ -415,7 +416,7 @@ def test_other_servers_names_running_children_only(monkeypatch):
         Proc(["/usr/bin/python", "-m", "vipera", "serve", "start"]),
         Proc(["/home/u/.vipera/bin/llama-server", "--help"]),
     ]
-    monkeypatch.setattr(chat_cmd.psutil, "process_iter", lambda attrs=None: procs)
+    monkeypatch.setattr(psutil, "process_iter", lambda attrs=None: procs)
 
     assert [port for port, _ in chat_cmd._other_servers()] == ["50973"]
 

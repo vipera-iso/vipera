@@ -26,8 +26,6 @@ from vipera.optimizer import (
     unique_output_path,
 )
 from vipera.registry import add_model, get_model, list_models, remove_model
-from vipera.sources import for_ref
-from vipera.sources import hf as hf_source
 from vipera.ui import (
     C_ACCENT,
     C_DIM,
@@ -313,6 +311,10 @@ def import_model(
     ),
 ):
     """Import a .gguf from a path, or download one from a source."""
+    # Imported here, not at module level: `vipera.sources` pulls urllib and ssl,
+    # ~20 ms that `vipera serve` (which imports every command module) never uses.
+    from vipera.sources import for_ref
+
     # Direct callers pass the OptionInfo default, not a string.
     alias_name = name if isinstance(name, str) and name else None
     want = file if isinstance(file, str) and file else None
@@ -384,6 +386,8 @@ def import_model(
 
 def _fetch_and_register(repo: str, file) -> None:
     """Download one file from `repo`, register it and make it the default."""
+    from vipera.sources import hf as hf_source
+
     console.print(f"\n[{C_ACCENT}] ▸ Downloading: {file.path}[/]")
     try:
         downloaded_path = hf_source.download(repo, file, MODELS_DIR)
@@ -430,6 +434,8 @@ def fetch_starter() -> None:
         f"[{C_ACCENT}] ▸ no model chosen, fetching the starter model "
         f"[{C_TEXT}]{STARTER_REPO.split('/')[-1]}[/]"
     )
+    from vipera.sources import hf as hf_source
+
     with console.status(f"[{C_ACCENT}] Resolving {STARTER_REPO}…"):
         try:
             files = hf_source.resolve(STARTER_REPO)
@@ -461,6 +467,8 @@ def search_model(
         if not query:
             return
 
+    from vipera.sources import hf as hf_source
+
     with console.status(f"[{C_ACCENT}] Searching for '{query}'…"):
         try:
             models = hf_source.search(query, limit=10)
@@ -491,6 +499,8 @@ def search_model(
             if choice < 1 or choice > len(models):
                 raise typer.Exit(1)
             selected_repo = models[choice - 1].ref
+
+    from vipera.sources import hf as hf_source
 
     with console.status(f"[{C_ACCENT}] Fetching files…"):
         try:

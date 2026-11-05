@@ -2,7 +2,6 @@ import os
 import re
 from typing import Any, Protocol
 
-import psutil
 import typer
 
 from vipera.backends import gateway
@@ -59,6 +58,8 @@ def _other_servers() -> list[tuple[str, str]]:
     right but silent, and on a 62 GB model it is the difference between 1.8 and
     0.6 t/s - so the number needs a name attached to it.
     """
+    import psutil  # ~10 ms; `vipera serve` imports this module but never asks
+
     found: list[tuple[str, str]] = []
     for proc in psutil.process_iter(["cmdline"]):
         try:

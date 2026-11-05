@@ -416,17 +416,20 @@ class _NotAConsole:
 
 def _fake_hf(monkeypatch, files, seen):
     """Wire the hf source to a canned repo list and a no-op download."""
+    # The command imports this lazily, so the patch goes on the source module
+    # itself rather than on an attribute of the command module.
+    from vipera.sources import hf as hf_source
     from vipera.sources.protocol import SearchResult
 
     monkeypatch.setattr(
-        model_cmd.hf_source,
+        hf_source,
         "search",
         lambda query, limit=10: [
             SearchResult(ref="org/first-gguf"),
             SearchResult(ref="org/second-gguf"),
         ][:limit],
     )
-    monkeypatch.setattr(model_cmd.hf_source, "resolve", lambda ref: files)
+    monkeypatch.setattr(hf_source, "resolve", lambda ref: files)
 
     def fake_download(ref, file, dest):
         seen["download"] = (ref, file.path)
@@ -435,7 +438,7 @@ def _fake_hf(monkeypatch, files, seen):
         path.write_bytes(b"gguf")
         return path
 
-    monkeypatch.setattr(model_cmd.hf_source, "download", fake_download)
+    monkeypatch.setattr(hf_source, "download", fake_download)
     monkeypatch.setattr(
         model_cmd, "_read_meta", lambda path, name=None: {"size_bytes": 4, "quant": "Q4_K_M"}
     )
